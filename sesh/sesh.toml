@@ -1,0 +1,14 @@
+# Internal pane storage is not a project workspace.
+blacklist = ["__parked", "__workspace_bootstrap"]
+sort_order = ["zoxide", "tmux", "config"]
+
+[tui]
+show_icons = false
+show_windows = true
+
+[[session]]
+name = "main"
+path = "~"
+
+[[wildcard]]
+pattern = "~/untitled folder/Projects/*"

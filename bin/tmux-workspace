@@ -1,0 +1,1105 @@
+#!/usr/bin/env python3
+"""Personal tmux controls and private, allowlisted workspace recovery."""
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+ROOT = Path(os.environ.get('TMUX_WORKSPACE_STATE_DIR', Path.home() / '.local/state/tmux-workspace')).expanduser()
+SELF = str(Path(__file__).resolve())
+TMUX = shutil.which('tmux') or '/opt/homebrew/bin/tmux'
+PARKING = '__parked'
+APP_COMMANDS = {'claude': ['claude', '--resume'], 'codex': ['codex', 'resume'], 'omp': ['omp', '--resume'], 'nvim': ['nvim', '-S']}
+SEP = '\x1f'
+os.umask(0o077)
+PROJECTS_ROOT = (Path.home() / 'untitled folder/Projects').resolve()
+
+
+def tm(*args, check=True):
+    return subprocess.run([TMUX, *map(str, args)], capture_output=True, text=True, check=check).stdout.rstrip('\n')
+
+
+def option(name, target=None):
+    args = ['show-options', '-qv']
+    args += ['-p', '-t', target] if target else ['-g']
+    return tm(*args, name, check=False)
+
+
+def put(name, value, target=None):
+    tm('set-option', *(['-p', '-t', target] if target else ['-g']), name, str(value))
+
+
+def fields(command, names, *args):
+    output = tm(command, *args, '-F', SEP.join('#{' + name + '}' for name in names))
+    if not output:
+        return []
+    rows = []
+    for line in output.splitlines():
+        values = line.split(SEP)
+        if len(values) != len(names):
+            raise ValueError('A workspace name or directory contains unsupported control characters')
+        rows.append(dict(zip(names, values)))
+    return rows
+
+
+def panes():
+    return fields('list-panes', ['session_id', 'session_name', 'window_id', 'window_index', 'pane_id', 'pane_index', 'pane_pid', 'pane_current_path', 'pane_active', 'pane_dead', 'pane_tty', 'pane_current_command'], '-a')
+
+
+def pane_info(pane):
+    return next(p for p in panes() if p['pane_id'] == pane)
+
+
+def message(text):
+    if os.environ.get('TMUX'):
+        tm('display-message', text, check=False)
+    else:
+        print(text)
+
+
+def atomic(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+@contextlib.contextmanager
+def lock():
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ROOT.chmod(0o700)
+    with (ROOT / 'lock').open('a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        yield
+
+
+def identity(pane):
+    value = option('@workspace_id', pane)
+    if not re.fullmatch(r'[0-9a-f]{32}', value):
+        value = uuid.uuid4().hex
+        put('@workspace_id', value, pane)
+    return value
+
+
+def clean_label(value):
+    value = ''.join(c for c in value if c.isprintable()).strip()
+    return value[:80] or 'shell'
+
+
+def set_label(pane, value):
+    value = clean_label(value)
+    put('@workspace_label', value, pane)
+
+
+def ask_label(pane, initial='shell'):
+    try:
+        label = input('Pane label [' + initial + ']: ').strip() or initial
+    except (EOFError, KeyboardInterrupt):
+        label = initial
+        print()
+    set_label(pane, label)
+
+
+def process_table():
+    result = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,tpgid=,lstart='], capture_output=True, text=True, check=True)
+    table = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) == 5:
+            try:
+                table[int(parts[0])] = (int(parts[1]), int(parts[2]), int(parts[3]), parts[4].strip())
+            except ValueError:
+                pass
+    return table
+
+
+def live_app(pane, table):
+    raw = option('@workspace_app', pane['pane_id'])
+    if not raw:
+        return None
+    try:
+        app = json.loads(raw)
+        pid = int(app['pid'])
+        proc = table.get(pid)
+        if not proc or proc[3] != app['birth'] or app['kind'] not in APP_COMMANDS:
+            return None
+        # A stopped/background job is not what the user is currently running.
+        if proc[2] > 0 and proc[1] != proc[2]:
+            return None
+        ancestor = pid
+        seen = set()
+        while ancestor and ancestor not in seen:
+            if ancestor == int(pane['pane_pid']):
+                break
+            seen.add(ancestor)
+            ancestor = table.get(ancestor, (0,))[0]
+        else:
+            return None
+        if not isinstance(app.get('id'), str) or not app['id']:
+            return {'kind': app['kind'], 'error': 'No exact conversation identity was recorded'}
+        return app
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def snapshot(force=False):
+    with lock():
+        if option('@workspace_restoring') == '1':
+            return
+        now = time.time()
+        try:
+            last = json.loads((ROOT / 'latest.json').read_text())
+            if not force and now - last['saved_at'] < 300:
+                return
+        except (FileNotFoundError, ValueError, KeyError):
+            pass
+        all_panes = panes()
+        if not all_panes:
+            return
+        table = process_table()
+        agent_hooks = runpy.run_path(str(Path.home() / '.local/lib/tmux-workspace/agent-hook.py'))
+        snapshot_id = str(time.time_ns())
+        directory = ROOT / 'snapshots' / snapshot_id
+        directory.mkdir(parents=True, mode=0o700)
+        saved_panes = []
+        for pane in all_panes:
+            if pane['session_name'] == '__workspace_bootstrap':
+                continue
+            pid = pane['pane_id']
+            uid = identity(pid)
+            app = live_app(pane, table)
+            codex = agent_hooks['resolve_codex'](
+                int(pane['pane_pid']), pane['pane_tty'],
+                tm('display-message', '-p', '-t', pid, '#{pane_title}'), pane['pane_current_path'])
+            if codex:
+                app = codex
+            elif not app and pane['pane_current_command'] in APP_COMMANDS:
+                app = {'kind': pane['pane_current_command'], 'error': 'Active application has no verified conversation/session identity'}
+            if app and app.get('kind') == 'nvim' and app.get('socket'):
+                result = subprocess.run(['nvim', '--server', app['socket'], '--remote-expr', "luaeval(\"require('custom.tmux_workspace').save()\")"], capture_output=True, text=True, timeout=10)
+                if result.returncode != 0 or not Path(app['id']).is_file():
+                    app = {'kind': 'nvim', 'error': 'Could not save the active Neovim session'}
+            record = {
+                'id': uid, 'session': pane['session_name'], 'window': int(pane['window_index']),
+                'index': int(pane['pane_index']), 'label': option('@workspace_label', pid) or 'shell',
+                'cwd': pane['pane_current_path'], 'active': pane['pane_active'] == '1',
+                'parked': option('@workspace_parked', pid), 'home': option('@workspace_home', pid),
+                'app': app,
+            }
+            if record['session'] == PARKING and not record['parked']:
+                continue
+            # Plain text deliberately excludes executable terminal escape sequences.
+            content = tm('capture-pane', '-p', '-J', '-S', '-', '-t', pid, check=False)
+            atomic(directory / (uid + '.txt'), content + '\n')
+            saved_panes.append(record)
+        windows = fields('list-windows', ['session_name', 'window_index', 'window_name', 'window_layout', 'window_active', 'window_width', 'window_height', 'window_zoomed_flag'], '-a')
+        windows = [w for w in windows if any(p['session'] == w['session_name'] and p['window'] == int(w['window_index']) for p in saved_panes)]
+        active = tm('display-message', '-p', '#{client_session}', check=False)
+        data = {'version': 1, 'saved_at': now, 'directory': str(directory), 'active_session': active, 'windows': windows, 'panes': saved_panes}
+        atomic(directory / 'workspace.json', json.dumps(data, indent=2))
+        atomic(ROOT / 'latest.json', json.dumps({'saved_at': now, 'path': str(directory / 'workspace.json')}))
+        put('@workspace_saved', time.strftime('%H:%M', time.localtime(now)))
+        # Keep three complete snapshots; never prune editor sessions or AI history.
+        old = sorted((ROOT / 'snapshots').iterdir(), key=lambda p: p.name, reverse=True)
+        for path in old[3:]:
+            if path.is_dir() and path.name.isdigit():
+                shutil.rmtree(path)
+    if force:
+        message('Workspace saved (layouts, labels, history, active AI/editor identities)')
+
+
+def read_snapshot():
+    try:
+        latest = json.loads((ROOT / 'latest.json').read_text())
+        path = Path(latest['path'])
+        data = json.loads(path.read_text())
+        if data['version'] != 1:
+            raise ValueError('Unsupported workspace snapshot version')
+        return path, data
+    except FileNotFoundError:
+        return None, None
+
+
+def pane_start(snapshot_path=None, uid=None):
+    pane = os.environ.get('TMUX_PANE')
+    if not pane:
+        raise ValueError('pane-start must run inside tmux')
+    if snapshot_path:
+        data = json.loads(Path(snapshot_path).read_text())
+        record = next(p for p in data['panes'] if p['id'] == uid)
+        put('@workspace_id', uid, pane)
+        set_label(pane, record['label'])
+        for key in ('parked', 'home'):
+            if record[key]:
+                put('@workspace_' + key, record[key], pane)
+        history = Path(data['directory']) / (uid + '.txt')
+        if history.is_file():
+            print('── Saved terminal text · ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(data['saved_at'])) + ' ──', flush=True)
+            text = history.read_text()
+            # Never replay control sequences from a stored terminal snapshot.
+            print(''.join(c for c in text if c in '\n\t' or c.isprintable()), end='', flush=True)
+            print('── End saved text · prior processes are not running ──', flush=True)
+        # Hold application startup until every pane/layout has been reconstructed.
+        while option('@workspace_restoring') == '1':
+            time.sleep(0.1)
+        app = record.get('app')
+        if app:
+            error = app.get('error')
+            kind = app.get('kind')
+            token = app.get('id')
+            if not error and (kind not in APP_COMMANDS or not isinstance(token, str) or not token or token.startswith('-')):
+                error = 'Missing or invalid exact recovery identity'
+            if not error and kind in ('nvim', 'omp') and token.startswith('/') and not Path(token).is_file():
+                error = 'Saved session file no longer exists: ' + token
+            if error:
+                print('Recovery needs attention: ' + error, flush=True)
+            else:
+                command = APP_COMMANDS[kind] + [token]
+                print('Reopening ' + kind + ' for pane ' + record['label'] + ' (no prompt replay).', flush=True)
+                try:
+                    result = subprocess.run(command, cwd=app.get('cwd') or record['cwd'])
+                    if result.returncode:
+                        print(f'{kind} exited with status {result.returncode}; no other conversation was substituted.', flush=True)
+                except (OSError, KeyboardInterrupt) as exc:
+                    print('Recovery needs attention: ' + str(exc), flush=True)
+    else:
+        identity(pane)
+        if not option('@workspace_label', pane):
+            ask_label(pane)
+    os.execv('/bin/zsh', ['/bin/zsh', '-l'])
+
+
+def restore(locked=False):
+    with contextlib.nullcontext() if locked else lock():
+        path, data = read_snapshot()
+        if not data:
+            return False
+        existing = {p['session_name'] for p in panes()}
+        wanted = {p['session'] for p in data['panes']} - existing
+        if not wanted:
+            return False
+        put('@workspace_restoring', '1')
+        try:
+            for name in sorted(wanted):
+                windows = sorted((w for w in data['windows'] if w['session_name'] == name), key=lambda w: int(w['window_index']))
+                sid = None
+                for window in windows:
+                    records = sorted((p for p in data['panes'] if p['session'] == name and p['window'] == int(window['window_index'])), key=lambda p: p['index'])
+                    if not records:
+                        continue
+                    first = records[0]
+                    cwd = first['cwd'] if Path(first['cwd']).is_dir() else str(Path.home())
+                    command = shlex.join([SELF, 'pane-start', str(path), first['id']])
+                    if sid is None:
+                        out = tm('new-session', '-d', '-P', '-F', '#{session_id}' + SEP + '#{window_id}' + SEP + '#{pane_id}', '-s', name, '-n', window['window_name'], '-x', window['window_width'], '-y', window['window_height'], '-c', cwd, command)
+                        sid, wid, first_pid = out.split(SEP)
+                        index = tm('display-message', '-p', '-t', wid, '#{window_index}')
+                        if index != window['window_index']:
+                            tm('move-window', '-s', wid, '-t', sid + ':' + window['window_index'])
+                    else:
+                        out = tm('new-window', '-d', '-P', '-F', '#{window_id}' + SEP + '#{pane_id}', '-t', sid + ':' + window['window_index'], '-n', window['window_name'], '-c', cwd, command)
+                        wid, first_pid = out.split(SEP)
+                    active_pane = first_pid
+                    for record in records[1:]:
+                        cwd = record['cwd'] if Path(record['cwd']).is_dir() else str(Path.home())
+                        command = shlex.join([SELF, 'pane-start', str(path), record['id']])
+                        new_pid = tm('split-window', '-d', '-h', '-P', '-F', '#{pane_id}', '-t', wid, '-c', cwd, command)
+                        tm('select-layout', '-t', wid, 'tiled')
+                        if record['active']:
+                            active_pane = new_pid
+                    tm('select-layout', '-t', wid, window['window_layout'])
+                    tm('select-pane', '-t', active_pane)
+                    if window['window_zoomed_flag'] == '1':
+                        tm('resize-pane', '-Z', '-t', active_pane)
+                    if window['window_active'] == '1':
+                        tm('select-window', '-t', wid)
+            preferred = data.get('active_session')
+            if preferred in wanted and preferred != PARKING:
+                tm('switch-client', '-t', '=' + preferred, check=False)
+        finally:
+            put('@workspace_restoring', '0')
+    return True
+
+
+def initialize():
+    # Set in the server, not in shell environment, so configuration reloads do not
+    # start duplicate timers or repeatedly restore deliberately closed sessions.
+    with lock():
+        if option('@workspace_initialized') == '1':
+            return
+        restore(locked=True)
+        put('@workspace_initialized', '1')
+        tm('run-shell', '-b', '-d', '300', shlex.join([SELF, 'tick']))
+
+
+def tick():
+    try:
+        snapshot()
+    except Exception as exc:
+        message('Workspace autosave failed: ' + str(exc))
+    finally:
+        tm('run-shell', '-b', '-d', '300', shlex.join([SELF, 'tick']), check=False)
+
+
+def park(pane):
+    current = pane_info(pane)
+    if current['session_name'] == PARKING:
+        raise ValueError('This pane is already parked')
+    siblings = [p for p in panes() if p['window_id'] == current['window_id']]
+    if len(siblings) == 1:
+        raise ValueError('This is the only pane. Create a split first, or switch windows.')
+    placeholder = None
+    if not any(p['session_name'] == PARKING for p in panes()):
+        placeholder = tm('new-session', '-d', '-P', '-F', '#{pane_id}', '-s', PARKING, '-n', 'holding', '/bin/sleep 2147483647')
+    put('@workspace_parked', time.time_ns(), pane)
+    put('@workspace_home', current['session_name'], pane)
+    label = option('@workspace_label', pane) or 'shell'
+    try:
+        tm('break-pane', '-d', '-s', pane, '-t', '=' + PARKING + ':', '-n', label)
+    except Exception:
+        tm('set-option', '-pu', '-t', pane, '@workspace_parked', check=False)
+        raise
+    finally:
+        if placeholder:
+            tm('kill-pane', '-t', placeholder, check=False)
+    message('Parked ' + label + ' — prefix u restores; prefix U chooses')
+
+
+def parked():
+    result = []
+    for pane in panes():
+        stamp = option('@workspace_parked', pane['pane_id'])
+        if pane['session_name'] == PARKING and stamp:
+            pane.update(label=option('@workspace_label', pane['pane_id']) or 'shell', home=option('@workspace_home', pane['pane_id']), stamp=int(stamp))
+            result.append(pane)
+    return sorted(result, key=lambda p: p['stamp'], reverse=True)
+
+
+def unpark(target, direction='right', choose=False):
+    choices = parked()
+    if not choices:
+        raise ValueError('No parked panes')
+    if pane_info(target)['session_name'] == PARKING:
+        raise ValueError('Switch to a project window before restoring a parked pane')
+    selected = choices[0]
+    if choose:
+        print('Parked panes — restore ' + direction + ' of the selected pane\n')
+        for i, pane in enumerate(choices, 1):
+            print(f" {i}. {pane['label']}  [{pane['home']}]")
+        answer = input('\nNumber (Enter cancels): ').strip()
+        if not answer:
+            return
+        if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+            raise ValueError('Choose a listed pane number')
+        selected = choices[int(answer) - 1]
+    source = selected['pane_id']
+    tm('join-pane', '-h' if direction == 'right' else '-v', '-s', source, '-t', target, '-l', '40%')
+    tm('set-option', '-pu', '-t', source, '@workspace_parked')
+    tm('set-option', '-pu', '-t', source, '@workspace_home')
+
+def session_names():
+    try:
+        return [s['session_name'] for s in fields('list-sessions', ['session_name']) if s['session_name'] not in (PARKING, '__workspace_bootstrap')]
+    except Exception:
+        return []
+
+
+def connect_session(name):
+    inside = bool(os.environ.get('TMUX'))
+    if inside:
+        tm('switch-client', '-t', '=' + name, check=False)
+    else:
+        os.execv(TMUX, [TMUX, 'attach-session', '-t', '=' + name])
+
+
+def choose_or_create_workspace():
+    running = subprocess.run([TMUX, 'has-session'], capture_output=True).returncode == 0
+    if not running and (ROOT / 'latest.json').is_file():
+        bootstrap = tm('new-session', '-d', '-P', '-F', '#{session_id}', '-s', '__workspace_bootstrap', '/bin/sleep 2147483647')
+        initialize()
+        if any(p['session_name'] != '__workspace_bootstrap' for p in panes()):
+            tm('kill-session', '-t', bootstrap)
+    elif running:
+        initialize()
+
+    live = [s for s in session_names() if s not in (PARKING, '__workspace_bootstrap')]
+    projects = []
+    if PROJECTS_ROOT.is_dir():
+        for p in sorted(PROJECTS_ROOT.iterdir()):
+            if p.is_dir() and not p.name.startswith('.'):
+                projects.append(p.name)
+
+    zoxide_list = []
+    try:
+        z_out = subprocess.run(['zoxide', 'query', '-l'], capture_output=True, text=True).stdout
+        for line in z_out.splitlines():
+            p = Path(line.strip()).expanduser()
+            if p.is_dir() and p.name not in live and p.name not in projects and not str(p).startswith(str(PROJECTS_ROOT)):
+                zoxide_list.append(str(p))
+    except Exception:
+        pass
+
+    display_items = []
+    for z in zoxide_list:
+        display_items.append(f"⚡ {z}")
+    for s in live:
+        display_items.append(f"● {s}")
+    for p in projects:
+        if p not in live:
+            display_items.append(f"📁 {p}")
+
+    if not shutil.which('fzf') or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        command = ['sesh', 'picker']
+        os.execvp('sesh', command)
+
+    fzf_cmd = [
+        'fzf',
+        '--print-query',
+        '--header=Select workspace or type a NEW name to create in Projects | Esc: cancel',
+        '--prompt=Workspace > ',
+        '--height=50%',
+        '--layout=reverse',
+        '--border=rounded',
+        '--info=inline'
+    ]
+    p = subprocess.run(fzf_cmd, input='\n'.join(display_items), text=True, capture_output=True)
+    if p.returncode != 0:
+        return
+    lines = [line.strip() for line in p.stdout.splitlines() if line.strip()]
+    if not lines:
+        return
+    if len(lines) == 1:
+        target = lines[0]
+    else:
+        selected = lines[1]
+        target = selected.split(' ', 1)[-1]
+    open_workspace(target)
+
+
+def open_workspace(name=None):
+    if not name:
+        choose_or_create_workspace()
+        return
+
+    running = subprocess.run([TMUX, 'has-session'], capture_output=True).returncode == 0
+    if not running and (ROOT / 'latest.json').is_file():
+        bootstrap = tm('new-session', '-d', '-P', '-F', '#{session_id}', '-s', '__workspace_bootstrap', '/bin/sleep 2147483647')
+        initialize()
+        if any(p['session_name'] != '__workspace_bootstrap' for p in panes()):
+            tm('kill-session', '-t', bootstrap)
+    elif running:
+        initialize()
+
+    clean = ''.join(c for c in name if c.isprintable()).strip()
+    for icon in ('● ', '📁 ', '⚡ '):
+        if clean.startswith(icon):
+            clean = clean[len(icon):]
+
+    live = session_names()
+    if clean in live:
+        connect_session(clean)
+        return
+
+    z_match = None
+    if clean != '.':
+        try:
+            zr = subprocess.run(['zoxide', 'query', clean], capture_output=True, text=True)
+            if zr.returncode == 0 and zr.stdout.strip():
+                zp = Path(zr.stdout.strip()).expanduser().resolve()
+                if zp.is_dir():
+                    z_match = zp
+        except Exception:
+            pass
+
+    if z_match:
+        target_dir = z_match
+        session_name = target_dir.name
+    elif clean == '.':
+        target_dir = Path.cwd().resolve()
+        session_name = target_dir.name
+    elif Path(clean).expanduser().is_dir():
+        target_dir = Path(clean).expanduser().resolve()
+        session_name = target_dir.name
+    else:
+        session_name = clean
+        target_dir = (PROJECTS_ROOT / clean).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(['zoxide', 'add', str(target_dir)], capture_output=True)
+    except Exception:
+        pass
+
+    if session_name not in session_names():
+        tm('new-session', '-d', '-s', session_name, '-c', str(target_dir))
+
+    connect_session(session_name)
+
+
+def delete_workspace(name=None):
+    live = [s for s in session_names() if s not in (PARKING, '__workspace_bootstrap')]
+    if not live:
+        message('No active workspaces to delete.')
+        return
+
+    if not name:
+        if shutil.which('fzf') and sys.stdin.isatty():
+            fzf_cmd = [
+                'fzf',
+                '--header=Select workspace to close/delete | Esc: cancel',
+                '--prompt=Delete Workspace > ',
+                '--height=40%',
+                '--layout=reverse',
+                '--border=rounded'
+            ]
+            p = subprocess.run(fzf_cmd, input='\n'.join(live), text=True, capture_output=True)
+            if p.returncode != 0 or not p.stdout.strip():
+                return
+            target = p.stdout.strip()
+        else:
+            print('Active workspaces:\n')
+            for i, item in enumerate(live, 1):
+                print(f'  {i}. {item}')
+            ans = input('\nNumber or name of workspace to delete (Enter cancels): ').strip()
+            if not ans:
+                return
+            target = live[int(ans) - 1] if ans.isdigit() and 1 <= int(ans) <= len(live) else ans
+    else:
+        target = name.strip()
+
+    if target not in live:
+        message(f"Workspace '{target}' not found.")
+        return
+
+    if sys.stdin.isatty():
+        try:
+            confirm = input(f"Are you sure you want to close workspace '{target}'? (y/N): ").strip().lower()
+            if confirm not in ('y', 'yes'):
+                print('Cancelled.')
+                return
+        except (EOFError, KeyboardInterrupt):
+            return
+    inside = bool(os.environ.get('TMUX'))
+    current_session = tm('display-message', '-p', '#{session_name}', check=False) if inside else None
+    if inside and current_session == target:
+        other = next((s for s in live if s != target), None)
+        if other:
+            tm('switch-client', '-t', '=' + other, check=False)
+        else:
+            tm('new-session', '-d', '-s', 'main', '-c', str(PROJECTS_ROOT))
+            tm('switch-client', '-t', '=main', check=False)
+
+    tm('kill-session', '-t', '=' + target)
+    message(f"Workspace '{target}' closed.")
+def new_tab(name=None, cwd=None):
+    if not cwd or not Path(cwd).is_dir():
+        session_cwd = tm('display-message', '-p', '#{session_path}', check=False).strip()
+        cwd = session_cwd if session_cwd and Path(session_cwd).is_dir() else str(PROJECTS_ROOT)
+    clean = ''.join(c for c in (name or '') if c.isprintable()).strip()
+    tab_name = clean if clean else 'tab'
+    new_pane_id = tm('new-window', '-P', '-F', '#{pane_id}', '-c', cwd, '-n', tab_name)
+    put('@workspace_label', tab_name, new_pane_id)
+
+
+
+def history(pane):
+    _, data = read_snapshot()
+    if not data:
+        raise ValueError('No saved history yet; use prefix Ctrl+s first')
+    uid = identity(pane)
+    path = Path(data['directory']) / (uid + '.txt')
+    if not path.is_file():
+        raise ValueError('This pane is not in the latest snapshot')
+    os.execvp('less', ['less', '--', str(path)])
+
+
+HELP_TOPICS = [
+    {
+        'id': 'split-v',
+        'display': 'Ctrl+a | (or %)       Split Pane Vertically (Left / Right)',
+        'title': 'Vertical Split — Left / Right',
+        'text': """SHORTCUT: Ctrl+a then | (or %)
+
+DESCRIPTION:
+  Splits the active pane vertically into two side-by-side panes (left and right).
+  The new pane automatically opens in the current directory of the active pane.
+
+PROMPT:
+  As soon as the split is created, a prompt appears:
+    Pane label [shell]: 
+  Type a label (e.g. 'editor', 'server', 'logs') or hit Enter for 'shell'.
+  This label is displayed on the top border of the pane.
+
+RELATED COMMANDS:
+  Ctrl+a -        Horizontal split (top / bottom)
+  Ctrl+a t        Rename active pane label
+  Ctrl+a h/l      Move focus left or right
+  Ctrl+a H/L      Resize split boundary left or right"""
+    },
+    {
+        'id': 'split-h',
+        'display': 'Ctrl+a - (or ")       Split Pane Horizontally (Top / Bottom)',
+        'title': 'Horizontal Split — Top / Bottom',
+        'text': """SHORTCUT: Ctrl+a then - (or ")
+
+DESCRIPTION:
+  Splits the active pane horizontally into stacked panes (top and bottom).
+  The new pane inherits the current working directory and prompts for a label.
+
+PROMPT:
+  Pane label [shell]: 
+  Type a label or hit Enter.
+
+RELATED COMMANDS:
+  Ctrl+a |        Vertical split (left / right)
+  Ctrl+a j/k      Move focus down or up
+  Ctrl+a J/K      Resize split boundary down or up"""
+    },
+    {
+        'id': 'park',
+        'display': 'Ctrl+a !              Park Pane (Hide split, keep running in background)',
+        'title': 'Park Pane — Background Execution',
+        'text': """SHORTCUT: Ctrl+a then !
+
+DESCRIPTION:
+  Temporarily hides the active pane to free up screen space, while keeping its
+  process RUNNING uninterrupted in a hidden background session (__parked).
+  Sibling panes immediately expand to reclaim the freed space.
+
+USE CASES:
+  - Running a development server or long build without cluttering your view
+  - Watching logs that you only need to inspect periodically
+  - Parking a test watcher while coding full-screen
+
+RESTORING:
+  Ctrl+a u        Restore most recently parked pane to the RIGHT
+  Ctrl+a b        Restore most recently parked pane BELOW
+  Ctrl+a U        Interactive popup chooser: pick which parked pane to restore RIGHT
+  Ctrl+a B        Interactive popup chooser: pick which parked pane to restore BELOW"""
+    },
+    {
+        'id': 'unpark-latest-right',
+        'display': 'Ctrl+a u              Restore Latest Parked Pane (to Right)',
+        'title': 'Restore Latest Parked Pane to the Right',
+        'text': """SHORTCUT: Ctrl+a then u
+
+DESCRIPTION:
+  Takes the most recently parked pane from background storage and splits the
+  current window to restore it to the RIGHT of your focused pane.
+  The running process is preserved exactly as it was."""
+    },
+    {
+        'id': 'unpark-latest-below',
+        'display': 'Ctrl+a b              Restore Latest Parked Pane (Below)',
+        'title': 'Restore Latest Parked Pane Below',
+        'text': """SHORTCUT: Ctrl+a then b
+
+DESCRIPTION:
+  Takes the most recently parked pane and restores it BELOW your focused pane.
+  Process state, working directory, and label are fully preserved."""
+    },
+    {
+        'id': 'choose-park-right',
+        'display': 'Ctrl+a U              Choose & Restore Parked Pane (to Right)',
+        'title': 'Choose & Restore Parked Pane (Right)',
+        'text': """SHORTCUT: Ctrl+a then U (capital U)
+
+DESCRIPTION:
+  Opens a popup menu displaying all currently parked panes:
+    1. logs  [my-project]
+    2. server  [my-project]
+  Type the number of the pane you wish to restore and hit Enter.
+  The selected pane is attached to the RIGHT of your active pane."""
+    },
+    {
+        'id': 'workspace-picker',
+        'display': 'Ctrl+a s (or work)       Workspace Picker (Switch or Create New)',
+        'title': 'Workspace Picker & Creator',
+        'text': """SHORTCUT: Ctrl+a then s, or `work` from your shell
+
+DESCRIPTION:
+  Opens an interactive fuzzy selector listing:
+  - Active tmux sessions (marked with ●)
+  - Existing project folders in ~/untitled folder/Projects/ (marked with 📁)
+  - Recent zoxide paths (marked with ⚡)
+
+SWITCHING & CREATING:
+  - Select any item to switch/connect to it.
+  - Or type a BRAND NEW project name (e.g. 'my-api') and hit Enter:
+    Automatically creates `~/untitled folder/Projects/<name>`, sets up the
+    session, and connects immediately!
+
+SHELL USAGE:
+  work                  Fuzzy picker (switch or type new name to create)
+  work my-project       Directly connect to or create my-project
+  work .                Open workspace for current directory
+  work rm [name]        Delete / close a workspace"""
+    },
+    {
+        'id': 'workspace-last',
+        'display': 'Ctrl+a Tab            Bounce to Previous Workspace',
+        'title': 'Jump to Previous Workspace',
+        'text': """SHORTCUT: Ctrl+a then Tab
+
+DESCRIPTION:
+  Seamlessly bounces back and forth between your two most recently used workspaces.
+  Powered by `sesh last`."""
+    },
+    {
+        'id': 'nav-vim',
+        'display': 'Ctrl+a h/j/k/l        Move Focus (Left / Down / Up / Right)',
+        'title': 'Directional Movement (Vim keys)',
+        'text': """SHORTCUT: Ctrl+a then h / j / k / l
+
+DESCRIPTION:
+  Moves focus to the adjacent pane:
+    h: Left
+    j: Down
+    k: Up
+    l: Right
+
+REPEATABLE:
+  You only need to press Ctrl+a once; you can tap h, j, k, l repeatedly
+  within 800ms to jump across multiple splits quickly."""
+    },
+    {
+        'id': 'nav-arrows',
+        'display': 'Ctrl+a Arrows         Move Focus (Arrow keys)',
+        'title': 'Directional Movement (Arrow keys)',
+        'text': """SHORTCUT: Ctrl+a then Left / Down / Up / Right
+
+DESCRIPTION:
+  Moves focus using standard arrow keys. Also repeatable."""
+    },
+    {
+        'id': 'resize-keys',
+        'display': 'Ctrl+a H/J/K/L        Resize Active Pane (Repeatable)',
+        'title': 'Pane Resizing',
+        'text': """SHORTCUT: Ctrl+a then H / J / K / L (or Shift+Arrows)
+
+DESCRIPTION:
+  Grows or shrinks the active pane:
+    H: Grow Left (5 cells)
+    J: Grow Down (3 cells)
+    K: Grow Up (3 cells)
+    L: Grow Right (5 cells)
+
+REPEATABLE & MOUSE:
+  Hold or tap repeatedly to adjust size quickly.
+  You can also simply click and drag any pane border line with your mouse."""
+    },
+    {
+        'id': 'zoom',
+        'display': 'Ctrl+a z              Toggle Zoom (Full Screen Split)',
+        'title': 'Zoom Pane',
+        'text': """SHORTCUT: Ctrl+a then z
+
+DESCRIPTION:
+  Maximizes the focused pane to take up the entire window.
+  Other panes remain running in the background.
+  Press Ctrl+a then z again to restore the exact original split layout."""
+    },
+    {
+        'id': 'label-pane',
+        'display': 'Ctrl+a t              Rename Active Pane Label',
+        'title': 'Rename Pane Label',
+        'text': """SHORTCUT: Ctrl+a then t
+
+DESCRIPTION:
+  Opens an on-screen popup asking for a new pane label:
+    Pane label [current]:
+  The label is displayed in the top border of the pane and persists across
+  parking, unparking, and reboot recovery snapshots."""
+    },
+    {
+        'id': 'rotate-layout',
+        'display': 'Ctrl+a Space          Rotate Through Split Layouts',
+        'title': 'Rotate Layouts',
+        'text': """SHORTCUT: Ctrl+a then Space
+
+DESCRIPTION:
+  Cycles the current window through preset split geometries:
+  - even-horizontal
+  - even-vertical
+  - main-horizontal
+  - main-vertical
+  - tiled"""
+    },
+    {
+        'id': 'new-window',
+        'display': 'Ctrl+a c              New Window (Tab/View)',
+        'title': 'Create New Window (Tab)',
+        'text': """SHORTCUT: Ctrl+a then c
+
+DESCRIPTION:
+  Prompts you to name the tab first in the status bar:
+    Tab name: <type name>
+  Creates a new full-screen window (tab) inside the current workspace session
+  with that name.
+  Inherits the current pane's working directory, and automatically sets the
+  initial pane's label to match your tab name so you can get to work immediately.
+  Pressing Esc cancels creation; pressing Enter with no text defaults to 'tab'."""
+    },
+    {
+        'id': 'switch-window',
+        'display': 'Ctrl+a 1..9 (or n/p)   Switch Windows',
+        'title': 'Switch Windows',
+        'text': """SHORTCUT: Ctrl+a then 1..9, or n (next) / p (previous)
+
+DESCRIPTION:
+  Jumps directly to window 1 through 9, or moves forward/backward between windows."""
+    },
+    {
+        'id': 'detach',
+        'display': 'Ctrl+a d              Detach From Workspace (Keep running)',
+        'title': 'Detach From Tmux',
+        'text': """SHORTCUT: Ctrl+a then d
+
+DESCRIPTION:
+  Disconnects from the tmux server and returns you to your standard terminal.
+  All your workspaces, windows, background processes, AI sessions, and Neovim
+  editors CONTINUE RUNNING untouched.
+  Re-attach anytime using the `work` command."""
+    },
+    {
+        'id': 'close-workspace',
+        'display': 'Ctrl+a X (or work rm)   Close / Delete Workspace (With confirmation)',
+        'title': 'Close / Delete Workspace',
+        'text': """SHORTCUT: Ctrl+a then X (capital X), or `work rm [name]` from shell
+
+DESCRIPTION:
+  Closes and terminates a project workspace:
+  - From inside tmux: Press Ctrl+a then X. Prompts confirmation:
+      Close workspace <name>? (y/n)
+    Automatically switches you to another active workspace before closing so you
+    remain inside tmux.
+  - From your shell:
+      work rm             Interactive fuzzy picker of active workspaces to delete
+      work rm <name>      Closes the specified workspace directly"""
+    },
+    {
+        'id': 'save-snapshot',
+        'display': 'Ctrl+a Ctrl+s         Save Workspace Snapshot Now',
+        'title': 'Save Snapshot Manually',
+        'text': """SHORTCUT: Ctrl+a then Ctrl+s
+
+DESCRIPTION:
+  Immediately captures a full snapshot of all workspaces, windows, split layouts,
+  pane labels, sanitized terminal history, and active AI / Neovim session IDs.
+  Snapshots also run automatically every 5 minutes while tmux is running."""
+    },
+    {
+        'id': 'restore-snapshot',
+        'display': 'Ctrl+a Ctrl+r         Restore Workspaces From Snapshot',
+        'title': 'Restore Missing Workspaces',
+        'text': """SHORTCUT: Ctrl+a then Ctrl+r
+
+DESCRIPTION:
+  Reads the latest saved snapshot and reconstructs any missing workspaces,
+  windows, splits, and terminal scrollbacks, reconnecting active AI tools and Neovim."""
+    },
+    {
+        'id': 'view-history',
+        'display': 'Ctrl+a P              View Saved Terminal Scrollback (Pager)',
+        'title': 'View Saved Terminal Scrollback',
+        'text': """SHORTCUT: Ctrl+a then P (capital P)
+
+DESCRIPTION:
+  Opens the saved terminal scrollback for the current pane in `less`.
+  Lets you search and read historical terminal text captured in the last snapshot."""
+    },
+    {
+        'id': 'copy-mode',
+        'display': 'Ctrl+a [ (or scroll)  Copy Mode & macOS Clipboard (pbcopy)',
+        'title': 'Copy Mode & Clipboard',
+        'text': """SHORTCUT: Ctrl+a then [ (or scroll trackpad/mouse)
+
+DESCRIPTION:
+  Enters scrollback copy mode:
+  - Scroll with j/k, arrow keys, or mouse wheel
+  - Search with / (press n for next, N for previous)
+  - Press v to begin text selection
+  - Press y to copy selection directly to macOS clipboard (pbcopy)
+  - Mouse: click and drag text; releasing automatically copies to macOS clipboard
+  - Press q or Esc to exit copy mode
+  - Press Ctrl+a then ] to paste inside tmux (or Cmd+v in terminal)"""
+    },
+    {
+        'id': 'topic-ai',
+        'display': 'Topic: AI Recovery    How Claude, Codex, & OMP Session Recovery Works',
+        'title': 'AI Conversation Recovery Architecture',
+        'text': """AI SESSION PERSISTENCE RULES:
+
+Ordinary Shell Commands:
+  You do not need a special wrapper. You can launch `claude`, `codex`, or `omp`
+  directly in any shell pane, and switch agents within the same shell.
+
+Supported Tools:
+  1. Claude Code:
+     - Tracked via native hooks and statusLine.
+     - Resumed via: claude --resume <exact-session-id>
+  2. OpenAI Codex:
+     - Tracked via native title thread-id and open rollout/sqlite databases.
+     - Resumed via: codex resume <exact-thread-id>
+  3. Oh My Pi (omp):
+     - Tracked via global extension on session_start/switch/branch/tree.
+     - Resumed via: omp --resume <exact-session-file>
+
+Key Guarantees:
+  - No prompt replay: Reopens conversation and waits for your input.
+  - Per-pane isolation: Two panes in the same project directory track distinct IDs.
+  - Exited agents: Deliberately exiting an agent to the shell restores as a shell."""
+    },
+    {
+        'id': 'topic-neovim',
+        'display': 'Topic: Neovim         How Neovim Auto-Session Persistence Works',
+        'title': 'Neovim Session Persistence Rules',
+        'text': """NEOVIM SESSION PERSISTENCE:
+
+Module:
+  ~/.config/nvim/lua/custom/tmux_workspace.lua
+  Loaded automatically in your init.lua.
+
+Features:
+  - Native mksession: Saves window layout, splits, tabs, and open files.
+  - Zero auto-writing: Never blindly writes dirty buffer contents to disk.
+  - Swapfile Safety: If a reboot occurs while you have unsaved edits,
+    Neovim's native swapfile recovery prompt ([O]pen, (E)dit, (R)ecover...)
+    appears on restore to protect your changes.
+  - Private storage: Session files stored mode 0600 in ~/.local/state/tmux-workspace/."""
+    },
+    {
+        'id': 'topic-guide',
+        'display': 'Topic: Full Manual    Open Complete Offline Guide (~/.config/tmux/WORKSPACE_GUIDE.md)',
+        'title': 'Full Offline Reference Manual',
+        'text': """The complete 12-section manual is saved at:
+  ~/.config/tmux/WORKSPACE_GUIDE.md
+
+Select this item and press Enter to read the complete guide in a full pager."""
+    }
+]
+
+
+def help_topic(topic_id):
+    for t in HELP_TOPICS:
+        if t['id'] == topic_id:
+            print(f"=== {t['title']} ===\n\n{t['text']}\n")
+            return
+    print(f"Topic '{topic_id}' not found.")
+
+
+def help_interactive():
+    guide = Path.home() / '.config/tmux/WORKSPACE_GUIDE.md'
+    has_fzf = shutil.which('fzf')
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if not has_fzf or not is_tty:
+        if guide.is_file() and shutil.which('less') and is_tty:
+            os.execvp('less', ['less', '-R', '--', str(guide)])
+        elif guide.is_file():
+            print(guide.read_text())
+        else:
+            for t in HELP_TOPICS:
+                help_topic(t['id'])
+        return
+
+    while True:
+        input_data = '\n'.join(f"{t['id']}\t{t['display']}" for t in HELP_TOPICS)
+        fzf_cmd = [
+            'fzf',
+            '--delimiter=\t',
+            '--with-nth=2',
+            f'--preview={SELF} help-topic {{1}}',
+            '--preview-window=right:58%:wrap',
+            '--header=Type to fuzzy search commands | Enter: view full help | Esc: quit',
+            '--prompt=Help > ',
+            '--info=inline',
+            '--height=100%',
+            '--layout=reverse',
+            '--border=rounded'
+        ]
+        p = subprocess.run(fzf_cmd, input=input_data, text=True, capture_output=True)
+        if p.returncode != 0 or not p.stdout.strip():
+            break
+        selected_id = p.stdout.strip().split('\t')[0]
+        if selected_id == 'topic-guide':
+            if guide.is_file() and shutil.which('less'):
+                subprocess.run(['less', '-R', '--', str(guide)])
+        else:
+            topic_record = next((t for t in HELP_TOPICS if t['id'] == selected_id), None)
+            if topic_record:
+                body = f"=== {topic_record['title']} ===\n\n{topic_record['text']}\n\n[Press 'q' or 'Enter' to return to search...]"
+                if shutil.which('less'):
+                    subprocess.run(['less', '-R', '-P', ' Press q to return to search...'], input=body, text=True)
+                else:
+                    print(body)
+                    try:
+                        input()
+                    except (EOFError, KeyboardInterrupt):
+                        pass
+
+def main():
+    args = sys.argv[1:]
+    command = args.pop(0) if args else 'open'
+    if command == 'pane-start':
+        pane_start(*args)
+    elif command == 'open':
+        open_workspace(*args)
+    elif command == 'init':
+        initialize()
+    elif command == 'tick':
+        tick()
+    elif command == 'save':
+        snapshot(force=True)
+    elif command == 'restore':
+        message('Missing workspaces restored' if restore() else 'No missing saved workspaces to restore')
+    elif command == 'park':
+        park(*args)
+    elif command in ('unpark', 'choose-park'):
+        target = tm('display-message', '-p', '#{pane_id}')
+        direction = 'right'
+        if args and (args[0].startswith('%') or args[0].isdigit()):
+            target = args.pop(0)
+        if args:
+            direction = args[0]
+        unpark(target, direction, choose=command == 'choose-park')
+    elif command == 'label':
+        pane = args[0] if args else tm('display-message', '-p', '#{pane_id}')
+        ask_label(pane, option('@workspace_label', pane) or 'shell')
+    elif command == 'history':
+        history(args[0] if args else tm('display-message', '-p', '#{pane_id}'))
+    elif command == 'help':
+        help_interactive()
+    elif command == 'new-tab':
+        new_tab(*args)
+    elif command == 'help-topic':
+        help_topic(args[0] if args else '')
+    elif command in ('kill-workspace', 'delete', 'rm'):
+        delete_workspace(*args)
+    else:
+        raise ValueError('Unknown workspace command: ' + command)
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, OSError, subprocess.SubprocessError, StopIteration) as exc:
+        sys.stderr.write(f"Workspace error: {exc}\n")
+        message('Workspace: ' + str(exc))
+        sys.exit(1)
+    except (EOFError, KeyboardInterrupt):
+        sys.exit(0)
