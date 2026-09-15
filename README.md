@@ -88,6 +88,8 @@ Need to hide a running server or log watcher without killing it?
 | `Ctrl+a` `U` | Choose and restore parked pane (right) |
 | `Ctrl+a` `B` | Choose and restore parked pane (below) |
 | `Ctrl+a` `c` | Name & create new window (tab) |
+| `Ctrl+a` `w` | **Fuzzy search & switch windows in project** |
+| `Ctrl+a` `W` | Global session & window tree |
 | `Ctrl+a` `1`..`9` | Switch to window 1..9 |
 | `Ctrl+a` `d` | Detach session (leaves everything running) |
 | `Ctrl+a` `Ctrl+s` | Save snapshot now |

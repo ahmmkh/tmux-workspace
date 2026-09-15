@@ -170,6 +170,8 @@ Windows let you organize different concerns inside the same project workspace:
 - **`Ctrl+a` then `c`**: Create a new window / tab. Prompts you to name the tab first in the status bar (`Tab name: `), sets the tab name, and automatically labels the initial pane with that name so you can start working immediately (defaults to `tab` if left blank; press `Esc` to cancel).
 - **`Ctrl+a` then `,`**: Rename the current window.
 - **`Ctrl+a` then `1` .. `9`**: Jump directly to window 1 through 9.
+- **`Ctrl+a` then `w`**: **Window Fuzzy Picker**. Opens an interactive search popup listing all windows (tabs) in your current workspace with live terminal screen previews and running pane summaries. Filter by index, name, or pane label and press Enter to switch immediately.
+- **`Ctrl+a` then `W`** *(capital W)*: Opens tmux's global interactive tree view across all sessions and windows.
 - **`Ctrl+a` then `n`**: Next window.
 - **`Ctrl+a` then `p`**: Previous window.
 - **`Ctrl+a` then `&`**: Close the entire active window and all its panes.
@@ -260,6 +262,8 @@ Your original configuration files before this setup were preserved in:
 | `Ctrl+a` `B` | Choose and restore parked pane (below) |
 | `Ctrl+a` `c` | Name & create new window (tab) |
 | `Ctrl+a` `1`..`9` | Switch to window 1..9 |
+| `Ctrl+a` `w` | **Fuzzy search & switch windows (in project)** |
+| `Ctrl+a` `W` | Global session & window tree view |
 | `Ctrl+a` `X` | Close current workspace (with confirmation) |
 | `Ctrl+a` `d` | Detach session (leaves everything running) |
 | `Ctrl+a` `Ctrl+s` | Save snapshot now |

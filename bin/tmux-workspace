@@ -607,6 +607,74 @@ def delete_workspace(name=None):
 
     tm('kill-session', '-t', '=' + target)
     message(f"Workspace '{target}' closed.")
+def window_preview(window_index=None):
+    session = tm('display-message', '-p', '#{session_name}', check=False)
+    if not session:
+        return
+    idx = str(window_index).strip().split(':')[0] if window_index else '1'
+    try:
+        raw_win = tm('display-message', '-p', '-t', f"={session}:{idx}", '#{window_name} (#{window_panes} panes)', check=False)
+        print(f"=== Window {idx}: {raw_win} ===\n")
+        raw_panes = tm('list-panes', '-t', f"={session}:{idx}",
+                       '-F', '  • Pane #{pane_index}: #{?@workspace_label,#{@workspace_label},#{pane_current_command}} (#{pane_current_command}) in #{pane_current_path}',
+                       check=False)
+        if raw_panes:
+            print(raw_panes)
+        print("\n--- Terminal View ---\n")
+        screen = tm('capture-pane', '-p', '-t', f"={session}:{idx}", check=False)
+        print(screen)
+    except Exception as e:
+        print(f"Preview unavailable: {e}")
+
+
+def pick_window():
+    session = tm('display-message', '-p', '#{session_name}', check=False)
+    if not session:
+        message('No active tmux session.')
+        return
+
+    raw_wins = tm('list-windows', '-t', f"={session}", '-F', '#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}', check=False)
+    if not raw_wins:
+        message('No windows found.')
+        return
+
+    display_items = []
+    for line in raw_wins.splitlines():
+        parts = line.split('\t')
+        if len(parts) < 4:
+            continue
+        w_idx, w_name, w_active, w_panes = parts[0], parts[1], parts[2] == '1', parts[3]
+        raw_panes = tm('list-panes', '-t', f"={session}:{w_idx}",
+                       '-F', '#{pane_index}:#{?@workspace_label,#{@workspace_label},#{pane_current_command}}', check=False)
+        labels = ', '.join(raw_panes.splitlines()) if raw_panes else 'empty'
+        active_tag = '  ● active' if w_active else ''
+        display = f"{w_idx}: {w_name:<16} [{w_panes} pane{'s' if int(w_panes) > 1 else ''}: {labels}]{active_tag}"
+        display_items.append(display)
+
+    if not shutil.which('fzf') or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        tm('choose-tree', '-Zw', '-t', f"={session}", '-f', f"#{{==:#{{session_name}},{session}}}")
+        return
+
+    fzf_cmd = [
+        'fzf',
+        '--delimiter=:',
+        f'--preview={SELF} window-preview {{1}}',
+        '--preview-window=right:55%:wrap',
+        '--header=Select window to switch | Esc: cancel',
+        '--prompt=Window > ',
+        '--height=100%',
+        '--layout=reverse',
+        '--border=rounded',
+        '--info=inline'
+    ]
+    p = subprocess.run(fzf_cmd, input='\n'.join(display_items), text=True, capture_output=True)
+    if p.returncode != 0 or not p.stdout.strip():
+        return
+    selected_line = p.stdout.strip()
+    chosen_idx = selected_line.split(':')[0].strip()
+    tm('select-window', '-t', f"={session}:{chosen_idx}")
+
+
 def new_tab(name=None, cwd=None):
     if not cwd or not Path(cwd).is_dir():
         session_cwd = tm('display-message', '-p', '#{session_path}', check=False).strip()
@@ -866,6 +934,28 @@ DESCRIPTION:
   Jumps directly to window 1 through 9, or moves forward/backward between windows."""
     },
     {
+        'id': 'pick-window',
+        'display': 'Ctrl+a w              Window Fuzzy Picker (Current Project)',
+        'title': 'Window Fuzzy Picker (Tabs within Project)',
+        'text': """SHORTCUT: Ctrl+a then w
+
+DESCRIPTION:
+  Opens an interactive fuzzy search popup listing all windows (tabs) in your
+  CURRENT project workspace.
+
+FEATURES:
+  - Lists window index, tab name, pane count, and running pane labels
+  - Live preview pane shows the layout, panes, and active screen of each tab
+  - Type to filter by index, window name, or pane label
+  - Press Enter to jump immediately to the selected window
+  - Press Esc to cancel
+
+RELATED:
+  Ctrl+a W (capital W)   Open global tmux session & window tree
+  Ctrl+a s               Open project workspace picker
+  Ctrl+a 1..9            Jump directly to window 1..9"""
+    },
+    {
         'id': 'detach',
         'display': 'Ctrl+a d              Detach From Workspace (Keep running)',
         'title': 'Detach From Tmux',
@@ -1089,6 +1179,10 @@ def main():
         new_tab(*args)
     elif command == 'help-topic':
         help_topic(args[0] if args else '')
+    elif command == 'pick-window':
+        pick_window()
+    elif command == 'window-preview':
+        window_preview(*args)
     elif command in ('kill-workspace', 'delete', 'rm'):
         delete_workspace(*args)
     else:
