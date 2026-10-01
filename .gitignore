@@ -1,5 +1,5 @@
-.DS_Store
-*.swp
-*~
-*.pyc
 __pycache__/
+*.py[cod]
+.env
+.env.*
+.DS_Store

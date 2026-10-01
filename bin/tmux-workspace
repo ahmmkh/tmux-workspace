@@ -131,7 +131,7 @@ def process_table():
 
 
 def live_app(pane, table):
-    raw = option('@workspace_app', pane['pane_id'])
+    raw = pane['@workspace_app'] if '@workspace_app' in pane else option('@workspace_app', pane['pane_id'])
     if not raw:
         return None
     try:
@@ -658,7 +658,7 @@ def pick_window():
     fzf_cmd = [
         'fzf',
         '--delimiter=:',
-        f'--preview={SELF} window-preview {{1}}',
+        f'--preview={shlex.quote(SELF)} window-preview {{1}}',
         '--preview-window=right:55%:wrap',
         '--header=Select window to switch | Esc: cancel',
         '--prompt=Window > ',
@@ -698,6 +698,30 @@ def history(pane):
 
 
 HELP_TOPICS = [
+    {
+        'id': 'ai-tools',
+        'display': 'Ctrl+a a             Jev Live Finder, Attention, Skills & Tab Names',
+        'title': 'Fast Jev Workspace Tools',
+        'text': """SHORTCUT: Ctrl+a then a
+
+Choose find, attention, search-history, suggest, or name-tab.
+Find reranks as you type after a 250ms pause; empty query stays local.
+Search and suggestions select existing sources. One Choice selects a safe existing
+phrase for a tab name; confirmation is required before renaming.
+Jev supplies fast typed decisions through OpenRouter; code owns every action.
+
+PRIVACY:
+Metadata-only by default. The share menu explicitly permits recent output AND
+retained history for one pane. Revoke there or with:
+  tmux-workspace ai share %PANE --off
+Permission resets when tmux restarts. Redaction is not a guarantee.
+
+UNIFIED HOME:
+  ~/untitled folder/Projects/tmux-workspace
+  work tmux-workspace
+Edit config.json for model and Doppler settings; no secret is stored there.
+Run tmux-workspace ai check to verify credentials and structured output."""
+    },
     {
         'id': 'split-v',
         'display': 'Ctrl+a | (or %)       Split Pane Vertically (Left / Right)',
@@ -1114,7 +1138,7 @@ def help_interactive():
             'fzf',
             '--delimiter=\t',
             '--with-nth=2',
-            f'--preview={SELF} help-topic {{1}}',
+            f'--preview={shlex.quote(SELF)} help-topic {{1}}',
             '--preview-window=right:58%:wrap',
             '--header=Type to fuzzy search commands | Enter: view full help | Esc: quit',
             '--prompt=Help > ',
@@ -1146,7 +1170,11 @@ def help_interactive():
 def main():
     args = sys.argv[1:]
     command = args.pop(0) if args else 'open'
-    if command == 'pane-start':
+    if command == 'ai':
+        sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
+        import ai
+        ai.main(globals(), args)
+    elif command == 'pane-start':
         pane_start(*args)
     elif command == 'open':
         open_workspace(*args)

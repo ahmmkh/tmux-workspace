@@ -1,0 +1,8 @@
+{
+  "model": "typesafe/jev-1.13",
+  "doppler": {
+    "project": "nvim-plugin",
+    "config": "dev_personal",
+    "scope": "/Users/kh/untitled folder/Projects/nvim-plugin"
+  }
+}

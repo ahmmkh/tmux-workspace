@@ -3,6 +3,17 @@
 This document is your permanent offline reference for your personalized tmux workspace setup.
 It covers core concepts, everyday shortcuts, advanced parking workflows, sesh workspace management, and how reboot recovery works with AI tools and Neovim.
 
+## Start here
+
+All workspace-specific source now lives in:
+`~/untitled folder/Projects/tmux-workspace/`
+
+- Open the project: `work tmux-workspace`
+- Open all AI tools: **`Ctrl+a`, release, then `a`**
+- Read this guide: `less "$HOME/untitled folder/Projects/tmux-workspace/WORKSPACE_GUIDE.md"`
+- Check provider access: `tmux-workspace ai check`
+- Existing keybindings, `work`, recovery, agent hooks and Neovim integration remain active through symlinks to this project.
+
 ---
 
 ## Table of Contents
@@ -18,6 +29,7 @@ It covers core concepts, everyday shortcuts, advanced parking workflows, sesh wo
 10. [Reboot Recovery & AI Session Persistence](#10-reboot-recovery--ai-session-persistence)
 11. [Configuration Files & Backups](#11-configuration-files--backups)
 12. [Quick Reference Cheatsheet](#12-quick-reference-cheatsheet)
+13. [AI Workflow Tools & Privacy](#13-ai-workflow-tools--privacy)
 
 ---
 
@@ -68,7 +80,7 @@ When you run `work <name>` (or type a new name in the `work` picker):
 - **`Ctrl+a` then `s`**: Opens the workspace picker popup over your screen. Select an existing workspace or type a new name to create one on the fly.
 - **`Ctrl+a` then `Tab`**: Bounces back to your previous workspace.
 - **`Ctrl+a` then `X`** *(capital X)*: Closes and terminates the current workspace session (asks confirmation first, and automatically switches you to another active workspace so you remain inside tmux).
-- **`Ctrl+a` then `w`**: Opens tmux's interactive tree view of sessions and windows.
+- **`Ctrl+a` then `w`**: Opens the current project's fuzzy window picker with pane previews. **`Ctrl+a W`** opens the global session/window tree.
 - **`Ctrl+a` then `$`**: Rename the current session.
 
 ---
@@ -222,20 +234,39 @@ You do not need a special launcher. You can type `claude`, `codex`, `omp`, or `n
 
 ## 11. Configuration Files & Backups
 
-### Active Configuration Files
-| File Path | Description |
-|---|---|
-| `~/.tmux.conf` | Core tmux options, prefix, keybindings, status line, hooks |
-| `~/.local/bin/tmux-workspace` | Python controller managing snapshots, labels, parking, and recovery |
-| `~/.local/lib/tmux-workspace/agent-hook.py` | Native hooks tracking Claude, Codex, and OMP session IDs |
-| `~/.config/nvim/lua/custom/tmux_workspace.lua` | Neovim auto-session persistence module |
-| `~/.omp/agent/extensions/tmux-workspace.ts` | Oh My Pi global agent extension for session tracking |
-| `~/.config/sesh/sesh.toml` | sesh workspace discovery configuration |
-| `~/.zshrc` | Shell integration (`work` function and zoxide init) |
+### One canonical project
 
-### Backups Location
-Your original configuration files before this setup were preserved in:
-`~/.local/state/tmux-workspace/backups/`
+Edit these files in `~/untitled folder/Projects/tmux-workspace/`; do not maintain separate copies.
+
+| Project path | Live integration |
+|---|---|
+| `tmux.conf` | `~/.tmux.conf` symlink; options, keybindings and status |
+| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; existing controller and AI entrypoint |
+| `lib/ai.py`, `lib/ai_core.py` | AI popup, permission controls and shared OpenRouter client |
+| `lib/panes_ai.py` | Semantic pane finder and evidence-backed attention list |
+| `lib/history_ai.py` | Opt-in snapshot search |
+| `lib/suggest_ai.py` | Source-backed shortcut and installed-skill suggestions |
+| `config.json` | Model and Doppler project/config/scope; no API key |
+| `shell.zsh` | Sourced by `~/.zshrc`; `work` and zoxide integration |
+| `sesh.toml` | `~/.config/sesh/sesh.toml` symlink |
+| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink |
+| `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink |
+| `integrations/tmux_workspace.lua` | `~/.config/nvim/lua/custom/tmux_workspace.lua` symlink |
+| `WORKSPACE_GUIDE.md` | `~/.config/tmux/WORKSPACE_GUIDE.md` symlink; this guide |
+
+Shared application registrations stay in their owning configurations:
+`~/.claude/settings.json` invokes the agent-hook path above for session hooks/status;
+`~/.config/nvim/init.lua` calls `require('custom.tmux_workspace').setup()`.
+Those shared files are not copied into this project.
+
+### Private state and backups stay separate
+
+`~/.local/state/tmux-workspace/` retains snapshots, editor sessions and original
+configuration backups (`backups/`). Agent conversation history stays with its
+original harness. None of that private state was moved into the source project.
+
+The setup is personal to this machine: source and live symlinks use absolute paths.
+Moving the project again requires updating those symlinks and the shell source path.
 
 ---
 
@@ -273,3 +304,165 @@ Your original configuration files before this setup were preserved in:
 | `Ctrl+a` `]` | Paste buffer |
 | `Ctrl+a` `r` | Reload tmux configuration |
 | `Ctrl+a` `Ctrl+a` | Send raw Ctrl+a to shell/editor |
+
+---
+
+## 13. AI Workflow Tools & Privacy
+
+### Five on-demand tools
+
+Press **`Ctrl+a a`** for one menu:
+
+- **find**: type a task to rerank live and parked panes across all workspaces.
+  The local catalog appears first; Jev reranks after a 250 ms typing pause.
+  Obsolete refreshes are cancelled, but requests already received by the provider
+  cannot be recalled. Clearing the query restores the local catalog without inference.
+  Metadata works without output sharing. Enter inspects evidence; `g` navigates.
+  Bringing back a parked pane requires another confirmation. Source and destination
+  are checked again after confirmation; changed identities or locations abort the move.
+- **attention**: inspect opted-in output for independent conditions: user input
+  needed, unresolved blocker, or completed work awaiting review. Independent Noul
+  predicates and speculative source-line Choices run together over shared state.
+  Each finding includes P(yes), an exact source line and context. P(yes) > 0.5 plus
+  supporting evidence routes a review item, never an action. Unknowns stay unclassified.
+  Capture time is not message time, and silence does not mean an agent is stuck or done.
+  Routine approval or input alone is not a technical blocker. Asking to review
+  finished work alone is not blocking input; a separate deployment blocker does not
+  cancel an explicit request to review finished code.
+- **search-history**: search the retained snapshots for currently opted-in pane
+  identities. Results contain source quotes, saved timestamps and locations,
+  clearly marked historical. At most three snapshots are searched; source reads
+  are bounded, and a local shortlist of up to 32 chunks is ranked. Notices report
+  truncation or incomplete coverage. Archived output is not evidence of current state.
+- **suggest**: ask which existing shortcut or installed skill fits. All discovered
+  catalog descriptions are ranked; up to five candidates are checked against
+  source excerpts. Suggestions show real shortcut text or `/skill-name`, never
+  generated commands. No skill executes and nothing is typed into an agent.
+- **name-tab**: Jev selects a short existing phrase from an optional task hint,
+  meaningful pane/project labels, or opted-in source spans. Code bounds and checks
+  candidates; one Choice selects a candidate or none. No free-form text generation.
+  Preview the suggestion, press `r`, then confirm. Existing names are never overwritten automatically; concurrent
+  manual renames, changed task context, or changed window membership invalidate the suggestion,
+  including changes during confirmation. Pane labels
+  are unchanged. `Ctrl+a ,` remains the direct manual rename shortcut.
+
+The menu also provides **share** (per-pane permission) and **check** (provider test).
+The menu's **check** keeps success or failure visible until you press Enter.
+Direct `tmux-workspace ai check` prints its result and exits without a dismissal prompt.
+Esc cancels a picker. Enter selects evidence, not permission to execute commands.
+Existing `Ctrl+a s`, `Ctrl+a w`, `Ctrl+a U` and `Ctrl+a ?` remain available offline.
+
+### Command-line access
+
+Run inside tmux for interactive navigation. `--json` prints results without navigation:
+
+```sh
+tmux-workspace ai find "client onboarding"
+tmux-workspace ai attention
+tmux-workspace ai search-history "database authentication failed"
+tmux-workspace ai suggest "hide this pane without stopping it"
+tmux-workspace ai name-tab "fix billing database authentication"
+tmux-workspace ai find "billing migration" --json
+tmux-workspace ai home
+```
+
+### Permission and data handling
+
+**Metadata-only by default.** Semantic pane search sends labels, project/directory
+metadata and process identity metadata. Skill suggestions send installed skill
+descriptions and selected excerpts. No terminal output is read for AI without
+explicit per-pane sharing.
+
+The share menu warns before enabling access to both recent terminal output and
+retained snapshot text for that pane. Permission applies to the pane, including
+future programs started there, until revoked or tmux restarts. Restored panes
+start private. No background AI polling or automatic history uploads run.
+
+```sh
+# Prompts for permission before enabling:
+tmux-workspace ai share %12
+# Revoke explicitly:
+tmux-workspace ai share %12 --off
+```
+
+Use an actual pane ID shown by the tool, not the example `%12`.
+`--allow` is the explicit noninteractive consent flag. Avoid it unless you intend
+to share that pane's current and retained output.
+
+Sharing and pane identity are rechecked after credential lookup and before each
+request carrying terminal evidence, including each batch. A detected revocation
+aborts that evidence instead of returning stale excerpt-bearing fallback results.
+
+Terminal output can contain credentials or client data. Common-secret redaction
+is best-effort, not a guarantee. Requests go to OpenRouter and the selected model
+provider, with `data_collection: deny` and `zdr: true` routing constraints.
+Already-sent requests cannot be recalled. Do not opt in sensitive panes.
+
+### Provider and failure behavior
+
+The model is **TypeSafe Jev 1.13**, reached through **OpenRouter** with the existing
+OpenRouter key: `typesafe/jev-1.13`, using `POST /api/v1/systemone`.
+No chat-completions endpoint, GPT path, or automatic model substitution remains.
+Edit `config.json` for another Jev version or Doppler source.
+The client reads `OPENROUTER_API_KEY` from the environment first, otherwise from
+the configured Doppler project/config. Secrets stay in memory; none are written
+to this source project or printed by the helper. The live finder resolves the key
+once and passes it only in its child processes' environment, never command arguments.
+
+Jev acts as a semantic condition in ordinary code: Noul for attention predicates,
+Score for graded relevance, Choice for source and tab-name selection. Independent
+questions share one request when bounds allow; overflow batches run concurrently.
+Scores sort by expected relevance (0–2); a highest-probability no-match level excludes
+the candidate. Raw probabilities/confidence remain available in `--json` results.
+These review/ranking policies were checked on synthetic examples, not calibrated
+against a labeled history of this workspace. Confidence is not workflow correctness
+or permission to act. Invalid or failed responses produce clearly labeled local
+catalogs or unclassified output, never a replacement model. No model response
+becomes a shell command, approval, recovery identity or destructive action.
+
+API contract: [OpenRouter TypeSafe integration](https://openrouter.ai/docs/guides/community/typesafe-sdk).
+For model semantics and limits, see [TypeSafe documentation](https://docs.typesafe.ai/llms.txt).
+
+Validate a provider/config change with `tmux-workspace ai check`. The check sends
+only a synthetic readiness sentence, not terminal output.
+
+### Repeatable verification
+
+From the project root, run the deterministic suite without provider access:
+
+```sh
+python3 -W error::ResourceWarning -m unittest discover -s tests -q
+```
+
+The opt-in live suite uses the configured OpenRouter key and consumes API credit.
+It sends synthetic fixtures only, not current pane output or real snapshot history:
+
+```sh
+RUN_LIVE_JEV=1 python3 tests/live_jev.py -v
+```
+
+The live suite covers 32 scenarios: independent attention conditions and negative
+cases, English/Arabic input, prompt injection, semantic ranking, source-backed
+shortcut/skill selection, and context-based names or abstention. These are
+regression examples, not a guarantee of model accuracy on arbitrary terminal logs.
+The deterministic suite covers malformed/provider failures, request bounds,
+permission changes, history filesystem boundaries, and stale confirmed actions.
+Interactive behavior still requires real tmux/fzf checks.
+
+### Change record
+
+- 2026-09-21: Consolidated workspace source and guide into one project; retained
+  live paths as symlinks; added four opt-in Jev workflow tools through OpenRouter,
+  confirmed context-based tab-name selection, and `Ctrl+a a`. Replaced the initial
+  GPT implementation with native Jev primitives, batched decisions, and live typing-driven search.
+- 2026-09-21: Expanded verification to 92 deterministic tests and an opt-in
+  32-scenario live Jev suite. Fixed confirmation races, consent changes during
+  credential lookup, boolean snapshot versions, oversized numeric decisions,
+  HTTP error resource cleanup, and hidden finder status messages. Refined attention
+  condition boundaries using live cases. Verified repeated real picker cancellation,
+  confirmed rename/restore paths, source exclusion, and real HTTP 401 local fallback.
+- 2026-09-22: Verified all five workflows through the installed `Ctrl+a a` popup,
+  including origin-window routing and per-pane consent/revocation. Fixed the
+  provider-check popup closing before its result could be read; success and failure
+  now remain visible until Enter, while direct CLI checks remain nonblocking.
+  Added menu/direct-command lifecycle coverage; all 93 deterministic tests pass.
