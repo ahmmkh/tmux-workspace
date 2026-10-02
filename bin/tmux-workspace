@@ -60,6 +60,59 @@ def pane_info(pane):
     return next(p for p in panes() if p['pane_id'] == pane)
 
 
+AGENT_COLOURS = {'blocked': 31, 'done': 36, 'working': 33, 'idle': 32}  # Most urgent first.
+
+
+def roll_up(rows):
+    """Roll pane status up per tab and per workspace with the rules of agent-status.conf."""
+    by_pane, by_tab, by_workspace = {}, {}, {}
+    rank = list(AGENT_COLOURS).index
+    for row in rows:
+        status = row['@workspace_agent']
+        if row['pane_current_command'] == 'zsh' or status not in AGENT_COLOURS:
+            continue
+        by_pane[row['pane_id']] = status
+        workspace = row['@workspace_home'] if row['session_name'] == PARKING else row['session_name']
+        for group, key in ((by_tab, row['window_id']), (by_workspace, workspace)):
+            group[key] = min(group.get(key, status), status, key=rank)
+    return by_pane, by_tab, by_workspace
+
+
+def agent_status():
+    """Read every pane once. A failed read gives no status, so the pickers still list their rows."""
+    try:
+        return roll_up(fields('list-panes', ['session_name', 'window_id', 'pane_id', 'pane_current_command', '@workspace_agent', '@workspace_home'], '-a'))
+    except Exception:
+        return {}, {}, {}
+
+
+def status_word(status):
+    return f'\x1b[{AGENT_COLOURS[status]}m{status}\x1b[0m' if status in AGENT_COLOURS else ''
+
+
+def workspace_row(name, label, status=''):
+    """fzf shows and searches the label, shows the status and prints only the name."""
+    return '\t'.join((name, label, status_word(status)))
+
+
+def picked_name(output):
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else ''
+
+
+def tab_row(index, name, count, labels, active, status=''):
+    word = f' {status_word(status)} ' if status else ''
+    return f"{index}: {name:<16}{word} [{count} pane{'s' if int(count) > 1 else ''}: {labels}]{'  ● active' if active else ''}"
+
+
+def tab_index(row):
+    return row.split(':')[0].strip()
+
+
+def parked_row(number, pane, status=''):
+    return f" {number}. {pane['label']}  [{pane['home']}]" + (f'  {status_word(status)}' if status else '')
+
+
 def message(text):
     if os.environ.get('TMUX'):
         tm('display-message', text, check=False)
@@ -401,8 +454,9 @@ def unpark(target, direction='right', choose=False):
     selected = choices[0]
     if choose:
         print('Parked panes — restore ' + direction + ' of the selected pane\n')
+        by_pane = agent_status()[0]
         for i, pane in enumerate(choices, 1):
-            print(f" {i}. {pane['label']}  [{pane['home']}]")
+            print(parked_row(i, pane, by_pane.get(pane['pane_id'], '')))
         answer = input('\nNumber (Enter cancels): ').strip()
         if not answer:
             return
@@ -427,6 +481,10 @@ def connect_session(name):
         tm('switch-client', '-t', '=' + name, check=False)
     else:
         os.execv(TMUX, [TMUX, 'attach-session', '-t', '=' + name])
+
+
+# fzf searches only the label and prints only the hidden name, or the typed text when no row matches.
+WORKSPACE_FZF = ['fzf', '--delimiter=\t', '--with-nth=2..', '--nth=1', '--accept-nth=1', '--ansi', '--bind=enter:accept-or-print-query']
 
 
 def choose_or_create_workspace():
@@ -456,22 +514,21 @@ def choose_or_create_workspace():
     except Exception:
         pass
 
+    by_workspace = agent_status()[2]
     display_items = []
     for z in zoxide_list:
-        display_items.append(f"⚡ {z}")
+        display_items.append(workspace_row(z, f"⚡ {z}"))
     for s in live:
-        display_items.append(f"● {s}")
+        display_items.append(workspace_row(s, f"● {s}", by_workspace.get(s, '')))
     for p in projects:
         if p not in live:
-            display_items.append(f"📁 {p}")
+            display_items.append(workspace_row(p, f"📁 {p}"))
 
     if not shutil.which('fzf') or not (sys.stdin.isatty() and sys.stdout.isatty()):
         command = ['sesh', 'picker']
         os.execvp('sesh', command)
 
-    fzf_cmd = [
-        'fzf',
-        '--print-query',
+    fzf_cmd = WORKSPACE_FZF + [
         '--header=Select workspace or type a NEW name to create in Projects | Esc: cancel',
         '--prompt=Workspace > ',
         '--height=50%',
@@ -482,15 +539,9 @@ def choose_or_create_workspace():
     p = subprocess.run(fzf_cmd, input='\n'.join(display_items), text=True, capture_output=True)
     if p.returncode != 0:
         return
-    lines = [line.strip() for line in p.stdout.splitlines() if line.strip()]
-    if not lines:
-        return
-    if len(lines) == 1:
-        target = lines[0]
-    else:
-        selected = lines[1]
-        target = selected.split(' ', 1)[-1]
-    open_workspace(target)
+    target = picked_name(p.stdout)
+    if target:
+        open_workspace(target)
 
 
 def open_workspace(name=None):
@@ -633,23 +684,22 @@ def pick_window():
         message('No active tmux session.')
         return
 
-    raw_wins = tm('list-windows', '-t', f"={session}", '-F', '#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}', check=False)
+    raw_wins = tm('list-windows', '-t', f"={session}", '-F', '#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_id}', check=False)
     if not raw_wins:
         message('No windows found.')
         return
 
+    by_tab = agent_status()[1]
     display_items = []
     for line in raw_wins.splitlines():
         parts = line.split('\t')
-        if len(parts) < 4:
+        if len(parts) < 5:
             continue
         w_idx, w_name, w_active, w_panes = parts[0], parts[1], parts[2] == '1', parts[3]
         raw_panes = tm('list-panes', '-t', f"={session}:{w_idx}",
                        '-F', '#{pane_index}:#{?@workspace_label,#{@workspace_label},#{pane_current_command}}', check=False)
         labels = ', '.join(raw_panes.splitlines()) if raw_panes else 'empty'
-        active_tag = '  ● active' if w_active else ''
-        display = f"{w_idx}: {w_name:<16} [{w_panes} pane{'s' if int(w_panes) > 1 else ''}: {labels}]{active_tag}"
-        display_items.append(display)
+        display_items.append(tab_row(w_idx, w_name, w_panes, labels, w_active, by_tab.get(parts[4], '')))
 
     if not shutil.which('fzf') or not (sys.stdin.isatty() and sys.stdout.isatty()):
         tm('choose-tree', '-Zw', '-t', f"={session}", '-f', f"#{{==:#{{session_name}},{session}}}")
@@ -657,6 +707,7 @@ def pick_window():
 
     fzf_cmd = [
         'fzf',
+        '--ansi',
         '--delimiter=:',
         f'--preview={shlex.quote(SELF)} window-preview {{1}}',
         '--preview-window=right:55%:wrap',
@@ -670,9 +721,7 @@ def pick_window():
     p = subprocess.run(fzf_cmd, input='\n'.join(display_items), text=True, capture_output=True)
     if p.returncode != 0 or not p.stdout.strip():
         return
-    selected_line = p.stdout.strip()
-    chosen_idx = selected_line.split(':')[0].strip()
-    tm('select-window', '-t', f"={session}:{chosen_idx}")
+    tm('select-window', '-t', f"={session}:{tab_index(p.stdout)}")
 
 
 def new_tab(name=None, cwd=None):
@@ -783,7 +832,11 @@ RESTORING:
   Ctrl+a u        Restore most recently parked pane to the RIGHT
   Ctrl+a b        Restore most recently parked pane BELOW
   Ctrl+a U        Interactive popup chooser: pick which parked pane to restore RIGHT
-  Ctrl+a B        Interactive popup chooser: pick which parked pane to restore BELOW"""
+  Ctrl+a B        Interactive popup chooser: pick which parked pane to restore BELOW
+
+AGENT STATUS:
+  A parked agent counts toward the status of its home workspace. A parked
+  agent that is done keeps showing done until the pane comes back."""
     },
     {
         'id': 'unpark-latest-right',
@@ -815,7 +868,9 @@ DESCRIPTION:
 DESCRIPTION:
   Opens a popup menu displaying all currently parked panes:
     1. logs  [my-project]
-    2. server  [my-project]
+    2. agent  [my-project]  done
+  A parked pane that runs an agent shows its status word after the workspace.
+  A parked pane without an agent shows no status word.
   Type the number of the pane you wish to restore and hit Enter.
   The selected pane is attached to the RIGHT of your active pane."""
     },
@@ -831,11 +886,20 @@ DESCRIPTION:
   - Existing project folders in ~/untitled folder/Projects/ (marked with 📁)
   - Recent zoxide paths (marked with ⚡)
 
+AGENT STATUS:
+  The row of an active workspace shows the most urgent status among its
+  agents as a coloured word. The words are blocked, done, working and idle.
+  Parked agents count toward their home workspace. A workspace without an
+  agent shows no status word. The ● still marks an active workspace.
+  The search matches only the name. It never matches the status word.
+
 SWITCHING & CREATING:
   - Select any item to switch/connect to it.
   - Or type a BRAND NEW project name (e.g. 'my-api') and hit Enter:
     Automatically creates `~/untitled folder/Projects/<name>`, sets up the
     session, and connects immediately!
+    Enter creates the workspace only when the typed name matches no row.
+    The status word never becomes part of a workspace name.
 
 SHELL USAGE:
   work                  Fuzzy picker (switch or type new name to create)
@@ -917,7 +981,8 @@ DESCRIPTION:
   Opens an on-screen popup asking for a new pane label:
     Pane label [current]:
   The label is displayed in the top border of the pane and persists across
-  parking, unparking, and reboot recovery snapshots."""
+  parking, unparking, and reboot recovery snapshots.
+  The pane border shows the agent status mark after the label."""
     },
     {
         'id': 'rotate-layout',
@@ -969,6 +1034,8 @@ DESCRIPTION:
 
 FEATURES:
   - Lists window index, tab name, pane count, and running pane labels
+  - Shows the agent status word of each tab after the tab name. A tab
+    without an agent shows no status word.
   - Live preview pane shows the layout, panes, and active screen of each tab
   - Type to filter by index, window name, or pane label
   - Press Enter to jump immediately to the selected window
@@ -1053,6 +1120,81 @@ DESCRIPTION:
   - Mouse: click and drag text; releasing automatically copies to macOS clipboard
   - Press q or Esc to exit copy mode
   - Press Ctrl+a then ] to paste inside tmux (or Cmd+v in terminal)"""
+    },
+    {
+        'id': 'agent-status',
+        'display': 'Topic: Agent Status   What the Marks on Panes, Tabs and the Workspace Name Mean',
+        'title': 'Agent Status Marks',
+        'text': """STATUSES:
+  Every pane that runs an agent has one of four statuses.
+  working   The agent is running a turn.
+  blocked   The agent cannot continue without you. It waits for an approval
+            or an answer, or its turn failed.
+  done      The agent finished a turn while you were not looking at its tab.
+  idle      The agent waits for a prompt and you have seen it.
+  A pane without an agent has no status and shows no mark.
+
+SOUNDS:
+  A pane that becomes blocked plays one sound, even in the tab you are looking at.
+  A pane that becomes done plays a different sound.
+  Working and idle are silent.
+  Ctrl+a then M turns the sounds off and on. The status line shows muted while they are off.
+
+MARKS:
+  blocked   red dot
+  done      cyan dot
+  working   yellow dot
+  idle      green ring
+  The pane border shows the mark of its pane after the label. Each tab shows
+  its mark in front of its index and keeps its width. The workspace mark
+  follows the workspace name on the left of the status line.
+
+ROLL-UP:
+  A tab shows the most urgent status among its panes. A workspace shows the
+  most urgent status among its tabs and its parked panes. The order is
+  blocked, done, working, idle.
+
+DONE AND SEEN:
+  A turn that finishes in a tab you are looking at makes the pane idle. A
+  turn that finishes out of sight makes the pane done. You are looking at a
+  tab when it is the current tab of a workspace that a terminal with focus
+  is showing. Viewing a tab makes every done agent in it seen, and each of
+  those panes becomes idle. Viewing never clears blocked.
+
+PICKERS:
+  The pickers show the status as a coloured word. The workspace picker on
+  Ctrl+a s shows the status of each active workspace. The tab picker on
+  Ctrl+a w shows the status of each tab after the tab name. The parked
+  chooser on Ctrl+a U and Ctrl+a B shows the status of each parked pane.
+  A row without an agent shows no status word. If a picker cannot read the
+  status, it lists its rows without status and works as before.
+
+OMP:
+  omp reports its status from its extension events. A prompt makes the pane
+  working. An approval, a question, a plan that awaits approval and a failed
+  turn make it blocked. The pane stays working while a background job or a
+  subagent of omp is still running.
+  An omp agent that is already running must restart before it uses the new
+  extension.
+  Some omp prompts fire no event and show working. They are the approval of a
+  settings write, consent popups and dialogs that other extensions open.
+  A long-lived background job keeps its pane working while it runs.
+  A plan review that you dismiss without choosing stays blocked until the
+  next prompt. An Esc during a provider retry does the same.
+  A plan that omp submits from inside its eval tool has not been observed.
+  The pane may show idle while that plan review is open.
+
+CLAUDE CODE:
+  Claude Code reports its status from the state file that it writes for each
+  interactive session. Its status line calls the helper once a second, and
+  the helper reads that file. A running turn makes the pane working. A
+  permission prompt, a question and a plan approval make it blocked at once
+  through three hooks. A failed turn stays blocked until the next prompt.
+  The status is unset when Claude Code exits.
+  Claude Code does not document the state file. If an update changes it,
+  Claude Code panes keep their last mark or show none until the helper is
+  updated.
+  A turn shorter than a second can pass without a working mark."""
     },
     {
         'id': 'topic-ai',

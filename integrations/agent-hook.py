@@ -8,11 +8,20 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 TMUX = "/opt/homebrew/bin/tmux"
 PS = "/bin/ps"
 OPTION = "@workspace_app"
+STATUS = "@workspace_agent"
+WAIT = "@workspace_agent_wait"
+FAILED = "@workspace_agent_failed"
+SESSIONS = os.path.expanduser("~/.claude/sessions")
+SETTLE = 5000  # Milliseconds within which a failed turn writes its own idle state.
+# One read gives the pane's process, its status options, the turn-over value and its identity.
+PANE = "\t".join(("#{pane_pid}", "#{pane_tty}", "#{" + STATUS + "}", "#{" + WAIT + "}",
+                  "#{" + FAILED + "}", "#{E:@agent_turn_over}", "#{" + OPTION + "}"))
 
 
 def run(argv):
@@ -183,13 +192,70 @@ def clear_owned(tmux, pane, metadata):
     if any(current.get(key) != metadata.get(key) for key in ("kind", "id", "pid", "birth")):
         return
     # Compare-and-clear inside the server, not a racy read followed by an unset.
-    escaped = raw.replace("#", "##").replace(",", "#,").replace("}", "#}")
-    run([*tmux, "if-shell", "-F", "-t", pane,
-         "#{==:#{" + OPTION + "}," + escaped + "}",
-         "set-option -pu -t " + pane + " " + OPTION])
+    # The status goes with the identity, because both belong to the same agent.
+    set_if(tmux, pane, OPTION, raw, " ; ".join(
+        "set-option -pu -t " + pane + " " + option for option in (OPTION, STATUS, WAIT, FAILED)))
+
+
+def pane_state(tmux, pane):
+    fields = run([*tmux, "display-message", "-p", "-t", pane, PANE]).split("\t", 6)
+    return fields + [""] * (7 - len(fields))
+
+
+def assign(pane, option, value):
+    return "set-option -p -t " + pane + " " + option + " '" + value.replace("'", "'\\''") + "'"
+
+
+def same(option, old):
+    escaped = old.replace("#", "##").replace(",", "#,").replace("}", "#}")
+    return "#{==:#{" + option + "}," + escaped + "}"
+
+
+def set_if(tmux, pane, option, old, command, also=None):
+    """Run the command only while the option still holds the value that was read."""
+    guard = same(option, old)
+    if also:
+        guard = "#{&&:" + guard + "," + same(*also) + "}"
+    run([*tmux, "if-shell", "-F", "-t", pane, guard, command])
+
+
+def session_state(pid):
+    """Read the live state that Claude Code writes for each interactive session."""
+    try:
+        with open(os.path.join(SESSIONS, str(pid) + ".json"), encoding="utf-8") as state:
+            return json.load(state)
+    except (OSError, ValueError):
+        return None
+
+
+def wanted_status(state, session_id, wait, failed, turn_over):
+    """Map the state file to a pane status. None means the pane keeps what it has."""
+    if not isinstance(state, dict):
+        return None
+    status = state.get("status")
+    updated = state.get("statusUpdatedAt")
+
+    def newer(margin):
+        return not wait.isdigit() or (isinstance(updated, (int, float)) and updated > int(wait) + margin)
+
+    if status == "waiting":
+        return "blocked"
+    if status == "busy":
+        # A hook that set blocked wins until the file changes after that hook started.
+        return "working" if newer(0) else None
+    if status in ("idle", "shell"):
+        # A failed turn stays blocked. The once-a-second call can miss a later turn shorter
+        # than a second, so an idle file that changed well after the failure also ends it.
+        # ponytail: a later turn that is missed and ends within SETTLE of the failure keeps
+        # blocked until the next prompt. A UserPromptSubmit hook would close that.
+        if failed == session_id and not newer(SETTLE):
+            return None
+        return turn_over or None
+    return None
 
 
 def main():
+    started = int(time.time() * 1000)
     if len(sys.argv) != 2 or sys.argv[1] not in ("claude", "claude-status", "omp"):
         return
     pane = os.environ.get("TMUX_PANE", "")
@@ -199,28 +265,41 @@ def main():
     status_line = sys.argv[1] == "claude-status"
     kind = "claude" if status_line else sys.argv[1]
     data = json.load(sys.stdin)
-    if not isinstance(data, dict) or data.get("agent_id"):
+    if not isinstance(data, dict):
         return
     event = "SessionStart" if status_line else data.get("hook_event_name")
-    if event not in ("SessionStart", "SessionEnd", "CwdChanged"):
+    # A subagent's approval reaches the user through the pane's agent, so it counts for blocked.
+    blocking = kind == "claude" and event in ("PermissionRequest", "PreToolUse", "StopFailure")
+    if not blocking and (data.get("agent_id") or event not in ("SessionStart", "SessionEnd", "CwdChanged")):
         return
     session_id = data.get("session_id")
     cwd = data.get("cwd")
     if not isinstance(session_id, str) or not session_id or len(session_id) > 4096:
         return
+    if any(ord(char) < 32 for char in session_id):
+        return
+    tmux = [TMUX, "-N", "-S", socket[0]]
+    if blocking:
+        if event == "PreToolUse" and data.get("tool_name") not in ("AskUserQuestion", "ExitPlanMode"):
+            return
+        app = pane_state(tmux, pane)[6]
+        current = json.loads(app) if app else {}
+        # Only the pane's own Claude session may block it, never a nested claude -p.
+        if current.get("kind") != "claude" or current.get("id") != session_id:
+            return
+        failed = [";", "set-option", "-p", "-t", pane, FAILED, session_id] if event == "StopFailure" else []
+        run([*tmux, "set-option", "-p", "-t", pane, STATUS, "blocked", ";",
+             "set-option", "-p", "-t", pane, WAIT, str(started), *failed])
+        return
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return
-    if any(ord(char) < 32 for char in session_id + cwd):
+    if any(ord(char) < 32 for char in cwd):
         return
     explicit_pid = data.get("pid") if kind == "omp" else None
     if kind == "omp" and (type(explicit_pid) is not int or explicit_pid <= 1):
         return
-    tmux = [TMUX, "-N", "-S", socket[0]]
-    pane_info = run([*tmux, "display-message", "-p", "-t", pane,
-                     "#{pane_pid}\t#{pane_tty}"]).split("\t")
-    if len(pane_info) != 2:
-        return
-    identity = owner(kind, int(pane_info[0]), pane_info[1], explicit_pid)
+    state = pane_state(tmux, pane)
+    identity = owner(kind, int(state[0]), state[1], explicit_pid)
     if identity is None:
         return
     pid, birth = identity
@@ -236,10 +315,18 @@ def main():
     if event == "SessionEnd":
         clear_owned(tmux, pane, metadata)
     else:
-        run([*tmux, "set-option", "-p", "-t", pane, OPTION,
-             json.dumps(metadata, separators=(",", ":"))])
+        value = json.dumps(metadata, separators=(",", ":"))
+        if value != state[6]:
+            set_if(tmux, pane, OPTION, state[6], assign(pane, OPTION, value))
     if status_line:
         print("Claude | " + session_id[:8])
+        wanted = wanted_status(session_state(pid), session_id, state[3], state[4], state[5])
+        if wanted and wanted != state[2]:
+            # Any status the file gives ends a failed turn, so the mark goes with the write.
+            # A hook that blocks an already blocked pane changes only the wait value.
+            set_if(tmux, pane, STATUS, state[2],
+                   assign(pane, STATUS, wanted) + " ; set-option -pu -t " + pane + " " + FAILED,
+                   (WAIT, state[3]))
 
 
 if __name__ == "__main__":

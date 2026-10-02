@@ -30,6 +30,7 @@ All workspace-specific source now lives in:
 11. [Configuration Files & Backups](#11-configuration-files--backups)
 12. [Quick Reference Cheatsheet](#12-quick-reference-cheatsheet)
 13. [AI Workflow Tools & Privacy](#13-ai-workflow-tools--privacy)
+    - [Agent status](#agent-status)
 
 ---
 
@@ -77,7 +78,7 @@ When you run `work <name>` (or type a new name in the `work` picker):
 - **Sesh ranking**: `sesh.toml` prioritizes zoxide at the top: `sort_order = ["zoxide", "tmux", "config"]`.
 
 ### Switching & Deleting Workspaces from Inside tmux:
-- **`Ctrl+a` then `s`**: Opens the workspace picker popup over your screen. Select an existing workspace or type a new name to create one on the fly.
+- **`Ctrl+a` then `s`**: Opens the workspace picker popup over your screen. Select an existing workspace or type a new name to create one on the fly. Enter creates the workspace when the typed name matches no row. The row of an active workspace shows the most urgent agent status among its agents as a coloured word. The search matches only the name, and the status word never becomes part of a workspace name.
 - **`Ctrl+a` then `Tab`**: Bounces back to your previous workspace.
 - **`Ctrl+a` then `X`** *(capital X)*: Closes and terminates the current workspace session (asks confirmation first, and automatically switches you to another active workspace so you remain inside tmux).
 - **`Ctrl+a` then `w`**: Opens the current project's fuzzy window picker with pane previews. **`Ctrl+a W`** opens the global session/window tree.
@@ -151,6 +152,11 @@ Every pane maintains an independent label saved in tmux user options (`@workspac
   ```text
   ┌ 1: api ──────────────────────────┬ 2: logs ──────────────────────────┐
   ```
+  When the pane runs an agent, the border shows the agent status mark after the label:
+  ```text
+  ┌ 1: api ● ────────────────────────┬ 2: logs ──────────────────────────┐
+  ```
+  The section [Agent status](#agent-status) explains the marks.
 
 ---
 
@@ -163,6 +169,7 @@ Parking is a feature built specifically for hiding splits (like long-running ser
 - Press **`Ctrl+a` then `!`**.
 - The pane disappears from your visible window and its space is reclaimed by sibling panes.
 - The process in that pane **continues running** uninterrupted in a hidden holding session (`__parked`).
+- A parked agent counts toward the status of its home workspace. A parked agent that is done keeps showing done until you bring the pane back.
 
 ### Restoring Parked Panes
 - **Restore the most recently parked pane:**
@@ -170,19 +177,20 @@ Parking is a feature built specifically for hiding splits (like long-running ser
   - **`Ctrl+a` then `b`**: Restores the pane **below** your current pane.
 
 - **Interactive Chooser (when multiple panes are parked):**
-  - **`Ctrl+a` then `U`**: Opens a popup listing all parked panes with their labels and origin workspaces. Type the number and hit Enter to restore that pane to the **right**.
+  - **`Ctrl+a` then `U`**: Opens a popup listing all parked panes with their labels and origin workspaces. Type the number and hit Enter to restore that pane to the **right**. The row of a parked pane that runs an agent also shows its status word.
   - **`Ctrl+a` then `B`**: Opens the popup chooser and restores the chosen pane **below**.
 
 ---
 
 ## 8. Windows (Tabs/Views within a Project)
 
-Windows let you organize different concerns inside the same project workspace:
+Windows let you organize different concerns inside the same project workspace.
+Each tab in the status line shows the mark of the most urgent agent status among its panes. The mark sits in front of the tab index, and a tab keeps its width with and without a mark.
 
 - **`Ctrl+a` then `c`**: Create a new window / tab. Prompts you to name the tab first in the status bar (`Tab name: `), sets the tab name, and automatically labels the initial pane with that name so you can start working immediately (defaults to `tab` if left blank; press `Esc` to cancel).
 - **`Ctrl+a` then `,`**: Rename the current window.
 - **`Ctrl+a` then `1` .. `9`**: Jump directly to window 1 through 9.
-- **`Ctrl+a` then `w`**: **Window Fuzzy Picker**. Opens an interactive search popup listing all windows (tabs) in your current workspace with live terminal screen previews and running pane summaries. Filter by index, name, or pane label and press Enter to switch immediately.
+- **`Ctrl+a` then `w`**: **Window Fuzzy Picker**. Opens an interactive search popup listing all windows (tabs) in your current workspace with live terminal screen previews and running pane summaries. Filter by index, name, or pane label and press Enter to switch immediately. Each row shows the agent status word of its tab after the tab name.
 - **`Ctrl+a` then `W`** *(capital W)*: Opens tmux's global interactive tree view across all sessions and windows.
 - **`Ctrl+a` then `n`**: Next window.
 - **`Ctrl+a` then `p`**: Previous window.
@@ -241,6 +249,7 @@ Edit these files in `~/untitled folder/Projects/tmux-workspace/`; do not maintai
 | Project path | Live integration |
 |---|---|
 | `tmux.conf` | `~/.tmux.conf` symlink; options, keybindings and status |
+| `agent-status.conf` | Loaded by `tmux.conf` with `source-file`. It holds the formats and hooks of the agent status marks. |
 | `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; existing controller and AI entrypoint |
 | `lib/ai.py`, `lib/ai_core.py` | AI popup, permission controls and shared OpenRouter client |
 | `lib/panes_ai.py` | Semantic pane finder and evidence-backed attention list |
@@ -249,13 +258,15 @@ Edit these files in `~/untitled folder/Projects/tmux-workspace/`; do not maintai
 | `config.json` | Model and Doppler project/config/scope; no API key |
 | `shell.zsh` | Sourced by `~/.zshrc`; `work` and zoxide integration |
 | `sesh.toml` | `~/.config/sesh/sesh.toml` symlink |
-| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink |
-| `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink |
+| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink. The helper publishes the pane identity and reports the agent status of Claude Code. |
+| `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink. The omp extension publishes the pane identity and reports the agent status of omp. |
 | `integrations/tmux_workspace.lua` | `~/.config/nvim/lua/custom/tmux_workspace.lua` symlink |
 | `WORKSPACE_GUIDE.md` | `~/.config/tmux/WORKSPACE_GUIDE.md` symlink; this guide |
 
 Shared application registrations stay in their owning configurations:
-`~/.claude/settings.json` invokes the agent-hook path above for session hooks/status;
+`~/.claude/settings.json` invokes the agent-hook path above for the session hooks, for the
+status line and for the three agent status hooks `PermissionRequest`, `PreToolUse` and
+`StopFailure`. Each status hook entry always exits with status 0.
 `~/.config/nvim/init.lua` calls `require('custom.tmux_workspace').setup()`.
 Those shared files are not copied into this project.
 
@@ -426,12 +437,121 @@ For model semantics and limits, see [TypeSafe documentation](https://docs.typesa
 Validate a provider/config change with `tmux-workspace ai check`. The check sends
 only a synthetic readiness sentence, not terminal output.
 
+### Agent status
+
+Every pane that runs an agent has one status at a time. A pane without an agent has no
+status and shows no mark.
+
+| Status | Meaning | Mark |
+|---|---|---|
+| blocked | The agent cannot continue without you. It waits for an approval or an answer, or its turn failed. | red dot |
+| done | The agent finished a turn while you were not looking at its tab. | cyan dot |
+| working | The agent is running a turn. | yellow dot |
+| idle | The agent waits for a prompt and you have seen it. | green ring |
+
+A pane that becomes blocked plays a sound, even in the tab you are looking at. A pane that
+becomes done plays a different sound. Working and idle are silent. **`Ctrl+a` then `M`**
+turns the sounds off and on, and the status line shows `muted` while they are off. The two
+sound files and the player are the options `@agent_sound_blocked`, `@agent_sound_done` and
+`@agent_sound_cmd` in `agent-status.conf`. The sound plays on the machine that runs tmux.
+
+The marks appear in three places. The pane border shows the mark of its pane after the
+label. Each tab shows its mark in front of its index and keeps its width. The workspace
+mark follows the workspace name on the left of the status line.
+
+A tab shows the most urgent status among its panes. A workspace shows the most urgent
+status among its tabs and its parked panes. The order is blocked, done, working, idle. A
+tab or workspace without an agent shows no mark.
+
+Done appears only when a turn finishes out of sight. A pane is in sight when its tab is the
+current tab of a workspace that a terminal with focus is showing. A turn that finishes in
+sight makes the pane idle. A turn that finishes out of sight makes the pane done. A tab on
+screen in a terminal without focus counts as out of sight. A terminal that cannot report
+focus counts as having focus.
+
+Viewing a tab makes every done agent in it seen, and each of those panes becomes idle.
+This holds for every pane of the tab and not only for the active pane. Viewing never clears
+blocked and does not change working.
+
+A parked agent counts toward its home workspace and is always out of sight. A parked agent
+that is done keeps showing done until you bring its pane back into a tab.
+
+A pane whose agent has exited shows no mark and no longer counts toward its tab or its
+workspace. Snapshots do not save status. Status stays on this machine and never goes to a
+model provider.
+
+The pickers show the status as a coloured word. The workspace picker on `Ctrl+a` `s` shows
+the status of each active workspace, and its parked agents count. The tab picker on
+`Ctrl+a` `w` shows the status of each tab after the tab name. The parked chooser on
+`Ctrl+a` `U` and `Ctrl+a` `B` shows the status of each parked pane. A row without an agent
+shows no status word. The workspace picker searches only the name, so the status word
+never changes which workspace it opens or creates. If a picker cannot read the status, it
+lists its rows without status and works as before.
+
+The marks have three limits.
+
+- A pane hidden behind a zoomed pane of the same tab counts as seen, because seeing is per tab.
+- Swapping tabs with `swap-window` does not make the done agents of a tab seen until the
+  next tab switch or focus change.
+- If an agent is killed and you then run a program other than the shell in the same pane,
+  the old mark reappears until the next agent starts there.
+
+omp reports its status from its extension events. A prompt makes the pane working. An
+approval, a question from the `ask` tool, a plan that awaits approval and a failed turn
+make it blocked. A provider retry counts as working. The pane stays working while a
+background job or a subagent of omp is still running, and the turn counts as finished only
+when all of them have stopped. A subagent never changes the status of the pane by itself.
+An omp agent that is already running must restart before it uses the new extension.
+
+The omp status has five limits.
+
+- Some omp prompts fire no event and show working. They are the approval of a settings
+  write, consent popups and dialogs that other extensions open.
+- A long-lived background job, such as a dev server, keeps its pane working while it runs.
+- If you dismiss a plan review without choosing, the pane stays blocked until the next
+  prompt.
+- An Esc during a provider retry also shows blocked until the next prompt.
+- A plan that omp submits from inside its `eval` tool has not been observed. The pane may
+  show idle while that plan review is open.
+
+Claude Code reports its status from the state file that it writes for each interactive
+session under `~/.claude/sessions`. Its status line calls the helper once a second, and the
+helper reads that file. A running turn makes the pane working. A permission prompt and a
+question make it blocked. A finished or interrupted turn follows the rule for done and
+seen. Three hook entries cover what the file cannot. A permission prompt, a question and a
+plan approval make the pane blocked at once, because Claude Code pauses its status line
+while a prompt is open. A failed turn makes the pane blocked until the next prompt. A
+subagent that needs your approval counts as blocked, and a nested `claude -p` never changes
+the pane. The status is unset when Claude Code exits.
+
+The Claude Code status has two limits.
+
+- Claude Code does not document the state file. If an update changes it, Claude Code panes
+  keep their last mark or show none until the helper is updated.
+- The helper reads the file once a second, so a turn shorter than a second can pass without
+  a working mark.
+
 ### Repeatable verification
 
 From the project root, run the deterministic suite without provider access:
 
 ```sh
 python3 -W error::ResourceWarning -m unittest discover -s tests -q
+```
+
+The suite includes `tests/test_agent_status_tmux.py`, which checks the agent status marks
+on a scratch tmux server. That server uses its own socket and never loads `~/.tmux.conf`,
+so the test cannot touch the running workspaces. Run it alone with this command:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_agent_status_tmux.py'
+```
+
+`tests/test_agent_status.py` checks how the helper maps the state of Claude Code to a
+status. It also checks the roll-up and the rows of the pickers. The hooks run the helper under `/usr/bin/python3`, so run that test under it too:
+
+```sh
+/usr/bin/python3 -B -m unittest discover -s tests -p 'test_agent_status.py'
 ```
 
 The opt-in live suite uses the configured OpenRouter key and consumes API credit.
@@ -466,3 +586,9 @@ Interactive behavior still requires real tmux/fzf checks.
   provider-check popup closing before its result could be read; success and failure
   now remain visible until Enter, while direct CLI checks remain nonblocking.
   Added menu/direct-command lifecycle coverage; all 93 deterministic tests pass.
+- 2026-10-01: Added agent status marks. Each pane that runs an agent shows working,
+  blocked, done or idle on its border, and tabs and the workspace name show the most
+  urgent status among their agents. The formats and hooks moved from `tmux.conf` into
+  `agent-status.conf`. Added a scratch-server test for the marks. The workspace picker,
+  the tab picker and the parked chooser show the status as a word. Typing a name that
+  matches no row in the workspace picker now creates that workspace.
