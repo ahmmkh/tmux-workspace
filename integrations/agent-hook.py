@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 TMUX = "/opt/homebrew/bin/tmux"
 PS = "/bin/ps"
@@ -17,8 +18,10 @@ OPTION = "@workspace_app"
 STATUS = "@workspace_agent"
 WAIT = "@workspace_agent_wait"
 FAILED = "@workspace_agent_failed"
-SESSIONS = os.path.expanduser("~/.claude/sessions")
+SESSIONS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "sessions")
 SETTLE = 5000  # Milliseconds within which a failed turn writes its own idle state.
+# tmux decides turn over when it writes. Without agent-status.conf the pane becomes idle.
+TURN_OVER = "#{?#{@agent_turn_over},#{E:@agent_turn_over},idle}"
 # One read gives the pane's process, its status options, the turn-over value and its identity.
 PANE = "\t".join(("#{pane_pid}", "#{pane_tty}", "#{" + STATUS + "}", "#{" + WAIT + "}",
                   "#{" + FAILED + "}", "#{E:@agent_turn_over}", "#{" + OPTION + "}"))
@@ -188,22 +191,48 @@ def clear_owned(tmux, pane, metadata):
     raw = run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION])
     if not raw:
         return
-    current = json.loads(raw)
+    current = published(raw)
     if any(current.get(key) != metadata.get(key) for key in ("kind", "id", "pid", "birth")):
         return
     # Compare-and-clear inside the server, not a racy read followed by an unset.
     # The status goes with the identity, because both belong to the same agent.
-    set_if(tmux, pane, OPTION, raw, " ; ".join(
-        "set-option -pu -t " + pane + " " + option for option in (OPTION, STATUS, WAIT, FAILED)))
+    set_if(tmux, pane, OPTION, raw, unset(pane, OPTION, STATUS, WAIT, FAILED))
+
+
+class Pane(NamedTuple):
+    pid: str
+    tty: str
+    status: str
+    wait: str
+    failed: str
+    turn_over: str
+    app: str
 
 
 def pane_state(tmux, pane):
     fields = run([*tmux, "display-message", "-p", "-t", pane, PANE]).split("\t", 6)
-    return fields + [""] * (7 - len(fields))
+    return Pane(*fields + [""] * (7 - len(fields)))
+
+
+def published(raw):
+    """Parse the identity on a pane. A value that is not a JSON object counts as none."""
+    try:
+        value = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def assign(pane, option, value):
     return "set-option -p -t " + pane + " " + option + " '" + value.replace("'", "'\\''") + "'"
+
+
+def unset(pane, *options):
+    return " ; ".join("set-option -pu -t " + pane + " " + option for option in options)
+
+
+def turn_over(pane):
+    return "set-option -pF -t " + pane + " " + STATUS + " '" + TURN_OVER + "'"
 
 
 def same(option, old):
@@ -236,7 +265,8 @@ def wanted_status(state, session_id, wait, failed, turn_over):
     updated = state.get("statusUpdatedAt")
 
     def newer(margin):
-        return not wait.isdigit() or (isinstance(updated, (int, float)) and updated > int(wait) + margin)
+        # A file without a usable time counts as newer, so a blocked set by a hook never sticks.
+        return not wait.isdigit() or not isinstance(updated, (int, float)) or updated > int(wait) + margin
 
     if status == "waiting":
         return "blocked"
@@ -248,9 +278,11 @@ def wanted_status(state, session_id, wait, failed, turn_over):
         # than a second, so an idle file that changed well after the failure also ends it.
         # ponytail: a later turn that is missed and ends within SETTLE of the failure keeps
         # blocked until the next prompt. A UserPromptSubmit hook would close that.
-        if failed == session_id and not newer(SETTLE):
+        # Only an idle file ends a failed turn. A shell command never turns it into done.
+        if failed == session_id and (status == "shell" or not newer(SETTLE)):
             return None
-        return turn_over or None
+        # Turn over fails safe. Anything but done gives idle.
+        return "done" if turn_over == "done" else "idle"
     return None
 
 
@@ -282,10 +314,16 @@ def main():
     if blocking:
         if event == "PreToolUse" and data.get("tool_name") not in ("AskUserQuestion", "ExitPlanMode"):
             return
-        app = pane_state(tmux, pane)[6]
-        current = json.loads(app) if app else {}
+        # A subagent that fails does not end the turn of the pane's agent.
+        if event == "StopFailure" and data.get("agent_id"):
+            return
+        current = published(pane_state(tmux, pane).app)
         # Only the pane's own Claude session may block it, never a nested claude -p.
         if current.get("kind") != "claude" or current.get("id") != session_id:
+            return
+        # Only the status call clears blocked, and it needs the state file to do so.
+        file = session_state(current.get("pid"))
+        if not isinstance(file, dict) or not file.get("status"):
             return
         failed = [";", "set-option", "-p", "-t", pane, FAILED, session_id] if event == "StopFailure" else []
         run([*tmux, "set-option", "-p", "-t", pane, STATUS, "blocked", ";",
@@ -299,7 +337,7 @@ def main():
     if kind == "omp" and (type(explicit_pid) is not int or explicit_pid <= 1):
         return
     state = pane_state(tmux, pane)
-    identity = owner(kind, int(state[0]), state[1], explicit_pid)
+    identity = owner(kind, int(state.pid), state.tty, explicit_pid)
     if identity is None:
         return
     pid, birth = identity
@@ -307,8 +345,7 @@ def main():
     if kind == "claude" and not status_line and event == "SessionStart" and data.get("source") == "fork":
         # /fork may copy a BACKGROUND conversation under the same PID. Invalidate
         # the old owner until the native status callback identifies the visible one.
-        raw = run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION])
-        current = json.loads(raw) if raw else {}
+        current = published(run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION]))
         if all(current.get(key) == metadata[key] for key in ("kind", "pid", "birth")):
             clear_owned(tmux, pane, current)
         return
@@ -316,22 +353,27 @@ def main():
         clear_owned(tmux, pane, metadata)
     else:
         value = json.dumps(metadata, separators=(",", ":"))
-        if value != state[6]:
-            set_if(tmux, pane, OPTION, state[6], assign(pane, OPTION, value))
+        if value != state.app:
+            command = assign(pane, OPTION, value)
+            old = published(state.app)
+            if any(old.get(key) != metadata[key] for key in ("id", "pid", "birth")):
+                # A new session never inherits the status of the session before it.
+                command += " ; " + unset(pane, STATUS, WAIT, FAILED)
+                state = state._replace(status="", wait="", failed="")
+            set_if(tmux, pane, OPTION, state.app, command)
     if status_line:
         print("Claude | " + session_id[:8])
-        wanted = wanted_status(session_state(pid), session_id, state[3], state[4], state[5])
-        if wanted and wanted != state[2]:
+        wanted = wanted_status(session_state(pid), session_id, state.wait, state.failed, state.turn_over)
+        if wanted and wanted != state.status:
             # Any status the file gives ends a failed turn, so the mark goes with the write.
             # A hook that blocks an already blocked pane changes only the wait value.
-            set_if(tmux, pane, STATUS, state[2],
-                   assign(pane, STATUS, wanted) + " ; set-option -pu -t " + pane + " " + FAILED,
-                   (WAIT, state[3]))
+            write = turn_over(pane) if wanted in ("idle", "done") else assign(pane, STATUS, wanted)
+            set_if(tmux, pane, STATUS, state.status, write + " ; " + unset(pane, FAILED), (WAIT, state.wait))
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         # Recovery metadata must never change hook approval decisions or agent output.
         pass

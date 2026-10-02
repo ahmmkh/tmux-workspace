@@ -1,15 +1,26 @@
 """Check agent-status.conf on a scratch tmux server that never loads the real config."""
+import contextlib
+import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import pty
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 CONF = ROOT / 'agent-status.conf'
+SPEC = importlib.util.spec_from_file_location('agent_hook', ROOT / 'integrations' / 'agent-hook.py')
+assert SPEC is not None and SPEC.loader is not None
+hook = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(hook)
 BLOCKED, DONE, WORKING, IDLE = '#[fg=#f7768e]●', '#[fg=#7dcfff]●', '#[fg=#e0af68]●', '#[fg=#9ece6a]○'
 ORDER = [('blocked', BLOCKED), ('done', DONE), ('working', WORKING), ('idle', IDLE)]
 SLEEP = 'sleep 300'  # Panes end by themselves, so a leftover server does too.
@@ -27,6 +38,7 @@ class ScratchTmux(unittest.TestCase):
         self.run_tmux('new-session', '-d', '-s', 'alpha', '-n', 'one', '-x', '120', '-y', '40', SLEEP)
         self.addCleanup(self.stop_server, self.tmux('display-message', 'alpha', '-p', '#{socket_path}'))
         self.tmux('source-file', 'alpha', str(CONF))
+        self.run_tmux('set-option', '-g', '@agent_sound_cmd', 'true')  # Tests never play a real sound.
 
     def argv(self, *args):
         return ['tmux', '-L', self.name, '-f', '/dev/null', *args]
@@ -61,7 +73,7 @@ class ScratchTmux(unittest.TestCase):
         self.tmux('set-option', pane, *(('-p', '@workspace_agent', value) if value else ('-pu', '@workspace_agent')))
 
     def turn_over(self, pane):
-        self.tmux('set-option', pane, '-pF', '@workspace_agent', '#{E:@agent_turn_over}')
+        self.tmux('set-option', pane, '-pF', '@workspace_agent', hook.TURN_OVER)
         return self.status(pane)
 
     def wait_for(self, read, expected):
@@ -152,6 +164,14 @@ class Marks(ScratchTmux):
         self.assertEqual(self.expand('alpha:one', '#{E:@agent_tab}'), ' ')
         self.assertEqual(self.expand('alpha', '#{E:@agent_workspace}'), ' ')
 
+    def test_status_left_fits_a_long_workspace_name_and_separates_the_mark(self):
+        name = 'n' * 20
+        self.run_tmux('new-session', '-d', '-s', name, SLEEP)
+        self.status(name, 'blocked')
+        length = int((ROOT / 'tmux.conf').read_text().split('status-left-length ')[1].split()[0])
+        self.assertLessEqual(int(self.expand(name, '#{w:#{E:status-left}}')), length)
+        self.assertTrue(self.expand(name, '#{E:status-left}').endswith(BLOCKED + '#[default] │ '))
+
     def test_tab_keeps_its_width_with_and_without_a_mark(self):
         widths = '#{w:#{E:window-status-format}} #{w:#{E:window-status-current-format}}'
         expected = str(len(' 0:one '))  # The width of a tab before this file replaced the formats.
@@ -224,6 +244,104 @@ class TurnOverAndSeen(ScratchTmux):
         self.assertEqual(self.expand('alpha', '#{E:@agent_workspace}'), DONE)
         self.tmux('join-pane', 'alpha:one', '-d', '-s', parked)
         self.wait_for(lambda: self.status(parked), 'idle')
+
+
+class HelperWrites(ScratchTmux):
+    """Run agent-hook.py against the scratch server. Only the process lookup and the state file are stand-ins."""
+    PID = 4242
+
+    def setUp(self):
+        super().setUp()
+        self.hidden = self.pane('new-window', 'alpha', '-n', 'two')
+        self.sessions = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        socket = self.tmux('display-message', 'alpha', '-p', '#{socket_path}')
+        # The helper addresses the scratch socket by its path and never the default server.
+        env = dict(self.env, TMUX=socket + ',1,0', TMUX_PANE=self.hidden)
+        for patch in (mock.patch.object(hook, 'TMUX', shutil.which('tmux')),
+                      mock.patch.object(hook, 'owner', lambda *_: (self.PID, 'Thu Oct  1 20:23:29 2026')),
+                      mock.patch.object(hook, 'SESSIONS', str(self.sessions)),
+                      mock.patch.dict(os.environ, env, clear=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def call(self, mode, session='session-1', cwd='/work', **data):
+        payload = dict(data, session_id=session, cwd=cwd)
+        with mock.patch.object(sys, 'argv', ['agent-hook.py', mode]), \
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                contextlib.redirect_stdout(io.StringIO()):
+            hook.main()
+
+    def file(self, **state):
+        (self.sessions / f'{self.PID}.json').write_text(json.dumps(state))
+
+    def option(self, name):
+        return self.tmux('show-options', self.hidden, '-pqv', name)
+
+    def test_turn_over_without_the_conf_gives_idle(self):
+        self.run_tmux('set-option', '-gu', '@agent_turn_over')
+        self.call('claude-status')
+        self.status(self.hidden, 'working')
+        self.file(status='idle', statusUpdatedAt=5)
+        self.call('claude-status')
+        self.assertEqual(self.status(self.hidden), 'idle')
+
+    def test_turn_over_with_the_conf_and_no_client_gives_done(self):
+        self.call('claude-status')
+        self.status(self.hidden, 'working')
+        self.file(status='idle', statusUpdatedAt=5)
+        self.call('claude-status')
+        self.assertEqual(self.status(self.hidden), 'done')
+
+    def test_write_does_nothing_when_the_status_or_the_wait_changed_underneath(self):
+        self.call('claude-status')
+        self.file(status='idle', statusUpdatedAt=5)
+        read = hook.pane_state
+        for change in (('@workspace_agent', 'blocked'), ('@workspace_agent_wait', '7')):
+            self.status(self.hidden, 'working')
+
+            def stale(tmux, pane):
+                state = read(tmux, pane)
+                self.tmux('set-option', self.hidden, '-p', *change)
+                return state
+
+            with mock.patch.object(hook, 'pane_state', stale):
+                self.call('claude-status')
+            self.assertEqual(self.option(change[0]), change[1])
+            self.assertIn(self.status(self.hidden), ('working', 'blocked'))
+
+    def test_hook_blocks_and_a_newer_file_returns_to_working(self):
+        self.call('claude-status')
+        self.file(status='busy', statusUpdatedAt=5)
+        self.call('claude', hook_event_name='StopFailure')
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.assertEqual(self.option('@workspace_agent_failed'), 'session-1')
+        self.call('claude-status')
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.file(status='busy', statusUpdatedAt=int(self.option('@workspace_agent_wait')) + 1)
+        self.call('claude-status')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.assertEqual(self.option('@workspace_agent_failed'), '')
+
+    def test_identity_with_special_characters_survives_the_write_and_the_guard(self):
+        session = 'it\'s #1, {a} "b" #{pane_id} $HOME ; kill-server'
+        self.call('claude-status', session=session)
+        expected = {'kind': 'claude', 'id': session, 'pid': self.PID, 'cwd': '/work', 'birth': 'Thu Oct  1 20:23:29 2026'}
+        self.assertEqual(json.loads(self.option('@workspace_app')), expected)
+        self.status(self.hidden, 'working')
+        self.call('claude-status', session=session, cwd='/else, where}')
+        self.assertEqual(json.loads(self.option('@workspace_app')), dict(expected, cwd='/else, where}'))
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('claude', session=session, cwd='/else, where}', hook_event_name='SessionEnd')
+        self.assertEqual((self.option('@workspace_app'), self.status(self.hidden)), ('', ''))
+
+    def test_new_session_ends_up_idle_and_never_done(self):
+        self.call('claude-status', session='killed-session')
+        self.status(self.hidden, 'working')
+        self.tmux('set-option', self.hidden, '-p', '@workspace_agent_failed', 'killed-session')
+        self.file(status='idle', statusUpdatedAt=5)
+        self.call('claude-status', session='fresh-session')
+        self.assertEqual(self.status(self.hidden), 'idle')
+        self.assertEqual(self.option('@workspace_agent_failed'), '')
 
 
 class Sound(ScratchTmux):

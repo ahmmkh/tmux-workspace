@@ -71,6 +71,7 @@ None. The project has no specs yet.
   0.74.4 provides. The Claude Code path depends on a state file whose format Claude Code
   does not document.
 - Status stays on this machine and never goes to a model provider.
-- Out of scope are Codex and other agents, notifications and sounds, an always-on list of
-  other workspaces, marks in the prefix+W tree, the identity publishing fix and the
-  unattended restore guard. The last three have their own follow-up changes.
+- Out of scope are Codex and other agents, notifications, an always-on list of other
+  workspaces, marks in the prefix+W tree, the identity publishing fix and the unattended
+  restore guard. The last three have their own follow-up changes. The change
+  `add-agent-status-sound` covers sounds.

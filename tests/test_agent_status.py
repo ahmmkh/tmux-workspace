@@ -59,8 +59,19 @@ class Mapping(unittest.TestCase):
         self.assertIsNone(self.wanted({'status': 'busy', 'statusUpdatedAt': 99}, wait='100'))
         self.assertEqual(self.wanted({'status': 'busy', 'statusUpdatedAt': 101}, wait='100'), 'working')
 
-    def test_turn_over_without_the_tmux_formats_changes_nothing(self):
-        self.assertIsNone(self.wanted({'status': 'idle'}, turn_over=''))
+    def test_turn_over_without_a_usable_value_gives_idle(self):
+        for turn_over in ('', 'working', 'blocked', 'garbage'):
+            self.assertEqual(self.wanted({'status': 'idle'}, turn_over=turn_over), 'idle')
+
+    def test_shell_never_ends_a_failed_turn(self):
+        state = {'status': 'shell', 'statusUpdatedAt': 1000 + hook.SETTLE + 1}
+        self.assertIsNone(self.wanted(state, wait='1000', failed=SESSION))
+        self.assertIsNone(self.wanted({'status': 'shell'}, wait='1000', failed=SESSION))
+
+    def test_file_without_a_usable_time_counts_as_newer(self):
+        for extra in ({}, {'statusUpdatedAt': None}, {'statusUpdatedAt': 'soon'}):
+            self.assertEqual(self.wanted(dict(extra, status='busy'), wait='100'), 'working')
+            self.assertEqual(self.wanted(dict(extra, status='idle'), wait='100', failed=SESSION), 'done')
 
 
 class Helper(unittest.TestCase):
@@ -136,7 +147,63 @@ class Helper(unittest.TestCase):
         self.assertIn('#{==:#{@workspace_app},}', self.writes[0])
         self.assertIn('@workspace_app', self.writes[0])
 
+    def test_turn_over_is_decided_by_tmux_inside_the_compare_and_set(self):
+        self.file(status='idle', statusUpdatedAt=5)
+        self.pane['agent'] = 'working'
+        self.call('claude-status')
+        self.assertEqual(len(self.writes), 1)
+        self.assertIn('#{==:#{@workspace_agent},working}', self.writes[0])
+        self.assertIn("set-option -pF -t %7 @workspace_agent '" + hook.TURN_OVER + "'", self.writes[0])
+
+    def test_new_session_unsets_the_old_status_with_the_identity(self):
+        self.file(status='busy', statusUpdatedAt=5)
+        self.pane.update(agent='blocked', wait='9', failed='older-session',
+                         app=APP.replace(SESSION, 'older-session'))
+        self.call('claude-status')
+        self.assertEqual(len(self.writes), 2)
+        self.assertIn("@workspace_app '", self.writes[0])
+        for option in ('@workspace_agent', '@workspace_agent_wait', '@workspace_agent_failed'):
+            self.assertIn('set-option -pu -t %7 ' + option, self.writes[0])
+        self.assertIn('#{&&:#{==:#{@workspace_agent},},#{==:#{@workspace_agent_wait},}}', self.writes[1])
+        self.assertIn("@workspace_agent 'working'", self.writes[1])
+
+    def test_changed_folder_keeps_the_status(self):
+        self.pane['agent'] = 'working'
+        self.call('claude-status', cwd='/elsewhere')
+        self.assertEqual(len(self.writes), 1)
+        self.assertNotIn('-pu', self.writes[0])
+
+    def test_identity_that_is_not_an_object_changes_nothing(self):
+        self.file(status='busy')
+        for app in ('[1]', '"text"', '7', 'not json'):
+            self.pane['app'] = app
+            self.assertEqual(self.call('claude', hook_event_name='PermissionRequest'), '')
+            self.assertEqual(self.call('claude', hook_event_name='SessionEnd'), '')
+            self.assertEqual(self.call('claude', hook_event_name='SessionStart', source='fork'), '')
+            self.assertEqual(self.writes, [])
+
+    def test_hook_does_not_block_without_a_state_file_that_could_clear_it(self):
+        self.pane['agent'] = 'working'
+        self.call('claude', hook_event_name='PermissionRequest')
+        self.file(pid=PID)
+        self.call('claude', hook_event_name='StopFailure')
+        self.assertEqual(self.writes, [])
+
+    def test_stop_failure_of_a_subagent_changes_nothing(self):
+        self.assertEqual(self.blocked('StopFailure', agent_id='sub-1'), [])
+
+    def test_sessions_folder_follows_claude_config_dir(self):
+        with mock.patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': '/elsewhere'}):
+            fresh = importlib.util.module_from_spec(SPEC)
+            SPEC.loader.exec_module(fresh)
+        self.assertEqual(fresh.SESSIONS, '/elsewhere/sessions')
+        with mock.patch.dict(os.environ):
+            os.environ.pop('CLAUDE_CONFIG_DIR', None)
+            SPEC.loader.exec_module(fresh)
+        self.assertEqual(fresh.SESSIONS, os.path.expanduser('~/.claude/sessions'))
+
     def blocked(self, event, **data):
+        self.file(status='busy', statusUpdatedAt=5)
         self.pane['agent'] = 'working'
         self.assertEqual(self.call('claude', hook_event_name=event, **data), '')
         return self.writes
@@ -228,7 +295,7 @@ class RollUp(unittest.TestCase):
     def test_failing_read_gives_no_status(self):
         with mock.patch.object(ws, 'tm', side_effect=subprocess.CalledProcessError(1, 'tmux')):
             self.assertEqual(ws.agent_status(), ({}, {}, {}))
-            self.assertEqual(ws.workspace_row('alpha', '● alpha', ws.agent_status()[2].get('alpha', '')), 'alpha\t● alpha\t')
+            self.assertEqual(ws.workspace_row('alpha', '● alpha', ws.agent_status()[2].get('alpha', '')).split('\t'), ['alpha', '● alpha'.ljust(24), ''])
 
     def test_read_asks_tmux_once(self):
         line = ws.SEP.join(('alpha', '@1', '%1', 'omp', 'blocked', ''))
@@ -242,10 +309,11 @@ class Rows(unittest.TestCase):
     def test_workspace_row_hides_the_name_in_the_first_field(self):
         row = ws.workspace_row('odoo-project', '● odoo-project', 'blocked')
         name, label, status = row.split('\t')
-        self.assertEqual((name, label), ('odoo-project', '● odoo-project'))
+        self.assertEqual((name, label.rstrip()), ('odoo-project', '● odoo-project'))
         self.assertIn('blocked', status)
         self.assertTrue(status.startswith('\x1b['))
-        self.assertEqual(ws.workspace_row('notes', '● notes'), 'notes\t● notes\t')
+        plain = ws.workspace_row('notes', '● notes')
+        self.assertEqual(plain.split('\t'), ['notes', '● notes'.ljust(len(label)), ''])
 
     def test_picked_name_is_the_last_non_empty_line(self):
         self.assertEqual(ws.picked_name('odoo\nodoo-project\n'), 'odoo-project')
@@ -272,6 +340,24 @@ class Rows(unittest.TestCase):
         self.assertNotIn('working', plain)
         self.assertLess(marked.index('editor'), marked.index('working'))
         self.assertEqual((ws.tab_index(plain), ws.tab_index(marked)), ('3', '3'))
+        self.assertEqual(plain.index('['), marked.replace('\x1b[33m', '').replace('\x1b[0m', '').index('['))
+        idle = ws.tab_row('3', 'editor', '2', '1:omp, 2:shell', False, 'idle')
+        self.assertEqual(idle.index(' ['), marked.index(' ['))
+
+    @unittest.skipUnless(shutil.which('fzf'), 'fzf is not installed')
+    def test_tab_picker_searches_only_the_index_and_the_name(self):
+        rows = '\n'.join((ws.tab_row('3', 'editor', '2', '1:omp, 2:shell', False, 'working'),
+                          ws.tab_row('4', 'logs', '1', '1:tail', True)))
+
+        def filtered(query):
+            return subprocess.run(ws.TAB_FZF + ['--filter=' + query], input=rows, capture_output=True, text=True).stdout
+
+        self.assertEqual(ws.tab_index(filtered('editor')), '3')
+        self.assertEqual(ws.tab_index(filtered('4')), '4')
+        for query in ('working', 'omp', 'active'):
+            self.assertEqual(filtered(query), '')
+        # The preview receives the first field, and window_preview reads the index from it.
+        self.assertEqual(rows.splitlines()[0].split('\t')[0].split(':')[0], '3')
 
     def test_parked_row_shows_the_status_word_and_keeps_its_number(self):
         parked = {'label': 'logs', 'home': 'alpha'}

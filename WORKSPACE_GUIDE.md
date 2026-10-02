@@ -457,7 +457,9 @@ sound files and the player are the options `@agent_sound_blocked`, `@agent_sound
 
 The marks appear in three places. The pane border shows the mark of its pane after the
 label. Each tab shows its mark in front of its index and keeps its width. The workspace
-mark follows the workspace name on the left of the status line.
+mark follows the workspace name on the left of the status line, and a separator stands
+between it and the first tab. The tab name and the pane label take the colour of the
+status. An omp agent that was already running shows no mark until it restarts.
 
 A tab shows the most urgent status among its panes. A workspace shows the most urgent
 status among its tabs and its parked panes. The order is blocked, done, working, idle. A

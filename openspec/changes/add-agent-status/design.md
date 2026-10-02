@@ -46,7 +46,7 @@ its part on a scratch tmux server. Only the live walk-through of task group 5 ha
 **Non-Goals:**
 
 - Status for Codex and other agents.
-- Notifications and sounds.
+- Notifications. The change `add-agent-status-sound` covers sounds.
 - An always-on list of other workspaces.
 - Marks in the prefix+W tree. The change `add-tree-picker-agent-status` covers them.
 - The identity publishing fix. The change `fix-agent-identity-publish` covers it.
@@ -85,8 +85,12 @@ Both rules live once, as formats in the new tmux file. Each writer applies turn 
 a single command:
 
 ```sh
-tmux set -pF -t <pane> @workspace_agent '#{E:@agent_turn_over}'
+tmux set -pF -t <pane> @workspace_agent '#{?#{@agent_turn_over},#{E:@agent_turn_over},idle}'
 ```
+
+The fallback makes the pane idle when `agent-status.conf` is not loaded, so turn over never
+writes an empty status. The Claude helper runs this command inside its compare-and-set, so
+tmux decides at the moment of the write.
 
 The alternative was to let each writer work out visibility itself, once in TypeScript and
 once in Python. It lost because the two copies and the hooks would drift apart, and
@@ -121,15 +125,16 @@ This is the content of `agent-status.conf`:
 # Agent status. Each pane carries @workspace_agent = working | blocked | done | idle.
 set -g @agent_state '#{?#{==:#{pane_current_command},zsh},,#{@workspace_agent}}'
 set -g @agent_pane '#{?#{==:#{E:@agent_state},blocked},#[fg=#f7768e]● ,#{==:#{E:@agent_state},done},#[fg=#7dcfff]● ,#{==:#{E:@agent_state},working},#[fg=#e0af68]● ,#{==:#{E:@agent_state},idle},#[fg=#9ece6a]○ ,}'
+set -g @agent_color '#{?#{==:#{E:@agent_state},blocked},#[fg=#f7768e#,bold],#{==:#{E:@agent_state},done},#[fg=#7dcfff],#{==:#{E:@agent_state},working},#[fg=#e0af68],#{==:#{E:@agent_state},idle},#[fg=#9ece6a],}'
 set -g @agent_tab_states '#{P:#{E:@agent_state} }'
 set -g @agent_tab '#{?#{m:*blocked*,#{E:@agent_tab_states}},#[fg=#f7768e]●,#{m:*done*,#{E:@agent_tab_states}},#[fg=#7dcfff]●,#{m:*working*,#{E:@agent_tab_states}},#[fg=#e0af68]●,#{m:*idle*,#{E:@agent_tab_states}},#[fg=#9ece6a]○, }'
 set -g @agent_own '#{W:#{P:#{E:@agent_state} }}'
 set -g @agent_parked '#{S:#{?#{==:#{session_name},__parked},#{W:#{P:|#{@workspace_home}:#{E:@agent_state}|}},}}'
 set -g @agent_workspace '#{?#{||:#{m:*blocked*,#{E:@agent_own}},#{m:*|#{session_name}:blocked|*,#{E:@agent_parked}}},#[fg=#f7768e]●,#{||:#{m:*done*,#{E:@agent_own}},#{m:*|#{session_name}:done|*,#{E:@agent_parked}}},#[fg=#7dcfff]●,#{||:#{m:*working*,#{E:@agent_own}},#{m:*|#{session_name}:working|*,#{E:@agent_parked}}},#[fg=#e0af68]●,#{||:#{m:*idle*,#{E:@agent_own}},#{m:*|#{session_name}:idle|*,#{E:@agent_parked}}},#[fg=#9ece6a]○, }'
-set -g status-left '#[bold,fg=colour75] #S #[default]#{E:@agent_workspace}#[default] '
-setw -g window-status-format '#{E:@agent_tab}#[default]#I:#W '
+set -g status-left '#[bold,fg=colour75] #S #[default]#{E:@agent_workspace}#[default] │ '
+setw -g window-status-format '#{E:@agent_tab}#I:#W#[default] '
 setw -g window-status-current-format '#{E:@agent_tab}#[bold,fg=colour234,bg=colour75]#I:#W#[default] '
-set -g pane-border-format ' #{pane_index}: #{?@workspace_label,#{@workspace_label},name this pane} #{E:@agent_pane}#[default]'
+set -g pane-border-format ' #{E:@agent_color}#{pane_index}: #{?@workspace_label,#{@workspace_label},name this pane} #{E:@agent_pane}#[default]'
 
 # Visible means this tab is current in a workspace that a terminal with focus is showing.
 set -g @agent_visible '#{&&:#{window_active},#{m:*1*,#{L:#{&&:#{m:*focused*,#{client_flags}},#{==:#{client_session},#{session_name}}}}}}'
@@ -143,6 +148,11 @@ set-hook -g client-session-changed { if -F '#{E:@agent_seen_if}' { run-shell -C 
 set-hook -g client-focus-in        { if -F '#{E:@agent_seen_if}' { run-shell -C '#{E:@agent_seen}' } }
 set-hook -g window-layout-changed  { if -F '#{E:@agent_seen_if}' { run-shell -C '#{E:@agent_seen}' } }
 ```
+
+The tab name and the pane label take the colour of the status through `@agent_color`. A
+separator follows the workspace mark, so the mark does not read as a pair with the mark of
+the first tab. The file also holds the sound lines that the change
+`add-agent-status-sound` adds after this block.
 
 A separate file matters because tmux parses a config file completely before it runs any of
 it. A mistake inside `tmux.conf` would stop every line of it from loading, including the
@@ -203,7 +213,8 @@ pane.
 | `auto_retry_start`, `auto_retry_end` | Mark omp as retrying, then not. |
 | `agent_end` with `willContinue` | No change. omp will continue, so the pane stays working. |
 | `agent_end` without `willContinue` | Clear the pending set. Mark the turn failed if the last assistant message has `stopReason` `error`. Recompute one second later. |
-| `session_start`, `session_switch`, `session_compact`, `session_branch`, `session_tree` | Reset, forget the last value written, then recompute one second later. |
+| `session_start`, `session_switch`, `session_branch`, `session_tree` | Reset, forget the last value written, then recompute one second later. After `session_start` an idle pane is written as plain idle until the first `agent_start`, so a new session never becomes done. |
+| `session_compact` | Forget the last value written, then recompute. A failed turn and a pending plan stay. |
 | The extension's existing 1 second timer | Recompute as a fallback. Settle to idle only after three consecutive idle readings. |
 | `session_shutdown` | Stop handling events, then unset the option after the queued writes. |
 

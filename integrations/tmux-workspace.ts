@@ -10,12 +10,14 @@ export default function (pi: ExtensionAPI) {
 	let timer: Timer | undefined;
 
 	// Agent status. agent-status.conf holds the marks and the turn-over rule.
-	type Status = "working" | "blocked" | "over" | "unset";
+	// These are write commands, not statuses. Turn over lets tmux choose done or idle.
+	type Write = "working" | "blocked" | "idle" | "over" | "unset";
 	const pane = process.env.TMUX_PANE as string;
-	const set: Record<Status, string[]> = {
+	const set: Record<Write, string[]> = {
 		working: ["-p", "-t", pane, "@workspace_agent", "working"],
 		blocked: ["-p", "-t", pane, "@workspace_agent", "blocked"],
-		over: ["-pF", "-t", pane, "@workspace_agent", "#{E:@agent_turn_over}"],
+		idle: ["-p", "-t", pane, "@workspace_agent", "idle"],
+		over: ["-pF", "-t", pane, "@workspace_agent", "#{?#{@agent_turn_over},#{E:@agent_turn_over},idle}"],
 		unset: ["-pu", "-t", pane, "@workspace_agent"],
 	};
 	const pending = new Set<string>();
@@ -25,8 +27,10 @@ export default function (pi: ExtensionAPI) {
 	let stopped = false;
 	let idle = 0;
 	let settle: Timer | undefined;
-	let wanted: Status | undefined;
-	let written: Status | undefined;
+	// Until its first turn a session rests at plain idle, so it never inherits done.
+	let rest: Write = "over";
+	let wanted: Write | undefined;
+	let written: Write | undefined;
 	let writing = false;
 	let draining: Promise<void> | undefined;
 
@@ -35,15 +39,22 @@ export default function (pi: ExtensionAPI) {
 		writing = true;
 		while (wanted && wanted !== written) {
 			written = wanted;
+			let ok = false;
 			try {
-				await pi.exec("tmux", ["-N", "set", ...set[written]], { cwd: "/", timeout: 2000 });
+				const result = await pi.exec("tmux", ["-N", "set", ...set[written]], { cwd: "/", timeout: 2000 });
+				ok = result.code === 0 && !result.killed;
 			} catch {}
+			// A failed write is forgotten, so the timer writes it again a second later.
+			if (!ok) {
+				written = undefined;
+				break;
+			}
 		}
 		writing = false;
 	}
 
 	// Keeps only the latest wanted value, so a burst of events gives one write.
-	function report(value: Status) {
+	function report(value: Write) {
 		wanted = value;
 		if (!writing) draining = drain();
 	}
@@ -55,12 +66,12 @@ export default function (pi: ExtensionAPI) {
 
 	function recompute(ctx: ExtensionContext, settled = false) {
 		if (!root(ctx)) return;
-		let next: Status = "over";
+		let next: Write = rest;
 		if (pending.size || plan || failed) next = "blocked";
 		else if (!ctx.isIdle() || retrying || ctx.getAsyncJobSnapshot()?.running.length) next = "working";
-		idle = next === "over" ? idle + 1 : 0;
+		idle = next === rest ? idle + 1 : 0;
 		// The timer settles to idle only after three consecutive idle readings.
-		if (next !== "over" || settled || idle >= 3) report(next);
+		if (next !== rest || settled || idle >= 3) report(next);
 	}
 
 	function recomputeSoon(ctx: ExtensionContext) {
@@ -102,19 +113,22 @@ export default function (pi: ExtensionAPI) {
 		if (current?.session_id === session_id && current.cwd === cwd) return;
 		current = { session_id, cwd, pid: process.pid };
 		send("SessionStart", current);
+		// The helper unsets the status of a new session, so the next write must happen.
+		written = undefined;
 	}
 
 	pi.on("session_start", (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		update(ctx);
 		stopped = false;
+		rest = "idle";
 		reset(ctx);
 		// /move can relocate the same session without emitting a switch event.
 		// Only changed path/cwd values invoke the helper; idle ticks do no I/O.
 		if (!timer) timer = ctx.setInterval(() => {
-				update(ctx);
-				recompute(ctx);
-			}, 1000);
+			update(ctx);
+			recompute(ctx);
+		}, 1000);
 	});
 	pi.on("session_switch", (_event, ctx) => {
 		update(ctx);
@@ -128,11 +142,17 @@ export default function (pi: ExtensionAPI) {
 		update(ctx);
 		reset(ctx);
 	});
-	pi.on("session_compact", (_event, ctx) => reset(ctx));
+	pi.on("session_compact", (_event, ctx) => {
+		// Compaction keeps a failed turn and a pending plan. Only the write is repeated.
+		if (!root(ctx)) return;
+		written = undefined;
+		recompute(ctx);
+	});
 	pi.on("agent_start", (_event, ctx) => {
 		if (!root(ctx)) return;
 		pending.clear();
 		plan = failed = false;
+		rest = "over";
 		if (settle) ctx.clearTimer(settle);
 		settle = undefined;
 		idle = 0;

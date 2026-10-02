@@ -86,13 +86,16 @@ def agent_status():
         return {}, {}, {}
 
 
+STATUS_WIDTH = max(map(len, AGENT_COLOURS))
+
+
 def status_word(status):
-    return f'\x1b[{AGENT_COLOURS[status]}m{status}\x1b[0m' if status in AGENT_COLOURS else ''
+    return f'\x1b[{AGENT_COLOURS[status]}m{status.ljust(STATUS_WIDTH)}\x1b[0m' if status in AGENT_COLOURS else ''
 
 
 def workspace_row(name, label, status=''):
     """fzf shows and searches the label, shows the status and prints only the name."""
-    return '\t'.join((name, label, status_word(status)))
+    return '\t'.join((name, label.ljust(24), status_word(status)))
 
 
 def picked_name(output):
@@ -101,8 +104,9 @@ def picked_name(output):
 
 
 def tab_row(index, name, count, labels, active, status=''):
-    word = f' {status_word(status)} ' if status else ''
-    return f"{index}: {name:<16}{word} [{count} pane{'s' if int(count) > 1 else ''}: {labels}]{'  ● active' if active else ''}"
+    """fzf searches only the index and the name, which stand before the tab character."""
+    word = status_word(status) or ' ' * STATUS_WIDTH
+    return f"{index}: {name:<16}\t{word} [{count} pane{'s' if int(count) > 1 else ''}: {labels}]{'  ● active' if active else ''}"
 
 
 def tab_index(row):
@@ -484,6 +488,7 @@ def connect_session(name):
 
 
 # fzf searches only the label and prints only the hidden name, or the typed text when no row matches.
+TAB_FZF = ['fzf', '--ansi', '--delimiter=\t', '--nth=1']
 WORKSPACE_FZF = ['fzf', '--delimiter=\t', '--with-nth=2..', '--nth=1', '--accept-nth=1', '--ansi', '--bind=enter:accept-or-print-query']
 
 
@@ -705,10 +710,7 @@ def pick_window():
         tm('choose-tree', '-Zw', '-t', f"={session}", '-f', f"#{{==:#{{session_name}},{session}}}")
         return
 
-    fzf_cmd = [
-        'fzf',
-        '--ansi',
-        '--delimiter=:',
+    fzf_cmd = TAB_FZF + [
         f'--preview={shlex.quote(SELF)} window-preview {{1}}',
         '--preview-window=right:55%:wrap',
         '--header=Select window to switch | Esc: cancel',
@@ -1147,7 +1149,10 @@ MARKS:
   idle      green ring
   The pane border shows the mark of its pane after the label. Each tab shows
   its mark in front of its index and keeps its width. The workspace mark
-  follows the workspace name on the left of the status line.
+  follows the workspace name on the left of the status line, and a separator
+  stands between it and the first tab.
+  The tab name and the pane label take the colour of the status.
+  An omp agent that was already running shows no mark until it restarts.
 
 ROLL-UP:
   A tab shows the most urgent status among its panes. A workspace shows the
