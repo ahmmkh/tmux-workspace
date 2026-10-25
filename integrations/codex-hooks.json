@@ -1,0 +1,93 @@
+{
+  "description": "Publish native Codex status to its own tmux pane. No prompt or output logging.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py codex; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

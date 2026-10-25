@@ -1,0 +1,28 @@
+{
+  "Profiles": [
+    {
+      "Name": "tmux workspace",
+      "Guid": "873779B1-3E73-4B0B-9DCE-921C23E9C977",
+      "Dynamic Profile Parent Name": "Default",
+      "Terminal Type": "xterm-256color",
+      "Option Key Sends": 2,
+      "Right Option Key Sends": 0,
+      "Mouse Reporting": true,
+      "Mouse Reporting allow mouse wheel": true,
+      "Scrollback Lines": 10000,
+      "Unlimited Scrollback": false,
+      "Scrollback in Alternate Screen": false,
+      "Silence Bell": true,
+      "Visual Bell": true,
+      "Flashing Bell": false,
+      "Keyboard Map": {
+        "0xf702-0x280000": { "Action": 10, "Text": "b" },
+        "0xf703-0x280000": { "Action": 10, "Text": "f" },
+        "0xf700-0x220000": { "Action": 10, "Text": "[1;2A" },
+        "0xf701-0x220000": { "Action": 10, "Text": "[1;2B" },
+        "0xf702-0x220000": { "Action": 10, "Text": "[1;2D" },
+        "0xf703-0x220000": { "Action": 10, "Text": "[1;2C" }
+      }
+    }
+  ]
+}

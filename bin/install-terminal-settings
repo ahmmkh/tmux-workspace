@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Install the Codex hook registrations and iTerm2 dynamic profile with backups."""
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+PROJECT = Path(__file__).resolve().parent.parent
+
+
+def install(home):
+    os.umask(0o077)
+    backups = home / '.local/state/tmux-workspace/backups' / ('terminal-' + str(time.time_ns()))
+
+    def backup(path):
+        backups.mkdir(parents=True, exist_ok=True)
+        (backups / path.name).write_bytes(path.read_bytes())
+
+    path = home / '.codex/hooks.json'
+    original = path.read_bytes() if path.exists() else b'{}'
+    data = json.loads(original)
+    hooks = data.setdefault('hooks', {})
+    wanted = json.loads((PROJECT / 'integrations/codex-hooks.json').read_text())['hooks']
+    changed = False
+    for event, groups in wanted.items():
+        registered = hooks.setdefault(event, [])
+        if groups[0] not in registered:
+            registered.append(groups[0])
+            changed = True
+    if changed:
+        if path.exists():
+            backup(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as out:
+            temporary = Path(out.name)
+            json.dump(data, out, indent=2)
+            out.write('\n')
+        try:
+            if (path.read_bytes() if path.exists() else b'{}') != original:
+                raise RuntimeError('Codex hooks changed during installation; rerun the installer.')
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    print('Codex workspace hooks installed.' if changed else 'Codex workspace hooks already installed.')
+    # Trust belongs to Codex's /hooks review; never edit the trusted hashes.
+    print('In Codex, review the new agent-hook.py entries with /hooks, then restart/resume existing CLIs.')
+
+    profile = home / 'Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json'
+    source = PROJECT / 'integrations/iterm2-profile.json'
+    if profile.resolve() != source:
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        if profile.exists():
+            backup(profile)
+        temporary = profile.with_name('.tmux-workspace-' + str(time.time_ns()))
+        try:
+            temporary.symlink_to(source)
+            temporary.replace(profile)
+        finally:
+            temporary.unlink(missing_ok=True)
+    print('iTerm2 profile installed. Select Profiles > tmux workspace for a new tab.')
+    print('For the current tab, use Session > Edit Session > General > Change Profile.')
+    if backups.exists():
+        print('Backups: ' + str(backups))
+
+
+if __name__ == '__main__':
+    install(Path.home())

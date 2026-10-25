@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Publish only the originating interactive agent's exact session to its tmux pane."""
 import json
+import contextlib
+import hashlib
 import os
 import re
 import shlex
@@ -18,6 +20,9 @@ OPTION = "@workspace_app"
 STATUS = "@workspace_agent"
 WAIT = "@workspace_agent_wait"
 FAILED = "@workspace_agent_failed"
+CODEX = "@workspace_codex"
+CODEX_EVENTS = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse",
+                "PermissionRequest", "PostToolUse", "Stop", "Interrupt"}
 SESSIONS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "sessions")
 SETTLE = 5000  # Milliseconds within which a failed turn writes its own idle state.
 # tmux decides turn over when it writes. Without agent-status.conf the pane becomes idle.
@@ -37,6 +42,10 @@ def process_kind(pid, command):
     name = os.path.basename(command)
     if name in ("claude", "codex", "omp", "nvim"):
         return name
+    if "/.local/share/claude/versions/" in os.path.realpath(command):
+        return "claude"
+    if name not in ("bun", "node"):
+        return None
     args = shlex.split(run([PS, "-ww", "-p", str(pid), "-o", "args="]))
     if not args:
         return None
@@ -54,9 +63,12 @@ def process_kind(pid, command):
     return None
 
 
-def process_table():
+def process_table(pid=None, tty=None):
     processes = {}
-    for line in run([PS, "-axo", "pid=,ppid=,tty=,comm="]).splitlines():
+    selection = ["-axo"] if pid is None else ["-p", str(pid), "-o"]
+    if tty is not None:
+        selection = ["-t", tty.removeprefix("/dev/"), "-o"]
+    for line in run([PS, *selection, "pid=,ppid=,tty=,comm="]).splitlines():
         fields = line.split(None, 3)
         if len(fields) == 4:
             processes[int(fields[0])] = (int(fields[1]), fields[2], fields[3])
@@ -64,12 +76,17 @@ def process_table():
 
 
 def owner(kind, pane_pid, pane_tty, explicit_pid=None, start_pid=None, processes=None):
-    if processes is None:
-        processes = process_table()
+    supplied = processes is not None
+    if not supplied:
+        processes = {}
     pid = os.getppid() if start_pid is None else start_pid
     candidates = []
     visited = set()
-    while pid in processes and pid not in visited:
+    while pid > 1 and pid not in visited:
+        if not supplied:
+            processes.update(process_table(pid))
+        if pid not in processes:
+            return None
         visited.add(pid)
         parent, tty, command = processes[pid]
         app = process_kind(pid, command)
@@ -108,9 +125,10 @@ def owner(kind, pane_pid, pane_tty, explicit_pid=None, start_pid=None, processes
     return (pid, birth) if birth else None
 
 
-def resolve_codex(pane_pid, pane_tty, pane_title, pane_cwd=None):
+def resolve_codex(pane_pid, pane_tty, pane_title, pane_cwd=None, processes=None):
     """Resolve the foreground CLI's current title, never a latest/unique-old rollout."""
-    processes = process_table()
+    if processes is None:
+        processes = process_table()
     identities = set()
     for pid, (_parent, tty, command) in processes.items():
         if tty != pane_tty.removeprefix("/dev/") or process_kind(pid, command) != "codex":
@@ -162,14 +180,21 @@ def resolve_codex(pane_pid, pane_tty, pane_title, pane_cwd=None):
             if payload.get("parent_thread_id") or isinstance(payload.get("source"), dict):
                 return {**error, "error": "Codex is displaying a subagent, not a root conversation"}
             matches[session_id] = payload.get("cwd", cwd)
-    # Read only databases actually open in this PID. The title prefix is the key;
-    # database recency, global latest, and unrelated rollout writers are irrelevant.
+    # The native title is the key; never infer identity from database recency.
     databases = {path for _fd, _access, path in files
                  if re.fullmatch(r"state_\d+\.sqlite", os.path.basename(path))}
+    if not databases:
+        # Detached app-server releases keep the database out of the CLI's descriptors.
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        databases = {str(path) for path in home.glob("state_*.sqlite")
+                     if re.fullmatch(r"state_\d+\.sqlite", path.name)}
     for path in databases:
-        with sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, timeout=1) as db:
-            rows = db.execute("SELECT id, cwd, source FROM threads WHERE id LIKE ? LIMIT 2",
-                              (prefix + "%",)).fetchall()
+        try:
+            with contextlib.closing(sqlite3.connect(Path(path).absolute().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                rows = db.execute("SELECT id, cwd, source FROM threads WHERE id LIKE ? LIMIT 2",
+                                  (prefix + "%",)).fetchall()
+        except sqlite3.Error as exc:
+            return {**error, "error": "Cannot read current Codex identity: " + str(exc)}
         for session_id, recorded_cwd, source in rows:
             if not re.fullmatch(full_uuid, session_id):
                 continue
@@ -187,6 +212,30 @@ def resolve_codex(pane_pid, pane_tty, pane_title, pane_cwd=None):
     return {"kind": "codex", "id": session_id, "pid": pid, "cwd": cwd, "birth": birth}
 
 
+def detached_codex(tmux, session_id):
+    """A shared app-server's inherited TMUX_PANE does not identify its client."""
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session_id):
+        return None
+    titles = {"codex | " + session_id, "codex | " + session_id[:29] + "..."}
+    rows = run([*tmux, "list-panes", "-a", "-F",
+                "#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_title}"])
+    matches = [row.split("\t", 3) for row in rows.splitlines()
+               if len(row.split("\t", 3)) == 4 and row.split("\t", 3)[3] in titles]
+    if len(matches) != 1:
+        return None
+    pane, pane_pid, tty, _title = matches[0]
+    processes = process_table(tty=tty)
+    identities = set()
+    for pid, (_parent, process_tty, command) in processes.items():
+        if process_tty == tty.removeprefix("/dev/") and process_kind(pid, command) == "codex":
+            identity = owner("codex", int(pane_pid), tty, pid, pid, processes)
+            if identity:
+                identities.add(identity)
+    if len(identities) == 1:
+        return pane, identities.pop()
+    return None
+
+
 def clear_owned(tmux, pane, metadata):
     raw = run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION])
     if not raw:
@@ -196,7 +245,7 @@ def clear_owned(tmux, pane, metadata):
         return
     # Compare-and-clear inside the server, not a racy read followed by an unset.
     # The status goes with the identity, because both belong to the same agent.
-    set_if(tmux, pane, OPTION, raw, unset(pane, OPTION, STATUS, WAIT, FAILED))
+    set_if(tmux, pane, OPTION, raw, unset(pane, OPTION, STATUS, WAIT, FAILED, CODEX))
 
 
 class Pane(NamedTuple):
@@ -286,9 +335,76 @@ def wanted_status(state, session_id, wait, failed, turn_over):
     return None
 
 
+def codex_event(tmux, pane, data, metadata):
+    """Publish native events without inspecting prompts, output, or transcripts."""
+    event = data["hook_event_name"]
+    if event == "SessionEnd":
+        clear_owned(tmux, pane, metadata)
+        return
+    value = json.dumps(metadata, separators=(",", ":"))
+    # Tool hooks can overlap. Retry the whole read when another event wins the write.
+    for _ in range(5):
+        state = pane_state(tmux, pane)
+        raw = run([*tmux, "show-option", "-pqv", "-t", pane, CODEX])
+        previous = published(state.app)
+        same_owner = all(previous.get(k) == metadata[k] for k in ("kind", "id", "pid", "birth"))
+        if not same_owner and event not in ("SessionStart", "UserPromptSubmit"):
+            return
+        record = published(raw) if same_owner else {}
+        turn = data.get("turn_id")
+        if turn is not None and not isinstance(turn, str):
+            return
+        if event not in ("SessionStart", "UserPromptSubmit") and record.get("turn") and turn != record["turn"]:
+            return
+        if event == "PostToolUse" and record.get("event") in ("Stop", "Interrupt"):
+            return
+        pending = record.get("pending", [])
+        tool = data.get("tool_name") or "approval"
+        if not isinstance(tool, str):
+            return
+        fingerprint = tool
+        if "tool_input" in data:
+            fingerprint += ":" + hashlib.sha256(json.dumps(data["tool_input"], sort_keys=True).encode()).hexdigest()
+        key = data.get("tool_use_id") or fingerprint
+        if not isinstance(pending, list) or not isinstance(key, str):
+            return
+        wanted = state.status if same_owner else "idle"
+        if event == "SessionStart":
+            # Compaction continues the current turn and must not acknowledge done.
+            if not same_owner:
+                pending = []
+        elif event == "UserPromptSubmit":
+            pending, wanted = [], "working"
+            record["turn"] = turn
+        elif event == "PermissionRequest" or (event == "PreToolUse" and data.get("tool_name") in (
+                "request_user_input", "request_user_input_async", "AskUserQuestion", "ExitPlanMode")):
+            if not data.get("tool_use_id") or key not in pending:
+                pending.append(key)
+            wanted = "blocked"
+        elif event == "PostToolUse":
+            # PermissionRequest omits tool_use_id. A digest correlates it without storing arguments.
+            for match in (key, fingerprint):
+                if match in pending:
+                    pending.remove(match)
+                    break
+            wanted = "blocked" if pending else "working"
+        elif event == "PreToolUse":
+            wanted = "blocked" if pending else "working"
+        elif event in ("Stop", "Interrupt"):
+            pending, wanted = [], "over" if event == "Stop" else "idle"
+        record.update(pending=pending, event=event, at=int(time.time()))
+        write = assign(pane, OPTION, value)
+        write += " ; " + assign(pane, CODEX, json.dumps(record, separators=(",", ":")))
+        write += " ; " + (turn_over(pane) if wanted == "over" else assign(pane, STATUS, wanted))
+        guard = "#{&&:" + same(OPTION, state.app) + "," + same(CODEX, raw) + "}"
+        if run([*tmux, "if-shell", "-F", "-t", pane, guard,
+                write + " ; display-message -p updated"]) == "updated":
+            return
+
+
 def main():
     started = int(time.time() * 1000)
-    if len(sys.argv) != 2 or sys.argv[1] not in ("claude", "claude-status", "omp"):
+    if len(sys.argv) != 2 or sys.argv[1] not in ("claude", "claude-status", "omp", "codex"):
         return
     pane = os.environ.get("TMUX_PANE", "")
     socket = os.environ.get("TMUX", "").rsplit(",", 2)
@@ -302,7 +418,8 @@ def main():
     event = "SessionStart" if status_line else data.get("hook_event_name")
     # A subagent's approval reaches the user through the pane's agent, so it counts for blocked.
     blocking = kind == "claude" and event in ("PermissionRequest", "PreToolUse", "StopFailure")
-    if not blocking and (data.get("agent_id") or event not in ("SessionStart", "SessionEnd", "CwdChanged")):
+    allowed = CODEX_EVENTS if kind == "codex" else {"SessionStart", "SessionEnd", "CwdChanged"}
+    if not blocking and (data.get("agent_id") or event not in allowed):
         return
     session_id = data.get("session_id")
     cwd = data.get("cwd")
@@ -338,10 +455,17 @@ def main():
         return
     state = pane_state(tmux, pane)
     identity = owner(kind, int(state.pid), state.tty, explicit_pid)
+    if identity is None and kind == "codex":
+        resolved = detached_codex(tmux, session_id)
+        if resolved:
+            pane, identity = resolved
     if identity is None:
         return
     pid, birth = identity
     metadata = {"kind": kind, "id": session_id, "pid": pid, "cwd": cwd, "birth": birth}
+    if kind == "codex":
+        codex_event(tmux, pane, data, metadata)
+        return
     if kind == "claude" and not status_line and event == "SessionStart" and data.get("source") == "fork":
         # /fork may copy a BACKGROUND conversation under the same PID. Invalidate
         # the old owner until the native status callback identifies the visible one.
@@ -358,7 +482,7 @@ def main():
             old = published(state.app)
             if any(old.get(key) != metadata[key] for key in ("id", "pid", "birth")):
                 # A new session never inherits the status of the session before it.
-                command += " ; " + unset(pane, STATUS, WAIT, FAILED)
+                command += " ; " + unset(pane, STATUS, WAIT, FAILED, CODEX)
                 state = state._replace(status="", wait="", failed="")
             set_if(tmux, pane, OPTION, state.app, command)
     if status_line:

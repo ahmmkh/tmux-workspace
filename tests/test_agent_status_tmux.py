@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import shlex
 import shutil
 import subprocess
 import sys
@@ -62,7 +63,11 @@ class ScratchTmux(unittest.TestCase):
         Path(socket).unlink(missing_ok=True)  # tmux leaves the socket file of a dead server.
 
     def pane(self, command, target, *args, shell=SLEEP):
-        return self.tmux(command, target, '-d', '-P', '-F', '#{pane_id}', *args, shell)
+        pane = self.tmux(command, target, '-d', '-P', '-F', '#{pane_id}', *args, shell)
+        if shell == SLEEP:
+            # A newborn pane may still be zsh, whose agent notifications are deliberately suppressed.
+            self.wait_for(lambda: self.expand(pane, '#{pane_current_command}'), 'sleep')
+        return pane
 
     def expand(self, target, text):
         return self.tmux('display-message', target, '-p', text)
@@ -274,8 +279,121 @@ class HelperWrites(ScratchTmux):
     def file(self, **state):
         (self.sessions / f'{self.PID}.json').write_text(json.dumps(state))
 
+    def test_detached_codex_routes_by_thread_title_not_inherited_pane(self):
+        session = '01a128f8-8621-7561-8972-8d02a1234567'
+        actual = self.pane('new-window', 'alpha', '-n', 'actual')
+        self.tmux('select-pane', actual, '-T', 'codex | ' + session[:29] + '...')
+        tty = self.expand(actual, '#{pane_tty}').removeprefix('/dev/')
+        def owner(kind, pid, pane_tty, *args):
+            return (self.PID, 'birth') if args and pane_tty.removeprefix('/dev/') == tty else None
+        with mock.patch.object(hook, 'owner', side_effect=owner), \
+                mock.patch.object(hook, 'process_table', return_value={self.PID: (1, tty, 'codex')}):
+            self.call('codex', session=session, hook_event_name='UserPromptSubmit', turn_id='turn')
+            self.call('codex', session=session, hook_event_name='PermissionRequest', turn_id='turn')
+            self.assertEqual(self.status(actual), 'blocked')
+            self.assertEqual(self.status(self.hidden), '')
+            self.tmux('select-pane', self.hidden, '-T', 'codex | ' + session[:29] + '...')
+            self.call('codex', session=session, hook_event_name='Stop', turn_id='turn')
+            self.assertEqual(self.status(actual), 'blocked')
+
     def option(self, name):
         return self.tmux('show-options', self.hidden, '-pqv', name)
+
+    def test_codex_lifecycle_and_unrelated_tool_cannot_clear_approval(self):
+        self.call('codex', hook_event_name='SessionStart')
+        self.assertEqual(self.status(self.hidden), 'idle')
+        self.call('codex', hook_event_name='UserPromptSubmit', turn_id='turn-1')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='PermissionRequest', turn_id='turn-1', tool_name='Bash')
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1', tool_name='Read')
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1', tool_name='Bash', tool_use_id='call-1')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='Stop', turn_id='turn-1')
+        self.assertEqual(self.status(self.hidden), 'done')
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1', tool_name='Bash')
+        self.assertEqual(self.status(self.hidden), 'done')
+        self.call('codex', hook_event_name='SessionEnd')
+        self.assertEqual(self.option('@workspace_app'), '')
+        self.assertEqual(self.option('@workspace_codex'), '')
+        self.assertEqual(self.status(self.hidden), '')
+
+    def test_codex_question_and_interrupt_and_old_turn(self):
+        self.call('codex', hook_event_name='UserPromptSubmit', turn_id='turn-2')
+        self.call('codex', hook_event_name='Stop', turn_id='turn-1')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='PreToolUse', turn_id='turn-2',
+                  tool_name='request_user_input', tool_use_id='question')
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-2',
+                  tool_name='request_user_input', tool_use_id='question')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='Interrupt', turn_id='turn-2')
+        self.assertEqual(self.status(self.hidden), 'idle')
+
+    def test_codex_compaction_preserves_turn_and_subagents_cannot_publish(self):
+        self.call('codex', hook_event_name='UserPromptSubmit', turn_id='turn-1')
+        self.call('codex', hook_event_name='SessionStart', source='compact')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='Stop', turn_id='turn-1', agent_id='child')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='Stop', turn_id='turn-1', session='other-session')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.call('codex', hook_event_name='SessionEnd', session='other-session')
+        self.assertEqual(self.status(self.hidden), 'working')
+        with mock.patch.object(hook, 'owner', return_value=None):
+            self.call('codex', hook_event_name='Stop', turn_id='turn-1')
+        self.assertEqual(self.status(self.hidden), 'working')
+
+    def test_codex_multiple_pending_questions_and_visible_completion(self):
+        self.call('codex', hook_event_name='UserPromptSubmit', turn_id='turn-1')
+        for key in ('a', 'b'):
+            self.call('codex', hook_event_name='PreToolUse', turn_id='turn-1',
+                      tool_name='request_user_input', tool_use_id=key)
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1',
+                  tool_name='request_user_input', tool_use_id='a')
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1',
+                  tool_name='request_user_input', tool_use_id='b')
+        self.assertEqual(self.status(self.hidden), 'working')
+        self.control_client('alpha')
+        self.tmux('select-window', self.hidden)
+        self.call('codex', hook_event_name='Stop', turn_id='turn-1')
+        self.assertEqual(self.status(self.hidden), 'idle')
+
+    def test_codex_parallel_approvals_match_arguments_without_recording_them(self):
+        self.call('codex', hook_event_name='UserPromptSubmit', turn_id='turn-1')
+        for command in ('private command one', 'private command two'):
+            self.call('codex', hook_event_name='PermissionRequest', turn_id='turn-1',
+                      tool_name='Bash', tool_input={'command': command})
+        self.assertNotIn('private command', self.option('@workspace_codex'))
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1',
+                  tool_name='Bash', tool_use_id='first', tool_input={'command': 'private command one'})
+        self.assertEqual(self.status(self.hidden), 'blocked')
+        self.call('codex', hook_event_name='PostToolUse', turn_id='turn-1',
+                  tool_name='Bash', tool_use_id='second', tool_input={'command': 'private command two'})
+        self.assertEqual(self.status(self.hidden), 'working')
+
+    def test_codex_retries_when_another_hook_wins_its_compare_and_set(self):
+        self.call('codex', hook_event_name='UserPromptSubmit', turn_id='turn-1')
+        run = hook.run
+        raced = False
+
+        def race(argv):
+            nonlocal raced
+            if 'if-shell' in argv and not raced:
+                raced = True
+                record = json.loads(self.option('@workspace_codex'))
+                record['pending'].append('other-approval')
+                self.tmux('set-option', self.hidden, '-p', '@workspace_codex', json.dumps(record))
+            return run(argv)
+
+        with mock.patch.object(hook, 'run', race):
+            self.call('codex', hook_event_name='PermissionRequest', turn_id='turn-1', tool_name='Bash')
+        self.assertTrue(raced)
+        self.assertEqual(json.loads(self.option('@workspace_codex'))['pending'], ['other-approval', 'Bash'])
+        self.assertEqual(self.status(self.hidden), 'blocked')
 
     def test_turn_over_without_the_conf_gives_idle(self):
         self.run_tmux('set-option', '-gu', '@agent_turn_over')
@@ -342,6 +460,28 @@ class HelperWrites(ScratchTmux):
         self.call('claude-status', session='fresh-session')
         self.assertEqual(self.status(self.hidden), 'idle')
         self.assertEqual(self.option('@workspace_agent_failed'), '')
+
+
+class PaneZoom(ScratchTmux):
+    def test_zoom_shortcut_restores_layout_and_keeps_processes(self):
+        settings = [line for line in (ROOT / 'tmux.conf').read_text().splitlines()
+                    if line.startswith(('set -g prefix ', 'bind z ', 'set -g status-right '))]
+        self.assertTrue(any(line.startswith('bind z ') for line in settings))
+        for line in settings:
+            self.run_tmux(*shlex.split(line))
+        pane = self.pane('split-window', 'alpha:one', '-h')
+        client = self.control_client('alpha')
+        self.tmux('select-pane', pane)
+        layout = self.expand(pane, '#{window_layout}')
+        processes = self.tmux('list-panes', 'alpha:one', '-F', '#{pane_id}:#{pane_pid}:#{pane_dead}')
+        for expected in ('1', '0'):
+            self.run_tmux('send-keys', '-K', '-c', client, 'C-a', 'z')
+            self.wait_for(lambda: self.expand(pane, '#{window_zoomed_flag}'), expected)
+            self.assertEqual('ZOOM' in self.expand(pane, '#{E:status-right}'), expected == '1')
+            if expected == '1':
+                self.assertEqual(self.expand(pane, '#{pane_width}'), self.expand(pane, '#{window_width}'))
+        self.assertEqual(self.expand(pane, '#{window_layout}'), layout)
+        self.assertEqual(self.tmux('list-panes', 'alpha:one', '-F', '#{pane_id}:#{pane_pid}:#{pane_dead}'), processes)
 
 
 class Sound(ScratchTmux):

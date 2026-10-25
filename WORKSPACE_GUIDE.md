@@ -11,6 +11,7 @@ All workspace-specific source now lives in:
 - Open the project: `work tmux-workspace`
 - Open all AI tools: **`Ctrl+a`, release, then `a`**
 - Read this guide: `less "$HOME/untitled folder/Projects/tmux-workspace/WORKSPACE_GUIDE.md"`
+- Check terminal, hooks and saves: `tmux-workspace doctor` or **`Ctrl+a D`**
 - Check provider access: `tmux-workspace ai check`
 - Existing keybindings, `work`, recovery, agent hooks and Neovim integration remain active through symlinks to this project.
 
@@ -75,7 +76,7 @@ When you run `work <name>` (or type a new name in the `work` picker):
 ### Zoxide as Default Navigation & Resolution:
 - **`cd` powered by zoxide**: Your shell uses `eval "$(zoxide init zsh --cmd cd)"`. Running `cd <partial-name>` (e.g. `cd asda` or `cd cafe`) jumps directly to your most used directories and projects.
 - **`work` uses zoxide first**: Running `work <name>` checks zoxide's smart index first to find existing matching projects before falling back to creating a new project folder.
-- **Sesh ranking**: `sesh.toml` prioritizes zoxide at the top: `sort_order = ["zoxide", "tmux", "config"]`.
+- **Workspace picker ranking**: Running workspaces appear most recently accessed first, followed by zoxide directories and unopened project folders. Typing ranks fuzzy matches by relevance, with recency breaking ties. Recency comes from tmux and resets when its server restarts. The fallback `sesh` picker uses its own ranking.
 
 ### Switching & Deleting Workspaces from Inside tmux:
 - **`Ctrl+a` then `s`**: Opens the workspace picker popup over your screen. Select an existing workspace or type a new name to create one on the fly. Enter creates the workspace when the typed name matches no row. The row of an active workspace shows the most urgent agent status among its agents as a coloured word. The search matches only the name, and the status word never becomes part of a workspace name.
@@ -115,6 +116,8 @@ All commands below assume you:
 
 ### Zoom (Focus View)
 - **`Ctrl+a` then `z`**: Toggles **Zoom** on the active pane. When zoomed, the pane temporarily fills the entire window. Press `Ctrl+a` then `z` again to return to the previous multi-pane layout.
+- For larger text in Ghostty, press **`⌘` + `+`** (or **`⌘` + `=`**) repeatedly. **`⌘` + `−`** shrinks it; **`⌘` + `0`** resets the font size.
+- Font size applies to the whole Ghostty terminal, including all its tmux panes. For focused reading, zoom the pane first, then enlarge the font. The status bar shows **ZOOM** while the pane is maximized.
 
 ### Closing
 - **`Ctrl+a` then `x`**: Asks for confirmation (`Close pane <label>? (y/n)`) before closing the active pane.
@@ -258,7 +261,7 @@ Edit these files in `~/untitled folder/Projects/tmux-workspace/`; do not maintai
 | `config.json` | Model and Doppler project/config/scope; no API key |
 | `shell.zsh` | Sourced by `~/.zshrc`; `work` and zoxide integration |
 | `sesh.toml` | `~/.config/sesh/sesh.toml` symlink |
-| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink. The helper publishes the pane identity and reports the agent status of Claude Code. |
+| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink. The helper publishes pane identities and reports Claude Code and Codex status. |
 | `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink. The omp extension publishes the pane identity and reports the agent status of omp. |
 | `integrations/tmux_workspace.lua` | `~/.config/nvim/lua/custom/tmux_workspace.lua` symlink |
 | `WORKSPACE_GUIDE.md` | `~/.config/tmux/WORKSPACE_GUIDE.md` symlink; this guide |
@@ -314,6 +317,8 @@ Moving the project again requires updating those symlinks and the shell source p
 | `Ctrl+a` `[` | Enter scroll/copy mode (`q` exits) |
 | `Ctrl+a` `]` | Paste buffer |
 | `Ctrl+a` `r` | Reload tmux configuration |
+| `Ctrl+a` `D` | Terminal, hooks, agent and autosave diagnostics |
+| `Ctrl+a` `M` | Toggle agent sounds |
 | `Ctrl+a` `Ctrl+a` | Send raw Ctrl+a to shell/editor |
 
 ---
@@ -594,3 +599,150 @@ Interactive behavior still requires real tmux/fzf checks.
   `agent-status.conf`. Added a scratch-server test for the marks. The workspace picker,
   the tab picker and the parked chooser show the status as a word. Typing a name that
   matches no row in the workspace picker now creates that workspace.
+
+
+## iTerm2 keyboard and scrolling setup
+
+Run `bin/install-terminal-settings` from this project to install the **tmux workspace**
+dynamic profile and merge the Codex hooks. The installer preserves unrelated hooks,
+keeps backups under `~/.local/state/tmux-workspace/backups/terminal-*`, and can be rerun.
+The profile inherits the appearance of **Default**. Select **Profiles > tmux workspace**
+in iTerm2 to open a tab with it, then run `work`. Existing sessions keep their profile;
+you do not need to stop their tmux processes. Set the profile as default in iTerm2's
+profile settings if you want every new terminal to use it.
+
+| Setting | Behavior |
+|---|---|
+| Left Option | Esc+, so Alt shortcuts reach zsh, tmux and editors |
+| Right Option | Normal, for typing special characters |
+| Option+Left / Right | Backward / forward word in shells with standard Emacs bindings |
+| Shift+arrows | Sends distinct escape sequences; `Ctrl+a` then Shift+arrow resizes a pane |
+| Mouse and wheel reporting | Enabled; tmux receives scrolling and border dragging |
+| Terminal type | `xterm-256color` outside tmux; tmux provides `tmux-256color` inside |
+| Terminal scrollback | 10,000 lines outside tmux; tmux retains 50,000 per pane |
+| Alternate-screen scrollback | Off, so terminal history does not accumulate tmux screen redraws |
+| Terminal bell | Visual indicator, without a second audible bell; tmux agent sounds remain enabled |
+
+Scroll in a tmux pane to use its history. `Ctrl+a [` enters copy mode, `/` searches,
+`v` begins a selection, `y` copies to macOS and `q` returns to live output.
+Mouse-aware programs such as Neovim can consume the wheel themselves; use `Ctrl+a [`
+to inspect tmux history explicitly. Do not use iTerm2's own scrollback to navigate tmux
+history. `Cmd+v` pastes through the terminal. Hold Option while selecting if you want
+iTerm2's native selection instead of tmux's mouse handling.
+
+Keep iTerm2's **Natural Text Editing** preset off for this profile. Its remappings
+can consume keys before tmux sees them. This profile supplies only word-navigation
+and Shift+arrow mappings. macOS may still reserve Control+arrow shortcuts for Mission
+Control; the prefix plus `h/j/k/l` and uppercase resize keys avoid those shortcuts.
+This setup uses ordinary `tmux`, not `tmux -CC` control mode. Keep splits and workspace
+tabs inside tmux so its labels, parking, recovery and shortcuts describe the same layout.
+
+Reload with `Ctrl+a r`. The terminal title now shows the workspace and window.
+The tmux status line shows `COPY`, `ZOOM`, sound mute and `save ERROR` when applicable.
+Repeated reloads do not append duplicate terminal capability entries.
+
+## Codex notifications and diagnostics
+
+### Ghostty and performance
+
+Ghostty can use its default configuration. The tmux configuration enables true color,
+clipboard, focus events, hyperlinks, styled underlines and synchronized redraws for
+`xterm-ghostty`. After reloading tmux, detach and reattach once so the existing client
+negotiates the additional capabilities. `tmux-workspace doctor` checks the active
+Ghostty client. Escape-key disambiguation is 10 ms. Ghostty VSync remains at its default;
+disabling it can increase CPU use under load.
+
+The performance pass on 2026-10-12 measured these warm picker preparation times on the
+live 41-pane server. These exclude Python process startup, drawing and human input.
+Each picker measurement used 15 samples; p95 uses the nearest-rank method.
+
+| Operation | Before median / p95 | After median / p95 |
+| --- | --- | --- |
+| Workspace picker | 65.3 / 97.0 ms | 43.2 / 54.0 ms |
+| Tab picker | 170.6 / 193.9 ms | 25.1 / 40.9 ms |
+| Shell initialization, inherited Node version | 1,038 ms median | 437 ms median |
+
+Run `python3 tests/benchmark_workspace.py` from this project to repeat the picker
+measurement without displaying a picker or switching workspaces. Measurements vary
+with other workloads. The structural regression tests do not depend on wall-clock time.
+
+For W tabs, tab-picker subprocess cost changed from W + 3 tmux reads to 2. The data
+still takes O(P) work for P panes; it is fetched together rather than through W child
+processes. Workspace-picker subprocesses dropped from 5 to 3. Snapshot metadata is
+also fetched together, and fallback identity resolution shares one process table.
+High-frequency Claude hooks inspect only their ancestor chain, O(depth), instead of
+all system processes. Detached Codex hooks inspect only the matched terminal's processes.
+Native executables no longer trigger extra argument lookups just to identify their type.
+
+Autosave runs at lower CPU priority. An agent identity lookup failure is recorded as
+an explicit recovery error for that pane while layout and history can still be saved.
+A failed history capture leaves the previous complete snapshot selected. A real save
+of 40 panes completed in 3.3 seconds with no recovery errors after this change.
+Codex recovery resolves its current native thread title against a read-only state
+database, including versions where the shared daemon owns that database. It never
+chooses a thread by recency and rejects ambiguous title prefixes.
+
+The local `~/.zshrc` loads NVM with `--no-use` only when its selected Node executable
+is already inherited correctly. Fresh shells without that selection retain NVM's
+normal initialization. The prior file is backed up under
+`~/.local/state/tmux-workspace/backups/shell-1791754909830145000/zshrc`.
+New shells pick up this change automatically.
+
+At measurement time the host was heavily loaded, with simulator, virtual-machine and
+agent processes running. Workspace changes do not stop those jobs. Use `Ctrl+a C` to
+review terminals before closing them; a high memory estimate is not proof that a job
+is disposable.
+
+### Notifications and cleanup
+
+`Ctrl+a C` opens terminal cleanup. It lists inactive or unverified panes, including
+parked panes, sorted by estimated process RSS. Tab selects panes, Enter reviews the
+selection, and typing `close` terminates them. Working and blocked agents are excluded.
+An idle or unverified status is a review candidate, not proof that a job is safe to kill.
+Processes and status are checked again before closure. RSS can count shared pages more
+than once and excludes detached shared daemons; it is not a promise of memory reclaimed.
+The command `tmux-workspace cleanup` prints the list when run without a terminal.
+
+Detached Codex app-server hooks are routed by the native `codex | <thread-id>` title
+and a verified foreground Codex process. Keep the thread ID in the Codex terminal title.
+Missing or ambiguous titles are ignored rather than updating an unrelated pane.
+
+Codex now uses native `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd` hooks.
+The registrations are in `integrations/codex-hooks.json`; the shared helper is
+`integrations/agent-hook.py`. The existing Codex `notify` computer-use integration
+is preserved.
+
+After installation, open **`/hooks` in Codex and review/trust the new `agent-hook.py codex`
+entries**. Codex requires review of new hook definitions before running them. The
+installer does not change trusted hashes or bypass that review. Restart/resume existing
+Codex CLIs to load the registrations. See the [official hook documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+
+A new prompt reports working. An approval or `request_user_input` question reports
+blocked and plays the existing blocked sound. Completion reports done and plays the
+completion sound when the tab is out of focus; completion in a focused tab reports idle.
+Interrupt reports idle, and session exit clears the status. Compaction keeps the current
+turn. Unrelated tool completions cannot clear an outstanding approval. A newer turn
+ignores late events from the previous turn. Nested CLI processes and hooks with an
+`agent_id` cannot claim the pane's identity.
+
+Hooks never print approval decisions or read transcripts. The pane stores only native
+event metadata and, where needed, hashes of tool arguments to match an approval to its
+completion. No prompt, response, terminal content or raw tool arguments are stored.
+A `Stop` event means the stop hooks are running; another stop hook may request another
+turn. Working resumes on the next prompt or tool event. Codex errors that emit no Stop
+or Interrupt event can leave the last status until the next event. These are native
+hook limits, not inferred completion from silence.
+
+`Ctrl+a D` opens local diagnostics; press `q` to close it. The same report is available
+with `tmux-workspace doctor` and exits nonzero when it finds warnings. It checks tool
+paths, live settings, hook registrations, Ghostty capabilities, sound files and snapshot
+age. It lists terminal focus and each pane's command/status, with the last Codex event
+and its age. It does not read terminal output or invoke an AI provider. Hook installation
+is not proof of trust; `/hooks` remains the authority for whether Codex runs them.
+
+To undo the iTerm2 changes, select your original **Default** profile and remove the
+`~/Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json` symlink.
+To undo Codex registration, remove only the `agent-hook.py codex` entries from
+`~/.codex/hooks.json`. A full backup restore is appropriate only if you made no later
+hook edits. The installer prints the backup directory it created.

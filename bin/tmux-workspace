@@ -53,7 +53,7 @@ def fields(command, names, *args):
 
 
 def panes():
-    return fields('list-panes', ['session_id', 'session_name', 'window_id', 'window_index', 'pane_id', 'pane_index', 'pane_pid', 'pane_current_path', 'pane_active', 'pane_dead', 'pane_tty', 'pane_current_command'], '-a')
+    return fields('list-panes', ['session_id', 'session_name', 'window_id', 'window_index', 'pane_id', 'pane_index', 'pane_pid', 'pane_current_path', 'pane_active', 'pane_dead', 'pane_tty', 'pane_current_command', 'pane_title', '@workspace_id', '@workspace_app', '@workspace_label', '@workspace_parked', '@workspace_home'], '-a')
 
 
 def pane_info(pane):
@@ -232,6 +232,8 @@ def snapshot(force=False):
             return
         table = process_table()
         agent_hooks = runpy.run_path(str(Path.home() / '.local/lib/tmux-workspace/agent-hook.py'))
+        codex_processes = None
+        codex_scan_error = None
         snapshot_id = str(time.time_ns())
         directory = ROOT / 'snapshots' / snapshot_id
         directory.mkdir(parents=True, mode=0o700)
@@ -240,11 +242,28 @@ def snapshot(force=False):
             if pane['session_name'] == '__workspace_bootstrap':
                 continue
             pid = pane['pane_id']
-            uid = identity(pid)
+            uid = pane['@workspace_id']
+            if not re.fullmatch(r'[0-9a-f]{32}', uid):
+                uid = identity(pid)
             app = live_app(pane, table)
-            codex = agent_hooks['resolve_codex'](
-                int(pane['pane_pid']), pane['pane_tty'],
-                tm('display-message', '-p', '-t', pid, '#{pane_title}'), pane['pane_current_path'])
+            codex = None
+            current_codex = (app and app.get('kind') == 'codex' and not app.get('error')
+                             and pane['pane_title'] in ('codex | ' + app['id'], 'codex | ' + app['id'][:29] + '...'))
+            if not current_codex:
+                try:
+                    if codex_processes is None:
+                        try:
+                            codex_processes = agent_hooks['process_table']()
+                        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                            codex_processes, codex_scan_error = {}, str(exc)
+                    if codex_scan_error and pane['pane_current_command'] == 'codex':
+                        codex = {'kind': 'codex', 'error': codex_scan_error}
+                    else:
+                        codex = agent_hooks['resolve_codex'](
+                            int(pane['pane_pid']), pane['pane_tty'], pane['pane_title'],
+                            pane['pane_current_path'], processes=codex_processes)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    codex = {'kind': 'codex', 'error': 'Identity lookup failed: ' + str(exc)}
             if codex:
                 app = codex
             elif not app and pane['pane_current_command'] in APP_COMMANDS:
@@ -255,15 +274,15 @@ def snapshot(force=False):
                     app = {'kind': 'nvim', 'error': 'Could not save the active Neovim session'}
             record = {
                 'id': uid, 'session': pane['session_name'], 'window': int(pane['window_index']),
-                'index': int(pane['pane_index']), 'label': option('@workspace_label', pid) or 'shell',
+                'index': int(pane['pane_index']), 'label': pane['@workspace_label'] or 'shell',
                 'cwd': pane['pane_current_path'], 'active': pane['pane_active'] == '1',
-                'parked': option('@workspace_parked', pid), 'home': option('@workspace_home', pid),
+                'parked': pane['@workspace_parked'], 'home': pane['@workspace_home'],
                 'app': app,
             }
             if record['session'] == PARKING and not record['parked']:
                 continue
             # Plain text deliberately excludes executable terminal escape sequences.
-            content = tm('capture-pane', '-p', '-J', '-S', '-', '-t', pid, check=False)
+            content = tm('capture-pane', '-p', '-J', '-S', '-', '-t', pid)
             atomic(directory / (uid + '.txt'), content + '\n')
             saved_panes.append(record)
         windows = fields('list-windows', ['session_name', 'window_index', 'window_name', 'window_layout', 'window_active', 'window_width', 'window_height', 'window_zoomed_flag'], '-a')
@@ -273,6 +292,7 @@ def snapshot(force=False):
         atomic(directory / 'workspace.json', json.dumps(data, indent=2))
         atomic(ROOT / 'latest.json', json.dumps({'saved_at': now, 'path': str(directory / 'workspace.json')}))
         put('@workspace_saved', time.strftime('%H:%M', time.localtime(now)))
+        put('@workspace_save_error', '')
         # Keep three complete snapshots; never prune editor sessions or AI history.
         old = sorted((ROOT / 'snapshots').iterdir(), key=lambda p: p.name, reverse=True)
         for path in old[3:]:
@@ -398,6 +418,8 @@ def restore(locked=False):
 def initialize():
     # Set in the server, not in shell environment, so configuration reloads do not
     # start duplicate timers or repeatedly restore deliberately closed sessions.
+    if option('@workspace_initialized') == '1':
+        return
     with lock():
         if option('@workspace_initialized') == '1':
             return
@@ -407,9 +429,11 @@ def initialize():
 
 
 def tick():
+    os.nice(10)
     try:
         snapshot()
     except Exception as exc:
+        put('@workspace_save_error', str(exc))
         message('Workspace autosave failed: ' + str(exc))
     finally:
         tm('run-shell', '-b', '-d', '300', shlex.join([SELF, 'tick']), check=False)
@@ -489,20 +513,27 @@ def connect_session(name):
 
 # fzf searches only the label and prints only the hidden name, or the typed text when no row matches.
 TAB_FZF = ['fzf', '--ansi', '--delimiter=\t', '--nth=1']
-WORKSPACE_FZF = ['fzf', '--delimiter=\t', '--with-nth=2..', '--nth=1', '--accept-nth=1', '--ansi', '--bind=enter:accept-or-print-query']
+WORKSPACE_FZF = ['fzf', '--delimiter=\t', '--with-nth=2..', '--nth=1', '--accept-nth=1', '--ansi', '--tiebreak=index', '--bind=enter:accept-or-print-query']
 
 
 def choose_or_create_workspace():
-    running = subprocess.run([TMUX, 'has-session'], capture_output=True).returncode == 0
+    session_format = SEP.join(('#{session_name}', '#{session_last_attached}', '#{@workspace_initialized}'))
+    sessions = tm('list-sessions', '-F', session_format, check=False)
+    running = bool(sessions)
     if not running and (ROOT / 'latest.json').is_file():
         bootstrap = tm('new-session', '-d', '-P', '-F', '#{session_id}', '-s', '__workspace_bootstrap', '/bin/sleep 2147483647')
         initialize()
         if any(p['session_name'] != '__workspace_bootstrap' for p in panes()):
             tm('kill-session', '-t', bootstrap)
-    elif running:
+        sessions = tm('list-sessions', '-F', session_format, check=False)
+    elif running and any(line.rsplit(SEP, 1)[-1] != '1' for line in sessions.splitlines()):
         initialize()
+        sessions = tm('list-sessions', '-F', session_format, check=False)
 
-    live = [s for s in session_names() if s not in (PARKING, '__workspace_bootstrap')]
+    recent = sorted((line.rsplit(SEP, 2) for line in sessions.splitlines()),
+                    key=lambda row: int(row[1] or 0), reverse=True)
+    live = [row[0] for row in recent]
+    live = [s for s in live if s not in (PARKING, '__workspace_bootstrap')]
     projects = []
     if PROJECTS_ROOT.is_dir():
         for p in sorted(PROJECTS_ROOT.iterdir()):
@@ -521,10 +552,10 @@ def choose_or_create_workspace():
 
     by_workspace = agent_status()[2]
     display_items = []
-    for z in zoxide_list:
-        display_items.append(workspace_row(z, f"⚡ {z}"))
     for s in live:
         display_items.append(workspace_row(s, f"● {s}", by_workspace.get(s, '')))
+    for z in zoxide_list:
+        display_items.append(workspace_row(z, f"⚡ {z}"))
     for p in projects:
         if p not in live:
             display_items.append(workspace_row(p, f"📁 {p}"))
@@ -534,7 +565,7 @@ def choose_or_create_workspace():
         os.execvp('sesh', command)
 
     fzf_cmd = WORKSPACE_FZF + [
-        '--header=Select workspace or type a NEW name to create in Projects | Esc: cancel',
+        '--header=Recent workspaces first | Select or type a NEW name | Esc: cancel',
         '--prompt=Workspace > ',
         '--height=50%',
         '--layout=reverse',
@@ -689,22 +720,23 @@ def pick_window():
         message('No active tmux session.')
         return
 
-    raw_wins = tm('list-windows', '-t', f"={session}", '-F', '#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_id}', check=False)
-    if not raw_wins:
+    rows = fields('list-panes', ['session_name', 'window_id', 'window_index', 'window_name',
+                  'window_active', 'window_panes', 'pane_id', 'pane_index', 'pane_current_command',
+                  '@workspace_label', '@workspace_agent', '@workspace_home'], '-s', '-t', '=' + session)
+    if not rows:
         message('No windows found.')
         return
 
-    by_tab = agent_status()[1]
+    by_tab = roll_up(rows)[1]
+    windows = {}
+    for row in rows:
+        windows.setdefault(row['window_id'], []).append(row)
     display_items = []
-    for line in raw_wins.splitlines():
-        parts = line.split('\t')
-        if len(parts) < 5:
-            continue
-        w_idx, w_name, w_active, w_panes = parts[0], parts[1], parts[2] == '1', parts[3]
-        raw_panes = tm('list-panes', '-t', f"={session}:{w_idx}",
-                       '-F', '#{pane_index}:#{?@workspace_label,#{@workspace_label},#{pane_current_command}}', check=False)
-        labels = ', '.join(raw_panes.splitlines()) if raw_panes else 'empty'
-        display_items.append(tab_row(w_idx, w_name, w_panes, labels, w_active, by_tab.get(parts[4], '')))
+    for wid, members in windows.items():
+        row = members[0]
+        labels = ', '.join(p['pane_index'] + ':' + (p['@workspace_label'] or p['pane_current_command']) for p in members)
+        display_items.append(tab_row(row['window_index'], row['window_name'], row['window_panes'], labels,
+                                     row['window_active'] == '1', by_tab.get(wid, '')))
 
     if not shutil.which('fzf') or not (sys.stdin.isatty() and sys.stdout.isatty()):
         tm('choose-tree', '-Zw', '-t', f"={session}", '-f', f"#{{==:#{{session_name}},{session}}}")
@@ -749,6 +781,15 @@ def history(pane):
 
 
 HELP_TOPICS = [
+    {
+        'id': 'cleanup',
+        'display': 'Ctrl+a C             Review inactive terminals and close selected panes',
+        'title': 'Terminal cleanup',
+        'text': 'Tab selects panes; Enter reviews; type close to terminate the selected terminals.\n'
+                'Working and blocked agents are excluded. Unverified panes may still run jobs.\n'
+                'Memory is estimated process RSS, excluding shared detached daemons.\n'
+                'Closing a terminal can lose unsaved work; nothing closes automatically.'
+    },
     {
         'id': 'ai-tools',
         'display': 'Ctrl+a a             Jev Live Finder, Attention, Skills & Tab Names',
@@ -971,7 +1012,11 @@ REPEATABLE & MOUSE:
 DESCRIPTION:
   Maximizes the focused pane to take up the entire window.
   Other panes remain running in the background.
-  Press Ctrl+a then z again to restore the exact original split layout."""
+  Press Ctrl+a then z again to restore the exact original split layout.
+
+LARGER TEXT IN GHOSTTY:
+  Cmd + plus (or equals): enlarge text. Cmd + minus: shrink. Cmd + 0: reset.
+  Font size affects the entire terminal. Zoom the pane first for focused reading."""
     },
     {
         'id': 'label-pane',
@@ -1189,6 +1234,13 @@ OMP:
   A plan that omp submits from inside its eval tool has not been observed.
   The pane may show idle while that plan review is open.
 
+CODEX:
+  Native hooks report prompts as working, approvals/questions as blocked,
+  hidden completions as done, and visible completions or interrupts as idle.
+  Review the installed agent-hook.py codex entries in /hooks, then restart
+  existing Codex CLIs. Ctrl+a D opens diagnostics and shows the last event.
+  Codex's separate computer-use notify command is unchanged.
+
 CLAUDE CODE:
   Claude Code reports its status from the state file that it writes for each
   interactive session. Its status line calls the helper once a second, and
@@ -1321,6 +1373,14 @@ def main():
         sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
         import ai
         ai.main(globals(), args)
+    elif command == 'doctor':
+        sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
+        from diagnostics import doctor
+        sys.exit(doctor(globals()))
+    elif command == 'cleanup':
+        sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
+        from cleanup import cleanup
+        cleanup(globals())
     elif command == 'pane-start':
         pane_start(*args)
     elif command == 'open':
