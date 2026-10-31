@@ -6,11 +6,11 @@ It covers core concepts, everyday shortcuts, advanced parking workflows, sesh wo
 ## Start here
 
 All workspace-specific source now lives in:
-`~/untitled folder/Projects/tmux-workspace/`
+`~/Projects/tmux-workspace/`
 
 - Open the project: `work tmux-workspace`
 - Open all AI tools: **`Ctrl+a`, release, then `a`**
-- Read this guide: `less "$HOME/untitled folder/Projects/tmux-workspace/WORKSPACE_GUIDE.md"`
+- Read this guide: `less "$HOME/Projects/tmux-workspace/WORKSPACE_GUIDE.md"`
 - Check terminal, hooks and saves: `tmux-workspace doctor` or **`Ctrl+a D`**
 - Check provider access: `tmux-workspace ai check`
 - Existing keybindings, `work`, recovery, agent hooks and Neovim integration remain active through symlinks to this project.
@@ -68,8 +68,8 @@ work rm
 
 ### Automatic Project Folder Creation:
 When you run `work <name>` (or type a new name in the `work` picker):
-1. It checks if `~/untitled folder/Projects/<name>` exists; if not, it **automatically creates that folder**.
-2. It creates the tmux session rooted in `~/untitled folder/Projects/<name>`.
+1. It checks if `~/Projects/<name>` exists; if not, it **automatically creates that folder**.
+2. It creates the tmux session rooted in `~/Projects/<name>`.
 3. All subsequent windows and splits inside that workspace **default to this project folder**.
 4. It registers the project path with `zoxide` for fast navigation.
 
@@ -197,6 +197,7 @@ Each tab in the status line shows the mark of the most urgent agent status among
 - **`Ctrl+a` then `W`** *(capital W)*: Opens tmux's global interactive tree view across all sessions and windows.
 - **`Ctrl+a` then `n`**: Next window.
 - **`Ctrl+a` then `p`**: Previous window.
+- **`Ctrl+a` then `<` / `>`**: Move the current tab one place left / right (hold to repeat). The tab stays selected.
 - **`Ctrl+a` then `&`**: Close the entire active window and all its panes.
 - **`Ctrl+a` then `d`**: **Detach** from tmux. Leaves all workspaces, panes, background tasks, and editors running on the server. Reconnect anytime with `work`.
 
@@ -204,16 +205,25 @@ Each tab in the status line shows the mark of the most urgent agent status among
 
 ## 9. Copy Mode & macOS Clipboard
 
-- **Mouse Scroll**: Scrolling with your trackpad or mouse wheel automatically enters scrollback mode.
-- **Enter Copy Mode manually**: Press **`Ctrl+a` then `[`** (press `q` or `Esc` to exit).
-- **Navigate Scrollback**: Use `h, j, k, l`, arrow keys, or `Ctrl+u` / `Ctrl+d` (half page up/down).
-- **Search Scrollback**: Press `/` in copy mode, type your search term, and press Enter (`n` for next match, `N` for previous).
+- **Mouse Scroll**: Scrolling with your trackpad or mouse wheel automatically enters scrollback mode (3 lines per notch).
+- **Enter Copy Mode manually**: Press **`Ctrl+a` then `[`** or **`Ctrl+a` then `Enter`** (press `q` or `Esc` to exit).
+- **Navigate Scrollback**: Use `h, j, k, l`, arrow keys, or `Ctrl+u` / `Ctrl+d` (half page up/down). `H` / `L` jump to the start / end of the line.
+- **Search Scrollback**: Press `/` (or `?` backwards) in copy mode, type your search term, and press Enter (`n` for next match, `N` for previous). The current match is highlighted orange, the others blue.
 - **Text Selection & Copying**:
-  - In copy mode, press `v` to begin text selection.
+  - In copy mode, press `v` to select characters, `V` to select whole lines, `Ctrl+v` to toggle a rectangle.
   - Move cursor to highlight text.
-  - Press `y` to copy the selected text directly to your macOS system clipboard (`pbcopy`).
+  - Press `y` to copy the selected text directly to your macOS system clipboard (`pbcopy`); `Y` copies from the cursor to the end of the line.
   - Or simply click and drag with the mouse; releasing the drag automatically copies to your macOS clipboard.
-- **Paste in tmux**: Press **`Ctrl+a` then `]`** (or standard `Cmd+v` in your terminal app).
+  - Double-click copies a word and triple-click copies a line, without leaving the pane in copy mode.
+- **Paste in tmux**: Press **`Ctrl+a` then `]`** to paste the macOS clipboard into the pane (or standard `Cmd+v` in your terminal app).
+
+### Floating tools
+
+- **`Ctrl+a` then `g`**: lazygit in a popup, in the focused pane's directory.
+- **`Ctrl+a` then `e`**: A throwaway zsh in a popup for a quick command; it closes on `exit`.
+- **`Ctrl+a` then `y`**: Type into every pane of the tab at once. The status bar shows `SYNC` while it is on.
+
+Popups are not panes, so they never join a snapshot. The status bar shows `PREFIX` while `Ctrl+a` waits for the next key.
 
 ---
 
@@ -247,7 +257,7 @@ You do not need a special launcher. You can type `claude`, `codex`, `omp`, or `n
 
 ### One canonical project
 
-Edit these files in `~/untitled folder/Projects/tmux-workspace/`; do not maintain separate copies.
+Edit these files in `~/Projects/tmux-workspace/`; do not maintain separate copies.
 
 | Project path | Live integration |
 |---|---|
@@ -314,8 +324,12 @@ Moving the project again requires updating those symlinks and the shell source p
 | `Ctrl+a` `Ctrl+s` | Save snapshot now |
 | `Ctrl+a` `Ctrl+r` | Restore missing workspaces |
 | `Ctrl+a` `P` | View saved scrollback history for pane |
-| `Ctrl+a` `[` | Enter scroll/copy mode (`q` exits) |
-| `Ctrl+a` `]` | Paste buffer |
+| `Ctrl+a` `[` or `Enter` | Enter scroll/copy mode (`q` exits) |
+| `Ctrl+a` `]` | Paste the macOS clipboard |
+| `Ctrl+a` `<` / `>` | Move current tab left / right (repeatable) |
+| `Ctrl+a` `g` | lazygit popup in the pane's directory |
+| `Ctrl+a` `e` | Scratch shell popup |
+| `Ctrl+a` `y` | Toggle typing into all panes of the tab |
 | `Ctrl+a` `r` | Reload tmux configuration |
 | `Ctrl+a` `D` | Terminal, hooks, agent and autosave diagnostics |
 | `Ctrl+a` `M` | Toggle agent sounds |

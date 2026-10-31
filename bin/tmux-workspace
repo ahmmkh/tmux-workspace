@@ -22,7 +22,7 @@ PARKING = '__parked'
 APP_COMMANDS = {'claude': ['claude', '--resume'], 'codex': ['codex', 'resume'], 'omp': ['omp', '--resume'], 'nvim': ['nvim', '-S']}
 SEP = '\x1f'
 os.umask(0o077)
-PROJECTS_ROOT = (Path.home() / 'untitled folder/Projects').resolve()
+PROJECTS_ROOT = (Path.home() / 'Projects').resolve()
 
 
 def tm(*args, check=True):
@@ -809,7 +809,7 @@ retained history for one pane. Revoke there or with:
 Permission resets when tmux restarts. Redaction is not a guarantee.
 
 UNIFIED HOME:
-  ~/untitled folder/Projects/tmux-workspace
+  ~/Projects/tmux-workspace
   work tmux-workspace
 Edit config.json for model and Doppler settings; no secret is stored there.
 Run tmux-workspace ai check to verify credentials and structured output."""
@@ -926,7 +926,7 @@ DESCRIPTION:
 DESCRIPTION:
   Opens an interactive fuzzy selector listing:
   - Active tmux sessions (marked with ●)
-  - Existing project folders in ~/untitled folder/Projects/ (marked with 📁)
+  - Existing project folders in ~/Projects/ (marked with 📁)
   - Recent zoxide paths (marked with ⚡)
 
 AGENT STATUS:
@@ -939,7 +939,7 @@ AGENT STATUS:
 SWITCHING & CREATING:
   - Select any item to switch/connect to it.
   - Or type a BRAND NEW project name (e.g. 'my-api') and hit Enter:
-    Automatically creates `~/untitled folder/Projects/<name>`, sets up the
+    Automatically creates `~/Projects/<name>`, sets up the
     session, and connects immediately!
     Enter creates the workspace only when the typed name matches no row.
     The status word never becomes part of a workspace name.
@@ -1154,19 +1154,54 @@ DESCRIPTION:
     },
     {
         'id': 'copy-mode',
-        'display': 'Ctrl+a [ (or scroll)  Copy Mode & macOS Clipboard (pbcopy)',
+        'display': 'Ctrl+a [ (or Enter)   Copy Mode & macOS Clipboard (pbcopy)',
         'title': 'Copy Mode & Clipboard',
-        'text': """SHORTCUT: Ctrl+a then [ (or scroll trackpad/mouse)
+        'text': """SHORTCUT: Ctrl+a then [ or Enter (or scroll trackpad/mouse)
 
 DESCRIPTION:
   Enters scrollback copy mode:
-  - Scroll with j/k, arrow keys, or mouse wheel
-  - Search with / (press n for next, N for previous)
-  - Press v to begin text selection
-  - Press y to copy selection directly to macOS clipboard (pbcopy)
-  - Mouse: click and drag text; releasing automatically copies to macOS clipboard
+  - Scroll with j/k, arrow keys, or mouse wheel (3 lines per notch)
+  - Search with / or ? (press n for next, N for previous)
+  - v selects characters, V whole lines, Ctrl+v toggles a rectangle
+  - H / L jump to the start / end of the line
+  - y copies the selection, Y copies to the end of the line (macOS clipboard)
+  - Mouse: drag to copy; double-click copies a word, triple-click a line
   - Press q or Esc to exit copy mode
-  - Press Ctrl+a then ] to paste inside tmux (or Cmd+v in terminal)"""
+  - Press Ctrl+a then ] to paste the macOS clipboard into the pane (or Cmd+v)"""
+    },
+    {
+        'id': 'popup-tools',
+        'display': 'Ctrl+a g / e          Lazygit / Scratch Shell Popup (Pane Directory)',
+        'title': 'Floating Tools',
+        'text': """SHORTCUTS: Ctrl+a then g (lazygit), Ctrl+a then e (scratch shell)
+
+DESCRIPTION:
+  Opens a floating popup in the focused pane's directory:
+  - g runs lazygit for the repository you are in
+  - e opens a throwaway zsh for a quick command without splitting the tab
+  The popup closes when its program exits (q in lazygit, exit or Ctrl+d in the shell).
+  Popups are not panes: they never join a snapshot and are not restored."""
+    },
+    {
+        'id': 'sync-panes',
+        'display': 'Ctrl+a y              Toggle Typing Into All Panes of the Tab',
+        'title': 'Synchronize Panes',
+        'text': """SHORTCUT: Ctrl+a then y
+
+DESCRIPTION:
+  Sends every keystroke to all panes of the current tab at once, e.g. to run the
+  same command on several servers. The status bar shows SYNC while it is on.
+  Press Ctrl+a then y again to turn it off."""
+    },
+    {
+        'id': 'move-tab',
+        'display': 'Ctrl+a < / >          Move Current Tab Left / Right (Repeatable)',
+        'title': 'Reorder Tabs',
+        'text': """SHORTCUT: Ctrl+a then < or > (hold to repeat)
+
+DESCRIPTION:
+  Swaps the current tab with its neighbour and keeps it selected, so tab numbers
+  (Ctrl+a 1..9) follow the order you want."""
     },
     {
         'id': 'agent-status',

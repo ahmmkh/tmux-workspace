@@ -116,7 +116,7 @@ that this file replaces, on lines 82, 87, 90 and 91. It gains one line after its
 settings:
 
 ```tmux
-source-file "/Users/kh/untitled folder/Projects/tmux-workspace/agent-status.conf"
+source-file "/Users/kh/Projects/tmux-workspace/agent-status.conf"
 ```
 
 This is the content of `agent-status.conf`:

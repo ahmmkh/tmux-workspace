@@ -11,4 +11,4 @@ name = "main"
 path = "~"
 
 [[wildcard]]
-pattern = "~/untitled folder/Projects/*"
+pattern = "~/Projects/*"
