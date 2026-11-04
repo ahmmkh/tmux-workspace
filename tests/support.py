@@ -31,6 +31,7 @@ def load_workspace():
 class ScratchTmux(unittest.TestCase):
     """A tmux server on its own socket that never loads the user's config or state."""
     CONFIGS = ()  # Files sourced once the server runs.
+    ENV = {}  # Extra environment for the server and the controller.
 
     def setUp(self):
         self.name = f'tw-test-{os.getpid()}-{uuid.uuid4().hex[:8]}'
@@ -39,6 +40,7 @@ class ScratchTmux(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items() if k not in ('TMUX', 'TMUX_PANE')}
         self.env['TMUX_WORKSPACE_STATE_DIR'] = self.state
         self.env['TERM'] = 'xterm-256color'
+        self.env.update(self.ENV)
         self.run_tmux('new-session', '-d', '-s', 'alpha', '-n', 'one', '-x', '120', '-y', '40', SLEEP)
         self.addCleanup(self.stop_server, self.socket())
         for path in self.CONFIGS:
