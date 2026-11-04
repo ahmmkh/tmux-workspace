@@ -81,7 +81,9 @@ optional. CI installs and tests on every platform below.
 | Arch | `sudo pacman -S tmux python fzf zoxide` |
 | Alpine | `sudo apk add bash tmux python3 fzf zoxide` |
 
-Ubuntu 22.04 ships tmux 3.2, which is too old.
+Ubuntu 22.04 ships tmux 3.2, which is too old. Any login shell works in panes (zsh, bash, fish, nu,
+xonsh, …); tmux-workspace runs its own commands with `/bin/sh`. Set `TMUX_WORKSPACE_SHELL` to use a
+different shell in panes than your login shell.
 
 ## Quick start
 
@@ -146,7 +148,7 @@ first. Restart running agents afterwards.
 | Key | Meaning |
 |---|---|
 | `projects_dir` | Where `work NAME` opens and creates folders. `tmux-workspace setup` changes it; `TMUX_WORKSPACE_PROJECTS` overrides it. |
-| `model` | The OpenRouter model for the optional AI tools on `Ctrl+a a`. Empty turns them off. |
+| `model` | The model for the optional AI tools on `Ctrl+a a`: a Jev model on OpenRouter (`typesafe/jev-…`). Empty turns them off. |
 | `doppler` | Optional `{"project", "config", "scope"}` to fetch `OPENROUTER_API_KEY` with Doppler; otherwise set the variable. |
 
 Snapshots and backups live in `~/.local/state/tmux-workspace`, readable only by you.
@@ -157,8 +159,9 @@ Snapshots and backups live in `~/.local/state/tmux-workspace`, readable only by 
 ~/.local/share/tmux-workspace/install.sh --uninstall    # or install.sh --uninstall in your clone
 ```
 
-It removes the links and shell lines and restores what the installer replaced. Your snapshots and
-`~/.config/tmux-workspace` stay.
+It removes the links, the shell lines and any agent integrations, and restores what the installer
+replaced. A running tmux server stops starting panes through tmux-workspace; restart it to finish.
+Your snapshots and `~/.config/tmux-workspace` stay.
 
 ## Troubleshooting
 
