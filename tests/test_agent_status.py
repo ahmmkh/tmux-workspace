@@ -312,6 +312,39 @@ class Rows(unittest.TestCase):
         self.assertEqual(ws.picked_name(' \n'), '')
         self.assertEqual(ws.picked_name(''), '')
 
+    def test_picked_name_drops_the_label_and_status_fields(self):
+        row = ws.workspace_row('odoo-project', '● odoo-project', 'blocked')
+        self.assertEqual(ws.picked_name(row + '\n'), 'odoo-project')
+
+    def test_fzf_options_work_with_fzf_0_38(self):
+        """Debian 12 ships fzf 0.38 and Ubuntu 24.04 ships 0.44; --accept-nth needs 0.60."""
+        known = {'--ansi', '--delimiter', '--nth', '--with-nth', '--tiebreak', '--bind', '--header', '--prompt',
+                 '--height', '--layout', '--border', '--info', '--preview', '--preview-window', '--filter', '--multi'}
+        for option in ws.WORKSPACE_FZF[1:] + ws.TAB_FZF[1:]:
+            self.assertIn(option.split('=')[0], known)
+
+    def test_numbered_picker_without_fzf(self):
+        rows = [ws.workspace_row('api', '● api', 'blocked'), ws.workspace_row('docs', '📁 docs')]
+        for answer, expected in (('2', 'docs'), ('new-client', 'new-client'), ('', ''), ('9', '')):
+            with self.subTest(answer=answer), mock.patch('builtins.input', return_value=answer), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ws.numbered_pick(rows), expected)
+        self.assertIn(' 1. ● api', out.getvalue())
+
+    def test_picker_without_fzf_or_sesh_asks_for_a_number(self):
+        state = Path(self.enterContext(tempfile.TemporaryDirectory()))  # never the real snapshots
+        with mock.patch.object(ws, 'ROOT', state), mock.patch.object(ws, 'PROJECTS_ROOT', state), \
+                mock.patch.object(ws, 'tm', return_value=''), \
+                mock.patch.object(ws, 'agent_status', return_value=({}, {}, {})), \
+                mock.patch.object(ws.shutil, 'which', return_value=None), \
+                mock.patch.object(ws.sys.stdin, 'isatty', return_value=True), \
+                mock.patch.object(ws.sys.stdout, 'isatty', return_value=True), \
+                mock.patch.object(ws, 'numbered_pick', return_value='') as pick, \
+                mock.patch.object(ws.os, 'execvp') as execvp:
+            ws.choose_or_create_workspace()
+        pick.assert_called_once()
+        execvp.assert_not_called()
+
     @unittest.skipUnless(shutil.which('fzf'), 'fzf is not installed')
     def test_status_word_never_reaches_the_returned_name(self):
         rows = '\n'.join((ws.workspace_row('odoo-project', '● odoo-project', 'blocked'), ws.workspace_row('notes', '● notes')))
