@@ -1,0 +1,20 @@
+┌ tmux-workspace ────────────────────────────────┐
+│   WORKSPACE TAB   PANE     AGENT    STATUS     │
+│ ▸ api       1:co… 1:claude claude   ● blocked  │
+│   api       2:se… 1:logs   —        —          │
+│   ⇣ parked  api   1:tests  —        —          │
+│   frontend  1:co… 2:ui     codex    ● done     │
+│   infra     1:de… 1:terra… omp      ● working  │
+│   docs      1:wr… 1:guide  omp      ○ idle     │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+├─ preview · claude ─────────────────────────────┤
+│ $ make test                                    │
+│ Ran 235 tests in 21.8s                         │
+│                                                │
+│ OK                                             │
+│                                                │
+│                                                │
+└ enter jump · / filter · ? help · q quit ───────┘
