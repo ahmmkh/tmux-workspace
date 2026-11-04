@@ -219,6 +219,16 @@ class ShellIntegration(unittest.TestCase):
                 self.assertEqual(self.work(shell, 'api'), ['open api'])
                 self.assertEqual(self.work(shell, 'rm', 'api'), ['open api', 'kill-workspace api'])
 
+    def test_work_sh_puts_local_bin_on_path(self):
+        for shell, flag in (('bash', '--norc'), ('zsh', '-f')):
+            if not shutil.which(shell):
+                continue
+            with self.subTest(shell=shell):
+                env = {'HOME': str(self.home), 'PATH': '/usr/bin:/bin'}
+                result = subprocess.run([shell, flag, '-c', f'. {ROOT}/shell/work.sh; . {ROOT}/shell/work.sh; echo $PATH'],
+                                        env=env, capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout.strip(), f'{self.home}/.local/bin:/usr/bin:/bin')
+
     def test_zsh_shim_still_defines_work(self):
         if not shutil.which('zsh'):
             self.skipTest('zsh is not installed')

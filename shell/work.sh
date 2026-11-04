@@ -12,6 +12,12 @@ if [ "${TMUX_WORKSPACE_ZOXIDE_CD:-0}" = 1 ] && command -v zoxide >/dev/null 2>&1
     fi
 fi
 
+# tmux-workspace and its helpers live in ~/.local/bin.
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) PATH="$HOME/.local/bin:$PATH"; export PATH ;;
+esac
+
 work() {
     case "${1:-}" in
     rm|delete|kill)
