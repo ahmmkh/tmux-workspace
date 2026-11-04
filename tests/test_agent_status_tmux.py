@@ -80,6 +80,27 @@ class Parse(ScratchTmux):
         for path in (ROOT / 'tmux.conf', CONF):
             self.tmux('source-file', 'alpha', '-n', str(path))
 
+    def test_config_has_no_author_paths(self):
+        for name in ('tmux.conf', 'agent-status.conf', 'shell.zsh', 'shell/work.sh', 'shell/work.fish'):
+            with self.subTest(name=name):
+                self.assertNotIn('/Users/', (ROOT / name).read_text())
+
+    def test_config_loads_without_errors(self):
+        # Real sourcing reports unknown options, which parsing alone does not.
+        with tempfile.TemporaryDirectory() as home:
+            conf = Path(home) / '.config' / 'tmux-workspace'
+            conf.mkdir(parents=True)
+            (conf / 'agent-status.conf').symlink_to(CONF)
+            # tmux expands ~ with the server's HOME, so this server starts inside the fake home.
+            env = dict(self.env, HOME=home)
+            argv = ['tmux', '-L', self.name + '-home', '-f', '/dev/null']
+            subprocess.run(argv + ['new-session', '-d', '-s', 'conf', 'sleep 30'], env=env, check=True)
+            try:
+                result = subprocess.run(argv + ['source-file', str(ROOT / 'tmux.conf')], env=env, capture_output=True, text=True)
+            finally:
+                subprocess.run(argv + ['kill-server'], env=env, capture_output=True)
+        self.assertEqual((result.returncode, result.stderr.strip(), result.stdout.strip()), (0, '', ''))
+
     def test_parse_rejects_an_unclosed_brace(self):
         with tempfile.NamedTemporaryFile('w', suffix='.conf') as bad:
             bad.write("set-hook -g client-focus-in { if -F 1 {\n")
@@ -460,8 +481,7 @@ class Sound(ScratchTmux):
         stub = folder / 'stub'
         stub.write_text(f'#!/bin/sh\necho "$1" >> {self.log}\n')
         stub.chmod(0o700)
-        for name, value in (('cmd', stub), ('blocked', 'BLOCKED'), ('done', 'DONE')):
-            self.run_tmux('set-option', '-g', f'@agent_sound_{name}', str(value))
+        self.run_tmux('set-option', '-g', '@agent_sound_cmd', str(stub))
         self.hidden = self.pane('new-window', 'alpha', '-n', 'two')
 
     def played(self):
@@ -473,23 +493,23 @@ class Sound(ScratchTmux):
     def test_blocked_plays_once_per_change(self):
         self.status(self.hidden, 'working')
         self.status(self.hidden, 'blocked')
-        self.wait_for(self.played, ['BLOCKED'])
+        self.wait_for(self.played, ['blocked'])
         self.status(self.hidden, 'blocked')
         self.wait_for(lambda: self.heard(self.hidden), 'blocked')
         time.sleep(0.3)
-        self.assertEqual(self.played(), ['BLOCKED'])
+        self.assertEqual(self.played(), ['blocked'])
 
     def test_done_plays_only_for_a_pane_that_is_not_visible(self):
         self.status(self.hidden, 'working')
         self.assertEqual(self.turn_over(self.hidden), 'done')
-        self.wait_for(self.played, ['DONE'])
+        self.wait_for(self.played, ['done'])
         self.control_client('alpha')
         shown = self.tmux('display-message', 'alpha:one', '-p', '#{pane_id}')
         self.status(shown, 'working')
         self.assertEqual(self.turn_over(shown), 'idle')
         self.wait_for(lambda: self.heard(shown), 'idle')
         time.sleep(0.3)
-        self.assertEqual(self.played(), ['DONE'])
+        self.assertEqual(self.played(), ['done'])
 
     def test_starting_working_and_idle_are_silent(self):
         for value in ('idle', 'working', 'idle'):

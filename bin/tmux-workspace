@@ -1151,7 +1151,7 @@ DESCRIPTION:
     },
     {
         'id': 'copy-mode',
-        'display': 'Ctrl+a [ (or Enter)   Copy Mode & macOS Clipboard (pbcopy)',
+        'display': 'Ctrl+a [ (or Enter)   Copy Mode & System Clipboard',
         'title': 'Copy Mode & Clipboard',
         'text': """SHORTCUT: Ctrl+a then [ or Enter (or scroll trackpad/mouse)
 
@@ -1161,10 +1161,11 @@ DESCRIPTION:
   - Search with / or ? (press n for next, N for previous)
   - v selects characters, V whole lines, Ctrl+v toggles a rectangle
   - H / L jump to the start / end of the line
-  - y copies the selection, Y copies to the end of the line (macOS clipboard)
+  - y copies the selection, Y copies to the end of the line (system clipboard)
   - Mouse: drag to copy; double-click copies a word, triple-click a line
   - Press q or Esc to exit copy mode
-  - Press Ctrl+a then ] to paste the macOS clipboard into the pane (or Cmd+v)"""
+  - Press Ctrl+a then ] to paste the system clipboard into the pane
+  - tw-clip picks pbcopy, wl-copy, xclip or xsel, and falls back to OSC 52 over SSH"""
     },
     {
         'id': 'popup-tools',

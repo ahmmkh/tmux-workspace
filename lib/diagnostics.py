@@ -2,9 +2,12 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
+
+import paths
 
 
 def doctor(ws):
@@ -16,13 +19,26 @@ def doctor(ws):
             warnings.append(label)
 
     print('Tmux workspace diagnostics\n')
-    for name in ('tmux', 'fzf', 'sesh', 'zoxide', 'pbcopy', 'afplay'):
+    for name in ('tmux', 'fzf', 'sesh', 'zoxide'):
         path = shutil.which(name)
         check(name, bool(path), path or 'not found on PATH')
+    version = subprocess.run([ws['TMUX'], '-V'], capture_output=True, text=True).stdout.strip()
+    numbers = re.search(r'(\d+)\.(\d+)', version)
+    floor = '.'.join(map(str, paths.TMUX_MIN))
+    too_old = bool(numbers) and tuple(map(int, numbers.groups())) < paths.TMUX_MIN
+    check('tmux version', not too_old, f'{version} (needs {floor} or newer)' if too_old else version or 'unknown')
     project = Path(ws['SELF']).parent.parent
-    for live, source in ((Path.home() / '.tmux.conf', project / 'tmux.conf'),
-                         (Path.home() / '.local/lib/tmux-workspace/agent-hook.py', project / 'integrations/agent-hook.py')):
-        check(str(live), live.resolve() == source, str(live.resolve()))
+    helper = lambda name, *args: subprocess.run([str(project / 'bin' / name), *args], capture_output=True, text=True).stdout.strip()
+    check('clipboard', True, helper('tw-clip', 'which') or 'unknown')
+    sound = helper('tw-sound', 'which') or 'none'
+    print(f"      sounds: {sound}{' (agent sounds stay silent)' if sound == 'none' else ''}")
+    home = Path.home()
+    for live, source in ((home / '.local/bin/tmux-workspace', project / 'bin/tmux-workspace'),
+                         (home / '.config/tmux-workspace/agent-status.conf', project / 'agent-status.conf'),
+                         (home / '.tmux.conf', project / 'tmux.conf'),
+                         (home / '.local/lib/tmux-workspace/agent-hook.py', project / 'integrations/agent-hook.py')):
+        target = live.resolve()
+        check(str(live), target == source.resolve(), str(target) if live.exists() else 'missing; run install.sh')
 
     codex = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex'))
     try:
@@ -46,9 +62,6 @@ def doctor(ws):
         value = option(name)
         check(name, value == expected, value or 'unset')
     print('    Sounds: ' + (option('@agent_sound') or 'unconfigured'))
-    for name in ('blocked', 'done'):
-        path = option('@agent_sound_' + name)
-        check('sound ' + name, Path(path).is_file(), path or 'unconfigured')
     error = option('@workspace_save_error')
     check('autosave', not error, error or ('last saved ' + (option('@workspace_saved') or 'not yet')))
     try:

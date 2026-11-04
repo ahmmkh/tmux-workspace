@@ -1,0 +1,10 @@
+# tmux-workspace for fish: the work command. The installer links this file into
+# ~/.config/fish/functions/, so fish loads it on first use.
+function work --description 'Open, create or close a tmux workspace'
+    switch "$argv[1]"
+        case rm delete kill
+            $HOME/.local/bin/tmux-workspace kill-workspace $argv[2..-1]
+        case '*'
+            $HOME/.local/bin/tmux-workspace open $argv
+    end
+end

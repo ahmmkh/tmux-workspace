@@ -1,0 +1,51 @@
+#!/bin/sh
+# Copy stdin to the system clipboard, or print the clipboard, on macOS, Wayland, X11 or over SSH.
+#   tw-clip copy    read stdin into the clipboard
+#   tw-clip paste   write the clipboard to stdout
+#   tw-clip which   name the tool copy would use
+# Always exits 0, so a missing clipboard never breaks a tmux binding.
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+copier() {
+    if has pbcopy; then echo pbcopy
+    elif [ -n "${WAYLAND_DISPLAY:-}" ] && has wl-copy; then echo wl-copy
+    elif [ -n "${DISPLAY:-}" ] && has xclip; then echo xclip
+    elif [ -n "${DISPLAY:-}" ] && has xsel; then echo xsel
+    else echo 'OSC 52'
+    fi
+}
+
+case "${1:-copy}" in
+copy)
+    case "$(copier)" in
+    pbcopy) pbcopy ;;
+    wl-copy) wl-copy ;;
+    xclip) xclip -selection clipboard ;;
+    xsel) xsel --clipboard --input ;;
+    *)
+        # OSC 52 asks the terminal itself to take the text; it also works over SSH.
+        data=$(base64 | tr -d '\n')
+        tty=$(tmux display-message -p '#{client_tty}' 2>/dev/null)
+        if [ -n "$tty" ] && [ -w "$tty" ]; then
+            printf '\033]52;c;%s\a' "$data" > "$tty"
+        fi
+        ;;
+    esac
+    ;;
+paste)
+    if has pbpaste; then pbpaste
+    elif [ -n "${WAYLAND_DISPLAY:-}" ] && has wl-paste; then wl-paste -n
+    elif [ -n "${DISPLAY:-}" ] && has xclip; then xclip -selection clipboard -o
+    elif [ -n "${DISPLAY:-}" ] && has xsel; then xsel --clipboard --output
+    else tmux save-buffer - 2>/dev/null
+    fi
+    ;;
+which)
+    copier
+    ;;
+*)
+    echo "usage: tw-clip copy|paste|which" >&2
+    ;;
+esac
+exit 0

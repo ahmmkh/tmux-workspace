@@ -70,5 +70,48 @@ class Diagnostics(unittest.TestCase):
         self.assertNotIn('capture-pane', str(run.call_args))
 
 
+    def doctor_output(self, home, version='tmux 3.5a', clip='pbcopy', sound='afplay'):
+        import sys
+        sys.path.insert(0, str(ROOT / 'lib'))
+        import diagnostics
+
+        def run(argv, **kwargs):
+            name = Path(argv[0]).name
+            if argv[:2] == ['tmux', '-V']:
+                return mock.Mock(returncode=0, stdout=version + '\n', stderr='')
+            if name in ('tw-clip', 'tw-sound'):
+                return mock.Mock(returncode=0, stdout=(clip if name == 'tw-clip' else sound) + '\n', stderr='')
+            return mock.Mock(returncode=1, stdout='', stderr='no server running')
+        with mock.patch.object(diagnostics.Path, 'home', return_value=home), \
+                mock.patch.object(diagnostics.subprocess, 'run', side_effect=run), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            diagnostics.doctor({'SELF': str(ROOT / 'bin/tmux-workspace'), 'TMUX': 'tmux'})
+        return output.getvalue()
+
+    def test_doctor_checks_the_tmux_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text = self.doctor_output(Path(directory), version='tmux 3.2a')
+        self.assertIn('WARN  tmux version: tmux 3.2a (needs 3.3 or newer)', text)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIn('OK  tmux version: tmux next-3.6', self.doctor_output(Path(directory), version='tmux next-3.6'))
+
+    def test_doctor_names_clipboard_and_sound_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text = self.doctor_output(Path(directory), clip='OSC 52', sound='none')
+        self.assertIn('OK  clipboard: OSC 52', text)
+        self.assertIn('sounds: none (agent sounds stay silent)', text)
+        self.assertNotIn('pbcopy', text.replace('clipboard', ''))
+
+    def test_doctor_checks_the_installer_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / '.local/bin').mkdir(parents=True)
+            (home / '.local/bin/tmux-workspace').symlink_to(ROOT / 'bin/tmux-workspace')
+            text = self.doctor_output(home)
+        self.assertIn('OK  ' + str(home / '.local/bin/tmux-workspace'), text)
+        self.assertIn('WARN  ' + str(home / '.config/tmux-workspace/agent-status.conf'), text)
+        self.assertIn('WARN  ' + str(home / '.tmux.conf'), text)
+
+
 if __name__ == '__main__':
     unittest.main()
