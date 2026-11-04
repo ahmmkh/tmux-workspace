@@ -3,7 +3,7 @@
 <circle cx="22" cy="18" r="6" fill="#f7768e"/>
 <circle cx="42" cy="18" r="6" fill="#e0af68"/>
 <circle cx="62" cy="18" r="6" fill="#9ece6a"/>
-<text x="570.4" y="23" text-anchor="middle" fill="#565f89">Ctrl+a s - workspaces, most urgent first</text>
+<text x="570.4" y="23" text-anchor="middle" fill="#565f89">Ctrl+a s - workspaces with their agent status</text>
 <text x="16.0" y="49.5" fill="#7aa2f7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">━━ </text>
 <text x="41.2" y="49.5" fill="#f7768e" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">1: agent ● </text>
 <text x="133.6" y="49.5" fill="#7aa2f7" textLength="445.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳</text>
@@ -198,5 +198,5 @@
 <text x="100.0" y="571.5" fill="#16161e" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">1:code</text>
 <rect x="150.4" y="558.0" width="8.4" height="18.0" fill="#16161e"/>
 <rect x="158.8" y="558.0" width="957.6" height="18.0" fill="#16161e"/>
-<text x="158.8" y="571.5" fill="#a9b1d6" textLength="957.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  2:server                                                                   save 02:24 | C-a D health | Thu 02:24</text>
+<text x="158.8" y="571.5" fill="#a9b1d6" textLength="957.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  2:server                                                                   save 02:28 | C-a D health | Thu 02:28</text>
 </svg>

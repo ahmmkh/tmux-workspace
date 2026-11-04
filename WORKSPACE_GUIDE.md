@@ -1,19 +1,18 @@
 # TMUX WORKSPACE COMPLETE GUIDE
 
-This document is your permanent offline reference for your personalized tmux workspace setup.
+This document is the full offline manual for tmux-workspace. The [README](README.md) covers installing.
 It covers core concepts, everyday shortcuts, advanced parking workflows, sesh workspace management, and how reboot recovery works with AI tools and Neovim.
 
 ## Start here
 
-All workspace-specific source now lives in:
-`~/Projects/tmux-workspace/`
+The source lives in your clone: `~/.local/share/tmux-workspace` after a piped install, or
+wherever you cloned it. `install.sh` links it into place, so editing the clone changes the live setup.
 
-- Open the project: `work tmux-workspace`
-- Open all AI tools: **`Ctrl+a`, release, then `a`**
-- Read this guide: `less "$HOME/Projects/tmux-workspace/WORKSPACE_GUIDE.md"`
+- See every pane and agent: **`Ctrl+a`, release, then `A`**
+- Open the AI tools (optional, see section 13): **`Ctrl+a`, release, then `a`**
 - Check terminal, hooks and saves: `tmux-workspace doctor` or **`Ctrl+a D`**
-- Check provider access: `tmux-workspace ai check`
-- Existing keybindings, `work`, recovery, agent hooks and Neovim integration remain active through symlinks to this project.
+- Choose the projects folder again: `tmux-workspace setup`
+- Keybindings, `work`, recovery, agent hooks and Neovim integration all run through symlinks to the clone.
 
 ---
 
@@ -67,9 +66,11 @@ work rm
 ```
 
 ### Automatic Project Folder Creation:
+Workspaces live in your projects folder, `~/Projects` unless you chose another one. The first
+`work` asks for it; `tmux-workspace setup` asks again, and `TMUX_WORKSPACE_PROJECTS` overrides it.
 When you run `work <name>` (or type a new name in the `work` picker):
-1. It checks if `~/Projects/<name>` exists; if not, it **automatically creates that folder**.
-2. It creates the tmux session rooted in `~/Projects/<name>`.
+1. It checks if `<projects folder>/<name>` exists; if not, it **automatically creates that folder**.
+2. It creates the tmux session rooted in that folder.
 3. All subsequent windows and splits inside that workspace **default to this project folder**.
 4. It registers the project path with `zoxide` for fast navigation.
 
@@ -195,6 +196,7 @@ Each tab in the status line shows the mark of the most urgent agent status among
 - **`Ctrl+a` then `1` .. `9`**: Jump directly to window 1 through 9.
 - **`Ctrl+a` then `w`**: **Window Fuzzy Picker**. Opens an interactive search popup listing all windows (tabs) in your current workspace with live terminal screen previews and running pane summaries. Filter by index, name, or pane label and press Enter to switch immediately. Each row shows the agent status word of its tab after the tab name.
 - **`Ctrl+a` then `W`** *(capital W)*: Opens tmux's global interactive tree view across all sessions and windows.
+- **`Ctrl+a` then `A`** *(capital A)*: **Dashboard.** One table of every pane in every workspace, with its agent, status and folder, and a preview of the selected pane. Workspaces with a blocked agent come first, then done, working and idle; parked panes appear under the workspace they came from. Keys: `j`/`k` move, `Enter` jumps there (a parked pane comes back next to yours), `/` filters, `a` shows only agents, `p`/`u` park and unpark, `r` renames, `x` closes (asks first), `?` help, `q` quits. From a shell, `tmux-workspace dash --once` prints one frame.
 - **`Ctrl+a` then `n`**: Next window.
 - **`Ctrl+a` then `p`**: Previous window.
 - **`Ctrl+a` then `<` / `>`**: Move the current tab one place left / right (hold to repeat). The tab stays selected.
@@ -212,10 +214,10 @@ Each tab in the status line shows the mark of the most urgent agent status among
 - **Text Selection & Copying**:
   - In copy mode, press `v` to select characters, `V` to select whole lines, `Ctrl+v` to toggle a rectangle.
   - Move cursor to highlight text.
-  - Press `y` to copy the selected text directly to your macOS system clipboard (`pbcopy`); `Y` copies from the cursor to the end of the line.
-  - Or simply click and drag with the mouse; releasing the drag automatically copies to your macOS clipboard.
+  - Press `y` to copy the selected text to your system clipboard; `Y` copies from the cursor to the end of the line. `tw-clip` uses `pbcopy` on macOS, `wl-copy` on Wayland, `xclip` or `xsel` on X11, and OSC 52 otherwise, which also works over SSH.
+  - Or simply click and drag with the mouse; releasing the drag automatically copies to your system clipboard.
   - Double-click copies a word and triple-click copies a line, without leaving the pane in copy mode.
-- **Paste in tmux**: Press **`Ctrl+a` then `]`** to paste the macOS clipboard into the pane (or standard `Cmd+v` in your terminal app).
+- **Paste in tmux**: Press **`Ctrl+a` then `]`** to paste the system clipboard into the pane (or your terminal's own paste key). Without a clipboard tool it pastes the last tmux buffer.
 
 ### Floating tools
 
@@ -257,40 +259,37 @@ You do not need a special launcher. You can type `claude`, `codex`, `omp`, or `n
 
 ### One canonical project
 
-Edit these files in `~/Projects/tmux-workspace/`; do not maintain separate copies.
+Edit these files in your clone; `install.sh` links them into place, so there are no copies.
 
 | Project path | Live integration |
 |---|---|
 | `tmux.conf` | `~/.tmux.conf` symlink; options, keybindings and status |
-| `agent-status.conf` | Loaded by `tmux.conf` with `source-file`. It holds the formats and hooks of the agent status marks. |
-| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; existing controller and AI entrypoint |
-| `lib/ai.py`, `lib/ai_core.py` | AI popup, permission controls and shared OpenRouter client |
-| `lib/panes_ai.py` | Semantic pane finder and evidence-backed attention list |
-| `lib/history_ai.py` | Opt-in snapshot search |
-| `lib/suggest_ai.py` | Source-backed shortcut and installed-skill suggestions |
-| `config.json` | Model and Doppler project/config/scope; no API key |
-| `shell.zsh` | Sourced by `~/.zshrc`; `work` and zoxide integration |
-| `sesh.toml` | `~/.config/sesh/sesh.toml` symlink |
-| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink. The helper publishes pane identities and reports Claude Code and Codex status. |
+| `agent-status.conf` | `~/.config/tmux-workspace/agent-status.conf` symlink, loaded by `tmux.conf`. It holds the formats and hooks of the agent status marks. |
+| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; the controller, dashboard and AI entry point |
+| `bin/tw-clip`, `bin/tw-sound` | `~/.local/bin` symlinks; clipboard and agent sounds for macOS and Linux |
+| `lib/` | Python modules: `paths`, `workspace_model`, `dashboard`, `onboarding`, `diagnostics`, the AI tools |
+| `config.example.json` | Template for `~/.config/tmux-workspace/config.json`: projects folder, model, Doppler; no API key |
+| `shell/work.sh`, `shell/work.fish` | The `work` command; `install.sh` sources it from `~/.zshrc`/`~/.bashrc` or links it for fish. `shell.zsh` stays for older `.zshrc` lines. |
+| `sesh.toml` | `~/.config/sesh/sesh.toml` symlink when sesh is installed |
+| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink (`install.sh --agents`). The helper publishes pane identities and reports Claude Code and Codex status. |
 | `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink. The omp extension publishes the pane identity and reports the agent status of omp. |
 | `integrations/tmux_workspace.lua` | `~/.config/nvim/lua/custom/tmux_workspace.lua` symlink |
-| `WORKSPACE_GUIDE.md` | `~/.config/tmux/WORKSPACE_GUIDE.md` symlink; this guide |
 
-Shared application registrations stay in their owning configurations:
+Shared application registrations stay in their owning configurations, and
+`bin/install-integrations` (run by `install.sh --agents`) merges them with backups:
 `~/.claude/settings.json` invokes the agent-hook path above for the session hooks, for the
-status line and for the three agent status hooks `PermissionRequest`, `PreToolUse` and
-`StopFailure`. Each status hook entry always exits with status 0.
+status line (only when you have none) and for the three agent status hooks `PermissionRequest`,
+`PreToolUse` and `StopFailure`. Each status hook entry always exits with status 0.
 `~/.config/nvim/init.lua` calls `require('custom.tmux_workspace').setup()`.
-Those shared files are not copied into this project.
 
 ### Private state and backups stay separate
 
 `~/.local/state/tmux-workspace/` retains snapshots, editor sessions and original
 configuration backups (`backups/`). Agent conversation history stays with its
-original harness. None of that private state was moved into the source project.
+original harness. None of that private state lives in the clone.
 
-The setup is personal to this machine: source and live symlinks use absolute paths.
-Moving the project again requires updating those symlinks and the shell source path.
+To move the clone, run `./install.sh` from the new place; it relinks everything.
+`./install.sh --uninstall` removes the links and puts back the files it replaced.
 
 ---
 
@@ -299,6 +298,7 @@ Moving the project again requires updating those symlinks and the shell source p
 | Key | Action |
 |---|---|
 | `Ctrl+a` `?` | **Open built-in comprehensive help card** |
+| `Ctrl+a` `A` | **Dashboard: every pane and agent, most urgent first** |
 | `Ctrl+a` `s` | Open sesh workspace picker popup |
 | `Ctrl+a` `Tab` | Bounce to previous workspace |
 | `Ctrl+a` `\|` or `%` | Split vertically (left/right) |
@@ -325,7 +325,7 @@ Moving the project again requires updating those symlinks and the shell source p
 | `Ctrl+a` `Ctrl+r` | Restore missing workspaces |
 | `Ctrl+a` `P` | View saved scrollback history for pane |
 | `Ctrl+a` `[` or `Enter` | Enter scroll/copy mode (`q` exits) |
-| `Ctrl+a` `]` | Paste the macOS clipboard |
+| `Ctrl+a` `]` | Paste the system clipboard |
 | `Ctrl+a` `<` / `>` | Move current tab left / right (repeatable) |
 | `Ctrl+a` `g` | lazygit popup in the pane's directory |
 | `Ctrl+a` `e` | Scratch shell popup |

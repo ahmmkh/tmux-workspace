@@ -149,7 +149,7 @@ class Demo:
         self.shot('dashboard', 'Ctrl+a A - every pane and agent')
         self.keys('q', wait=1)
         self.keys('C-a', 's', wait=2.5)
-        self.shot('workspace-picker', 'Ctrl+a s - workspaces, most urgent first')
+        self.shot('workspace-picker', 'Ctrl+a s - workspaces with their agent status')
         self.keys('Escape', wait=1)
         self.keys('C-a', 'w', wait=2.5)
         self.shot('window-picker', 'Ctrl+a w - tabs with a live preview')
