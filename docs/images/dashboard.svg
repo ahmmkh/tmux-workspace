@@ -1,0 +1,264 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1141" height="592" viewBox="0 0 1141 592" font-family="ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'JetBrains Mono', 'DejaVu Sans Mono', monospace" font-size="14">
+<rect width="100%" height="100%" rx="10" fill="#1a1b26"/>
+<circle cx="22" cy="18" r="6" fill="#f7768e"/>
+<circle cx="42" cy="18" r="6" fill="#e0af68"/>
+<circle cx="62" cy="18" r="6" fill="#9ece6a"/>
+<text x="570.4" y="23" text-anchor="middle" fill="#565f89">Ctrl+a A - every pane and agent</text>
+<text x="16.0" y="49.5" fill="#7aa2f7" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">━━ </text>
+<text x="41.2" y="49.5" fill="#f7768e" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">1: agent ● </text>
+<text x="133.6" y="49.5" fill="#7aa2f7" textLength="445.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳</text>
+<text x="578.8" y="49.5" fill="#3b4261" textLength="546.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">━━ 2: tests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</text>
+<text x="16.0" y="67.5" fill="#c0caf5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">&gt; add </text>
+<rect x="66.4" y="54.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="67.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┌ </text>
+<rect x="83.2" y="54.0" width="117.6" height="18.0" fill="#262626"/>
+<text x="83.2" y="67.5" fill="#87afff" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">tmux-workspace</text>
+<rect x="200.8" y="54.0" width="302.4" height="18.0" fill="#262626"/>
+<text x="200.8" y="67.5" fill="#444444" textLength="302.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ────────────────────────────────── </text>
+<rect x="503.2" y="54.0" width="75.6" height="18.0" fill="#262626"/>
+<text x="503.2" y="67.5" fill="#ff8787" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">1 blocked</text>
+<rect x="578.8" y="54.0" width="25.2" height="18.0" fill="#262626"/>
+<text x="578.8" y="67.5" fill="#5f5f87" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
+<rect x="604.0" y="54.0" width="50.4" height="18.0" fill="#262626"/>
+<text x="604.0" y="67.5" fill="#87d7ff" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">1 done</text>
+<rect x="654.4" y="54.0" width="25.2" height="18.0" fill="#262626"/>
+<text x="654.4" y="67.5" fill="#5f5f87" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
+<rect x="679.6" y="54.0" width="75.6" height="18.0" fill="#262626"/>
+<text x="679.6" y="67.5" fill="#d7af5f" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">1 working</text>
+<rect x="755.2" y="54.0" width="25.2" height="18.0" fill="#262626"/>
+<text x="755.2" y="67.5" fill="#5f5f87" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · </text>
+<rect x="780.4" y="54.0" width="50.4" height="18.0" fill="#262626"/>
+<text x="780.4" y="67.5" fill="#afd75f" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">1 idle</text>
+<rect x="830.8" y="54.0" width="210.0" height="18.0" fill="#262626"/>
+<text x="830.8" y="67.5" fill="#5f5f87" textLength="210.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · 8 panes · 4 workspaces</text>
+<rect x="1040.8" y="54.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="67.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ┐</text>
+<rect x="66.4" y="72.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="85.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="72.0" width="16.8" height="18.0" fill="#262626"/>
+<rect x="100.0" y="72.0" width="940.8" height="18.0" fill="#262626"/>
+<text x="100.0" y="85.5" fill="#5f5f87" textLength="940.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">WORKSPACE TAB      PANE          AGENT    STATUS     PATH                                                       </text>
+<rect x="1040.8" y="72.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="85.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<text x="16.0" y="103.5" fill="#c0caf5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  Plan</text>
+<rect x="66.4" y="90.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="103.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="90.0" width="369.6" height="18.0" fill="#3a3a3a"/>
+<text x="83.2" y="103.5" fill="#afd7ff" textLength="369.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">▸ api       1:code   1:agent       claude   </text>
+<rect x="452.8" y="90.0" width="84.0" height="18.0" fill="#3a3a3a"/>
+<text x="452.8" y="103.5" fill="#ff8787" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">● blocked </text>
+<rect x="536.8" y="90.0" width="504.0" height="18.0" fill="#3a3a3a"/>
+<text x="536.8" y="103.5" fill="#5f5f87" textLength="504.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ~/Projects/api                                             </text>
+<rect x="1040.8" y="90.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="103.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<text x="16.0" y="121.5" fill="#c0caf5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  Edit</text>
+<rect x="66.4" y="108.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="121.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="108.0" width="294.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="121.5" fill="#afd7ff" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  api       1:code   2:tests       </text>
+<rect x="377.2" y="108.0" width="663.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="121.5" fill="#5f5f87" textLength="663.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">—        —          ~/Projects/api                                             </text>
+<rect x="1040.8" y="108.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="121.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="126.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="139.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="126.0" width="294.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="139.5" fill="#afd7ff" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  api       2:server 1:server      </text>
+<rect x="377.2" y="126.0" width="663.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="139.5" fill="#5f5f87" textLength="663.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">—        —          ~/Projects/api                                             </text>
+<rect x="1040.8" y="126.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="139.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<text x="16.0" y="157.5" fill="#c0caf5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  Allo</text>
+<rect x="66.4" y="144.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="157.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="144.0" width="16.8" height="18.0" fill="#262626"/>
+<rect x="100.0" y="144.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="100.0" y="157.5" fill="#5f5f87" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">⇣ parked  </text>
+<rect x="184.0" y="144.0" width="193.2" height="18.0" fill="#262626"/>
+<text x="184.0" y="157.5" fill="#afd7ff" textLength="193.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">api      1:worker-logs </text>
+<rect x="377.2" y="144.0" width="663.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="157.5" fill="#5f5f87" textLength="663.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">—        —          ~/Projects/api                                             </text>
+<rect x="1040.8" y="144.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="157.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="162.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="175.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="162.0" width="294.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="175.5" fill="#afd7ff" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  frontend  1:code   1:agent       </text>
+<rect x="377.2" y="162.0" width="75.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="175.5" fill="#5f5f87" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">codex    </text>
+<rect x="452.8" y="162.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="452.8" y="175.5" fill="#87d7ff" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">● done    </text>
+<rect x="536.8" y="162.0" width="504.0" height="18.0" fill="#262626"/>
+<text x="536.8" y="175.5" fill="#5f5f87" textLength="504.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ~/Projects/frontend                                        </text>
+<rect x="1040.8" y="162.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="175.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="180.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="193.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="180.0" width="294.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="193.5" fill="#afd7ff" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  frontend  1:code   2:vite        </text>
+<rect x="377.2" y="180.0" width="663.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="193.5" fill="#5f5f87" textLength="663.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">—        —          ~/Projects/frontend                                        </text>
+<rect x="1040.8" y="180.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="193.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="198.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="211.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="198.0" width="294.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="211.5" fill="#afd7ff" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  infra     1:deploy 1:agent       </text>
+<rect x="377.2" y="198.0" width="75.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="211.5" fill="#5f5f87" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">omp      </text>
+<rect x="452.8" y="198.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="452.8" y="211.5" fill="#d7af5f" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">● working </text>
+<rect x="536.8" y="198.0" width="504.0" height="18.0" fill="#262626"/>
+<text x="536.8" y="211.5" fill="#5f5f87" textLength="504.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ~/Projects/infra                                           </text>
+<rect x="1040.8" y="198.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="211.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="216.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="229.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="216.0" width="294.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="229.5" fill="#afd7ff" textLength="294.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  docs      1:write  1:agent       </text>
+<rect x="377.2" y="216.0" width="75.6" height="18.0" fill="#262626"/>
+<text x="377.2" y="229.5" fill="#5f5f87" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">omp      </text>
+<rect x="452.8" y="216.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="452.8" y="229.5" fill="#afd75f" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">○ idle    </text>
+<rect x="536.8" y="216.0" width="504.0" height="18.0" fill="#262626"/>
+<text x="536.8" y="229.5" fill="#5f5f87" textLength="504.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ~/Projects/docs                                            </text>
+<rect x="1040.8" y="216.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="229.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="234.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="247.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="234.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="234.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="247.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="252.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="265.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="252.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="252.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="265.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="270.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="283.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="270.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="270.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="283.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="288.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="301.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="288.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="288.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="301.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="306.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="319.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="306.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="306.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="319.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="324.0" width="25.2" height="18.0" fill="#262626"/>
+<text x="66.4" y="337.5" fill="#444444" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">├─ </text>
+<rect x="91.6" y="324.0" width="58.8" height="18.0" fill="#262626"/>
+<text x="91.6" y="337.5" fill="#87afff" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">preview</text>
+<rect x="150.4" y="324.0" width="75.6" height="18.0" fill="#262626"/>
+<text x="150.4" y="337.5" fill="#5f5f87" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · agent </text>
+<rect x="226.0" y="324.0" width="831.6" height="18.0" fill="#262626"/>
+<text x="226.0" y="337.5" fill="#444444" textLength="831.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">──────────────────────────────────────────────────────────────────────────────────────────────────┤</text>
+<rect x="66.4" y="342.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="355.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="342.0" width="285.6" height="18.0" fill="#262626"/>
+<text x="83.2" y="355.5" fill="#5f5f87" textLength="285.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">&gt; add rate limiting to POST /login</text>
+<rect x="368.8" y="342.0" width="672.0" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="342.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="355.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="360.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="373.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="360.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="360.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="373.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="378.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="391.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="378.0" width="462.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="391.5" fill="#5f5f87" textLength="462.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  Plan: token bucket per client IP, 5 requests a minute</text>
+<rect x="545.2" y="378.0" width="495.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="378.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="391.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="396.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="409.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="396.0" width="336.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="409.5" fill="#5f5f87" textLength="336.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  Edit middleware/ratelimit.go  (+42 -3)</text>
+<rect x="419.2" y="396.0" width="621.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="396.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="409.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="414.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="427.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="414.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="414.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="427.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="432.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="445.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="432.0" width="420.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="445.5" fill="#5f5f87" textLength="420.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  Allow this edit?  [y] yes   [n] no   [e] explain</text>
+<rect x="503.2" y="432.0" width="537.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="432.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="445.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="450.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="463.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="450.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="450.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="463.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="468.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="481.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│ </text>
+<rect x="83.2" y="468.0" width="957.6" height="18.0" fill="#262626"/>
+<rect x="1040.8" y="468.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="1040.8" y="481.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │</text>
+<rect x="66.4" y="486.0" width="16.8" height="18.0" fill="#262626"/>
+<text x="66.4" y="499.5" fill="#444444" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└ </text>
+<rect x="83.2" y="486.0" width="42.0" height="18.0" fill="#262626"/>
+<text x="83.2" y="499.5" fill="#87afff" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">enter</text>
+<rect x="125.2" y="486.0" width="67.2" height="18.0" fill="#262626"/>
+<text x="125.2" y="499.5" fill="#5f5f87" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> jump · </text>
+<rect x="192.4" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="192.4" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">/</text>
+<rect x="200.8" y="486.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="200.8" y="499.5" fill="#5f5f87" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> filter · </text>
+<rect x="284.8" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="284.8" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">a</text>
+<rect x="293.2" y="486.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="293.2" y="499.5" fill="#5f5f87" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> agents · </text>
+<rect x="377.2" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="377.2" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">p</text>
+<rect x="385.6" y="486.0" width="67.2" height="18.0" fill="#262626"/>
+<text x="385.6" y="499.5" fill="#5f5f87" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> park · </text>
+<rect x="452.8" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="452.8" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">u</text>
+<rect x="461.2" y="486.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="461.2" y="499.5" fill="#5f5f87" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> unpark · </text>
+<rect x="545.2" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="545.2" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">r</text>
+<rect x="553.6" y="486.0" width="84.0" height="18.0" fill="#262626"/>
+<text x="553.6" y="499.5" fill="#5f5f87" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> rename · </text>
+<rect x="637.6" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="637.6" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">x</text>
+<rect x="646.0" y="486.0" width="67.2" height="18.0" fill="#262626"/>
+<text x="646.0" y="499.5" fill="#5f5f87" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> kill · </text>
+<rect x="713.2" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="713.2" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">?</text>
+<rect x="721.6" y="486.0" width="67.2" height="18.0" fill="#262626"/>
+<text x="721.6" y="499.5" fill="#5f5f87" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> help · </text>
+<rect x="788.8" y="486.0" width="8.4" height="18.0" fill="#262626"/>
+<text x="788.8" y="499.5" fill="#87afff" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">q</text>
+<rect x="797.2" y="486.0" width="42.0" height="18.0" fill="#262626"/>
+<text x="797.2" y="499.5" fill="#5f5f87" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> quit</text>
+<rect x="839.2" y="486.0" width="218.4" height="18.0" fill="#262626"/>
+<text x="839.2" y="499.5" fill="#444444" textLength="218.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ────────────────────────┘</text>
+<text x="570.4" y="517.5" fill="#3b4261" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┃</text>
+<text x="570.4" y="535.5" fill="#3b4261" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┃</text>
+<text x="570.4" y="553.5" fill="#3b4261" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┃</text>
+<rect x="16.0" y="558.0" width="42.0" height="18.0" fill="#16161e"/>
+<text x="16.0" y="571.5" fill="#7aa2f7" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold"> api </text>
+<rect x="58.0" y="558.0" width="8.4" height="18.0" fill="#16161e"/>
+<text x="58.0" y="571.5" fill="#f7768e" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">●</text>
+<rect x="66.4" y="558.0" width="25.2" height="18.0" fill="#16161e"/>
+<text x="66.4" y="571.5" fill="#a9b1d6" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> │ </text>
+<rect x="91.6" y="558.0" width="8.4" height="18.0" fill="#16161e"/>
+<text x="91.6" y="571.5" fill="#f7768e" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">●</text>
+<rect x="100.0" y="558.0" width="50.4" height="18.0" fill="#7aa2f7"/>
+<text x="100.0" y="571.5" fill="#16161e" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">1:code</text>
+<rect x="150.4" y="558.0" width="8.4" height="18.0" fill="#16161e"/>
+<rect x="158.8" y="558.0" width="957.6" height="18.0" fill="#16161e"/>
+<text x="158.8" y="571.5" fill="#a9b1d6" textLength="957.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  2:server                                                                   save 02:24 | C-a D health | Thu 02:24</text>
+</svg>
