@@ -197,6 +197,89 @@ class Installer(unittest.TestCase):
         settings = json.loads((self.home / '.claude/settings.json').read_text())
         self.assertIn('agent-hook.py claude-status', settings['statusLine']['command'])
 
+    def logging_tmux(self, running=True):
+        """A tmux stub that records its calls and, if running, has a server."""
+        self.tmux_log = self.home.parent / (self.home.name + '-tmux.log')
+        self.addCleanup(lambda: self.tmux_log.unlink(missing_ok=True))
+        self.stub('tmux', f'echo "$*" >> {self.tmux_log}\n[ "$1" = -V ] && {{ echo "tmux 3.5a"; exit 0; }}\n'
+                          f'[ "$1" = info ] && exit {0 if running else 1}\nexit 0')
+
+    def test_uninstall_tells_a_running_server_to_stop_using_the_removed_commands(self):
+        self.install('--yes')
+        self.logging_tmux()
+        out = self.install('--uninstall').stdout
+        calls = self.tmux_log.read_text()
+        self.assertIn('set-option -gu default-command', calls)
+        self.assertIn('set-hook -gu session-created', calls)
+        self.assertIn('restart tmux', out)
+
+    def test_uninstall_removes_agent_integrations(self):
+        (self.home / '.claude').mkdir()
+        (self.home / '.claude/settings.json').write_text(json.dumps({'statusLine': {'type': 'command', 'command': 'mine'}}))
+        self.install('--yes', '--agents')
+        self.install('--uninstall')
+        settings = json.loads((self.home / '.claude/settings.json').read_text())
+        self.assertNotIn('agent-hook.py', json.dumps(settings))
+        self.assertEqual(settings['statusLine']['command'], 'mine')
+        self.assertFalse((self.home / '.local/lib/tmux-workspace/agent-hook.py').exists())
+
+    def test_existing_sesh_config_is_kept_without_yes(self):
+        self.stub('sesh')
+        mine = self.home / '.config/sesh/sesh.toml'
+        mine.parent.mkdir(parents=True)
+        mine.write_text('mine\n')
+        out = self.install().stdout
+        self.assertEqual(mine.read_text(), 'mine\n')
+        self.assertFalse(mine.is_symlink())
+        self.assertIn('sesh.toml exists', out)
+        self.install('--yes')
+        self.assertEqual(mine.resolve(), ROOT / 'sesh.toml')
+        self.install('--uninstall')
+        self.assertEqual(mine.read_text(), 'mine\n')
+
+    def test_deps_installs_missing_recommended_tools(self):
+        (self.bin / 'fzf').unlink()
+        brew = self.home.parent / (self.home.name + '-brew.log')
+        self.addCleanup(lambda: brew.unlink(missing_ok=True))
+        self.stub('brew', f'echo "$*" >> {brew}')
+        self.install('--deps', '--yes')
+        self.assertIn('install fzf zoxide', brew.read_text())
+
+    def test_cancelling_the_projects_question_still_finishes_the_install(self):
+        import fcntl
+        import pty
+        import termios
+        master, slave = pty.openpty()
+
+        def controlling_terminal():  # the pty becomes /dev/tty for install.sh
+            os.setsid()
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        env = {'HOME': str(self.home), 'PATH': str(self.bin), 'SHELL': '/bin/zsh', 'LANG': 'C'}
+        proc = subprocess.Popen(['/bin/bash', str(ROOT / 'install.sh')], stdin=slave, stdout=slave, stderr=slave,
+                                env=env, preexec_fn=controlling_terminal)
+        os.close(slave)
+        output = b''
+        try:
+            while b'Where do you keep your projects?' not in output:
+                chunk = os.read(master, 4096)
+                if not chunk:
+                    break
+                output += chunk
+            os.write(master, b'\x04')  # Ctrl+D
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+        finally:
+            proc.wait(timeout=60)
+            os.close(master)
+        self.assertEqual(proc.returncode, 0, output.decode(errors='replace'))
+        self.assertIn(b'tmux-workspace installed', output)
+
     def test_script_is_valid_bash_32_syntax(self):
         subprocess.run(['/bin/bash', '-n', str(ROOT / 'install.sh')], check=True)
 

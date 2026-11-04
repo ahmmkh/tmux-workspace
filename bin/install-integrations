@@ -69,9 +69,11 @@ class Installer:
         self.actions.append(f'link {link} -> {source}')
 
     def write_json(self, path, data, original):
-        """Replace path atomically, unless someone else changed it while we worked."""
+        """Replace path atomically, unless someone else changed it while we worked.
+        A symlinked file (dotfile managers) is written at its target, so the link stays."""
         if path.exists():
             self.backup(path)
+        path = path.resolve() if path.is_symlink() else path
         with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as out:
             temporary = Path(out.name)
             json.dump(data, out, indent=2)
@@ -131,10 +133,44 @@ class Installer:
         return len(self.actions) > count
 
 
+    def remove(self):
+        """Undo run(): drop this project's hook entries and status line, and the links into the clone."""
+        home = self.home
+        targets = ((Path(os.environ.get('CODEX_HOME') or home / '.codex') / 'hooks.json', 'Codex'),
+                   (home / '.claude/settings.json', 'Claude'))
+        for path, name in targets:
+            if not path.is_file():
+                continue
+            original = path.read_bytes()
+            data, changed = merge_hooks(json.loads(original), {})
+            line = data.get('statusLine')
+            if isinstance(line, dict) and MARK in line.get('command', ''):
+                del data['statusLine']
+                changed = True
+            if changed:
+                self.write_json(path, data, original)
+                self.actions.append(f'{name} hooks removed from {path}')
+        for link in (hook_path(home), home / '.omp/agent/extensions/tmux-workspace.ts',
+                     home / '.config/nvim/lua/custom/tmux_workspace.lua',
+                     home / 'Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json'):
+            if link.is_symlink() and PROJECT in link.resolve().parents:
+                link.unlink()
+                self.actions.append(f'link {link}')
+        return self.actions
+
+
 def install(home, system=None):
     return Installer(home).run(system or platform.system())
 
 
+def uninstall(home):
+    return Installer(home).remove()
+
+
 if __name__ == '__main__':
-    done = install(Path.home())
-    print('\n'.join(done) if done else 'Integrations already installed.')
+    if '--uninstall' in sys.argv[1:]:
+        for action in uninstall(Path.home()):
+            print(action)
+    else:
+        done = install(Path.home())
+        print('\n'.join(done) if done else 'Integrations already installed.')

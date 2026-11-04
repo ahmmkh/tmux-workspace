@@ -131,6 +131,38 @@ class Install(unittest.TestCase):
             self.assertIn('agent-hook.py codex', (codex / 'hooks.json').read_text())
 
 
+    def test_symlinked_settings_stay_symlinked(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        target = home / 'dotfiles' / 'claude-settings.json'
+        target.parent.mkdir()
+        target.write_text('{"model": "opus"}')
+        (home / '.claude').mkdir()
+        (home / '.claude/settings.json').symlink_to(target)
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.install(home, system='Linux')
+        self.assertTrue((home / '.claude/settings.json').is_symlink())
+        self.assertIn('agent-hook.py', target.read_text())
+
+    def test_uninstall_removes_only_what_install_added(self):
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for name in ('.claude', '.codex', '.omp', '.config/nvim'):
+            (home / name).mkdir(parents=True)
+        mine = {'type': 'command', 'command': 'existing-hook', 'timeout': 10}
+        (home / '.codex/hooks.json').write_text(json.dumps({'hooks': {'Stop': [{'hooks': [mine]}]}}))
+        (home / '.claude/settings.json').write_text(json.dumps({'model': 'opus'}))
+        with contextlib.redirect_stdout(io.StringIO()):
+            installer.install(home, system='Darwin')
+            installer.uninstall(home)
+        codex = json.loads((home / '.codex/hooks.json').read_text())
+        self.assertEqual(codex['hooks'], {'Stop': [{'hooks': [mine]}]})
+        claude = json.loads((home / '.claude/settings.json').read_text())
+        self.assertEqual(claude, {'model': 'opus', 'hooks': {}})
+        for link in ('.local/lib/tmux-workspace/agent-hook.py', '.omp/agent/extensions/tmux-workspace.ts',
+                     '.config/nvim/lua/custom/tmux_workspace.lua',
+                     'Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json'):
+            self.assertFalse((home / link).exists(), link)
+
+
 class Diagnostics(unittest.TestCase):
     def test_missing_server_reports_warning_without_starting_a_server(self):
         import sys
@@ -190,6 +222,12 @@ class Diagnostics(unittest.TestCase):
         self.assertIn('WARN  ' + str(home / '.config/tmux-workspace/agent-status.conf'), text)
         self.assertIn('WARN  ' + str(home / '.tmux.conf'), text)
 
+
+    def test_doctor_does_not_warn_about_agents_that_were_never_installed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text = self.doctor_output(Path(directory))
+        self.assertNotRegex(text, r'WARN  \S*agent-hook\.py')
+        self.assertIn('agent integrations: not installed (install.sh --agents)', text)
 
     def test_doctor_skips_codex_when_it_is_not_installed(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ):

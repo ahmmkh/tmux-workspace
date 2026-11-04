@@ -164,6 +164,7 @@ install_command() {  # install_command TOOL...  prints the command a person woul
 }
 
 install_packages() {
+    [ $# -gt 0 ] || return 0
     [ -n "$PM" ] || die "no supported package manager found; install$(printf ' %s' "$@") yourself" 3
     if [ -n "$SUDO" ] && ! has sudo; then die "sudo is needed to run: $(install_command "$@")" 3; fi
     if [ "$PM" = apt-get ]; then $SUDO apt-get update -qq; fi
@@ -219,18 +220,23 @@ check_requirements() {
     else
         say ok "python3 $version"
     fi
-    local optional=''
+    local optional='' recommended='' upgrade=''
     for tool in fzf zoxide git sesh lazygit; do
         if has "$tool"; then say ok "$tool"; else optional="$optional $tool"; fi
     done
+    for tool in fzf zoxide; do
+        has "$tool" || recommended="$recommended $tool"
+    done
+    case $old in *tmux*) upgrade="$upgrade tmux" ;; esac
+    case $old in *python3*) upgrade="$upgrade python3" ;; esac
 
+    if [ "$DEPS" = 1 ] && [ "$DRY" = 0 ] && [ -n "$missing$upgrade$recommended" ]; then
+        # shellcheck disable=SC2086
+        install_packages $missing $upgrade $recommended
+        check_requirements_again
+        return
+    fi
     if [ -n "$missing" ] || [ -n "$old" ]; then
-        if [ "$DEPS" = 1 ] && [ "$DRY" = 0 ]; then
-            # shellcheck disable=SC2086
-            install_packages $missing fzf zoxide
-            check_requirements_again
-            return
-        fi
         [ -z "$old" ] || say old "$old"
         # shellcheck disable=SC2086
         [ -z "$missing" ] || say missing "$(install_command $missing)"
@@ -290,16 +296,17 @@ link() {  # link SOURCE DEST
     act link "$dest -> $source" make_link "$source" "$dest"
 }
 
-link_tmux_conf() {
-    local dest=$HOME/.tmux.conf
-    ours "$dest" "$REPO/tmux.conf" && return 0
+# A file the user already has (not one of ours) is replaced only with --yes or a yes on the terminal.
+link_asking() {  # link_asking SOURCE DEST
+    local source=$1 dest=$2
+    ours "$dest" "$source" && return 0
     if { [ -e "$dest" ] || [ -L "$dest" ]; } && [ "$YES" = 0 ]; then
-        if ! ask "Replace your ~/.tmux.conf? It moves to a backup and --uninstall restores it."; then
+        if [ "$DRY" = 1 ] || ! ask "Replace your $dest? It moves to a backup and --uninstall restores it."; then
             say skip "$dest exists; rerun with --yes to replace it (a backup is kept)"
             return 0
         fi
     fi
-    link "$REPO/tmux.conf" "$dest"
+    link "$source" "$dest"
 }
 
 append_block() {
@@ -352,7 +359,7 @@ onboard() {
     elif grep -q '"projects_dir"' "$CONFIG_DIR/config.json" 2>/dev/null; then
         return 0
     elif [ "$YES" = 0 ] && [ "$DRY" = 0 ] && tty_ok; then
-        "$tool" setup </dev/tty >/dev/tty
+        "$tool" setup </dev/tty >/dev/tty || say later "projects folder: the first \`work\` asks"
         CHANGED=1
     else
         say later "projects folder: the first \`work\` asks (or rerun with --projects DIR)"
@@ -365,13 +372,13 @@ do_install() {
     link "$REPO/bin/tw-clip" "$BIN_DIR/tw-clip"
     link "$REPO/bin/tw-sound" "$BIN_DIR/tw-sound"
     link "$REPO/agent-status.conf" "$STATUS_CONF"
-    [ "$TMUXCONF" = 0 ] || link_tmux_conf
-    if has sesh; then link "$REPO/sesh.toml" "$HOME_CONFIG/sesh/sesh.toml"; fi
+    [ "$TMUXCONF" = 0 ] || link_asking "$REPO/tmux.conf" "$HOME/.tmux.conf"
+    if has sesh; then link_asking "$REPO/sesh.toml" "$HOME_CONFIG/sesh/sesh.toml"; fi
     if [ "$SHELLS" = 1 ]; then
         shell_rc "${ZDOTDIR:-$HOME}/.zshrc" zsh
         shell_rc "$HOME/.bashrc" bash
         if has fish || [ -d "$HOME_CONFIG/fish" ]; then
-            link "$REPO/shell/work.fish" "$HOME_CONFIG/fish/functions/work.fish"
+            link_asking "$REPO/shell/work.fish" "$HOME_CONFIG/fish/functions/work.fish"
         fi
     fi
     migrate_config
@@ -407,8 +414,23 @@ Next: open a new terminal, then
 EOF
 }
 
+stop_server_hooks() {
+    tmux set-option -gu default-command
+    tmux set-hook -gu session-created
+}
+
 do_uninstall() {
-    local dest rc target dir manifest original saved kind
+    local dest rc target dir manifest original saved kind ours_conf=0 line
+    if [ -L "$HOME/.tmux.conf" ]; then
+        case $(resolve "$HOME/.tmux.conf") in "$REPO"/*) ours_conf=1 ;; esac
+    fi
+    if [ "$DRY" = 1 ]; then
+        say would "remove the agent integrations that --agents added"
+    elif has python3; then
+        "$REPO/bin/install-integrations" --uninstall | while IFS= read -r line; do
+            if [ -n "$line" ]; then say remove "$line"; fi
+        done
+    fi
     for dest in "$BIN_DIR/tmux-workspace" "$BIN_DIR/tw-clip" "$BIN_DIR/tw-sound" "$STATUS_CONF" \
         "$HOME/.tmux.conf" "$HOME_CONFIG/sesh/sesh.toml" "$HOME_CONFIG/fish/functions/work.fish"; do
         if [ -L "$dest" ]; then
@@ -433,6 +455,11 @@ do_uninstall() {
         done <"$manifest"
         [ "$DRY" = 1 ] || mv "$manifest" "$manifest.restored"
     done < <(find "$STATE/backups" -mindepth 1 -maxdepth 1 -name 'install-*' 2>/dev/null | sort -r)
+    # A running server still starts panes with the removed tmux-workspace: tell it to stop.
+    if [ "$ours_conf" = 1 ] && has tmux && tmux info >/dev/null 2>&1; then
+        act tmux "the running server no longer starts panes through tmux-workspace" stop_server_hooks
+        say note "restart tmux to finish: tmux kill-server, then start it again"
+    fi
     if [ "$CHANGED" = 0 ]; then say "done" "nothing to remove"; else say "done" "tmux-workspace removed; snapshots and $CONFIG_DIR stay"; fi
 }
 
