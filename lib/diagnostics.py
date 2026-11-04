@@ -34,10 +34,15 @@ def doctor(ws):
     sound = helper('tw-sound', 'which') or 'none'
     print(f"      sounds: {sound}{' (agent sounds stay silent)' if sound == 'none' else ''}")
     home = Path.home()
-    for live, source in ((home / '.local/bin/tmux-workspace', project / 'bin/tmux-workspace'),
-                         (home / '.config/tmux-workspace/agent-status.conf', project / 'agent-status.conf'),
-                         (home / '.tmux.conf', project / 'tmux.conf'),
-                         (home / '.local/lib/tmux-workspace/agent-hook.py', project / 'integrations/agent-hook.py')):
+    links = [(home / '.local/bin/tmux-workspace', project / 'bin/tmux-workspace'),
+             (home / '.config/tmux-workspace/agent-status.conf', project / 'agent-status.conf'),
+             (home / '.tmux.conf', project / 'tmux.conf')]
+    hook = home / '.local/lib/tmux-workspace/agent-hook.py'
+    if hook.exists() or hook.is_symlink():
+        links.append((hook, project / 'integrations/agent-hook.py'))
+    else:
+        print('      agent integrations: not installed (install.sh --agents)')
+    for live, source in links:
         target = live.resolve()
         check(str(live), target == source.resolve(), str(target) if live.exists() else 'missing; run install.sh')
 

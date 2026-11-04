@@ -210,6 +210,31 @@ class Keys(unittest.TestCase):
         self.press(['x', 'y'])
         self.ws['tm'].assert_called_with('kill-pane', '-t', ROWS[0].pane_id)
 
+    def test_kill_targets_the_pane_chosen_when_x_was_pressed(self):
+        state = self.press(['j', 'x'])
+        reordered = [ROWS[2], ROWS[1], ROWS[0]] + ROWS[3:]  # a refresh moves rows while the question is open
+        state.selected = reordered[0].pane_id
+        dashboard.handle_key('y', state, reordered, self.ws)
+        self.ws['tm'].assert_called_with('kill-pane', '-t', ROWS[1].pane_id)
+
+    def test_kill_does_nothing_when_the_chosen_pane_is_gone(self):
+        state = self.press(['j', 'x'])
+        remaining = [r for r in ROWS if r.pane_id != ROWS[1].pane_id]
+        state = dashboard.handle_key('y', state, remaining, self.ws)
+        self.assertNotIn('kill-pane', str(self.ws['tm'].call_args_list))
+        self.assertIn('gone', state.message)
+
+    def test_rename_targets_the_pane_chosen_when_r_was_pressed(self):
+        state = self.press(['j', 'r', 'x'])
+        state.selected = ROWS[0].pane_id
+        dashboard.handle_key('\n', state, ROWS, self.ws)
+        self.ws['set_label'].assert_called_once_with(ROWS[1].pane_id, ROWS[1].label + 'x')
+
+    def test_kill_prompt_names_the_pane(self):
+        state = self.press(['x'])
+        footer = text(dashboard.render(ROWS, state, 120, 40, []))[-1]
+        self.assertIn('close ' + ROWS[0].label + '?', footer)
+
     def test_filter_is_live_and_escape_clears(self):
         state = self.press(['/', 'i', 'n', 'f'])
         self.assertEqual((state.mode, state.query), ('filter', 'inf'))

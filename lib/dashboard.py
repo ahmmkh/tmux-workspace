@@ -62,6 +62,8 @@ class State:
     origin: str = ''                # the pane the dashboard was opened from
     mode: str = 'normal'            # normal, filter, rename, confirm-kill, help
     text: str = ''                  # what the user is typing in filter or rename mode
+    target: str = ''                # the pane a rename or close question is about, fixed when it is asked
+    target_label: str = ''
     query: str = ''
     agents_only: bool = False
     message: str = ''
@@ -247,7 +249,7 @@ def footer(state, width):
     elif state.mode == 'rename':
         content = [('rename: ', 'key'), (state.text + '█', '')]
     elif state.mode == 'confirm-kill':
-        content = [('close this pane? ', 'error'), ('y', 'key'), (' / ', 'dim'), ('n', 'key')]
+        content = [(f'close {state.target_label}? ', 'error'), ('y', 'key'), (' / ', 'dim'), ('n', 'key')]
     else:
         content = []
         if state.query or state.agents_only:
@@ -329,8 +331,12 @@ def handle_key(key, state, rows, ws):
         return typing(key, state, rows, ws)
     if state.mode == 'confirm-kill':
         state.mode = 'normal'
-        if key in ('y', 'Y') and rows:
-            act(state, ws, lambda: ws['tm']('kill-pane', '-t', current(rows, state).pane_id))
+        if key in ('y', 'Y'):
+            if not any(r.pane_id == state.target for r in rows):
+                say(state, f'{state.target_label} is gone already')
+            else:
+                target = state.target
+                act(state, ws, lambda: ws['tm']('kill-pane', '-t', target))
         return state
     if key in ('q',):
         state.quit = True
@@ -371,9 +377,11 @@ def handle_key(key, state, rows, ws):
         else:
             bring_back(state, row, ws)
     elif key == 'r':
-        state.mode, state.text = 'rename', current(rows, state).label
+        row = current(rows, state)
+        state.mode, state.text, state.target, state.target_label = 'rename', row.label, row.pane_id, row.label
     elif key == 'x':
-        state.mode = 'confirm-kill'
+        row = current(rows, state)
+        state.mode, state.target, state.target_label = 'confirm-kill', row.pane_id, row.label
     return state
 
 
@@ -383,9 +391,9 @@ def typing(key, state, rows, ws):
             state.query = ''
         state.mode, state.text = 'normal', ''
     elif key in ENTER:
-        if state.mode == 'rename' and rows:
-            row, label = current(rows, state), state.text
-            act(state, ws, lambda: ws['set_label'](row.pane_id, label))
+        if state.mode == 'rename' and state.target:
+            target, label = state.target, state.text
+            act(state, ws, lambda: ws['set_label'](target, label))
         state.mode, state.text = 'normal', ''
     elif key in BACKSPACE:
         state.text = state.text[:-1]
