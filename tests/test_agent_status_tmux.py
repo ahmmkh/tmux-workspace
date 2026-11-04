@@ -14,7 +14,9 @@ import tempfile
 import time
 import unittest
 from unittest import mock
-import uuid
+
+import support
+from support import SLEEP
 
 ROOT = Path(__file__).resolve().parents[1]
 CONF = ROOT / 'agent-status.conf'
@@ -24,53 +26,16 @@ hook = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(hook)
 BLOCKED, DONE, WORKING, IDLE = '#[fg=#f7768e]●', '#[fg=#7dcfff]●', '#[fg=#e0af68]●', '#[fg=#9ece6a]○'
 ORDER = [('blocked', BLOCKED), ('done', DONE), ('working', WORKING), ('idle', IDLE)]
-SLEEP = 'sleep 300'  # Panes end by themselves, so a leftover server does too.
 # The one pane that must look like a shell. The zsh builtin read keeps zsh in the foreground.
 SHELL = "zsh -fc 'read -t 300'"
 
 
-class ScratchTmux(unittest.TestCase):
+class ScratchTmux(support.ScratchTmux):
+    CONFIGS = (CONF,)
+
     def setUp(self):
-        self.name = f'agent-status-test-{os.getpid()}-{uuid.uuid4().hex[:8]}'
-        state = self.enterContext(tempfile.TemporaryDirectory())
-        self.env = {k: v for k, v in os.environ.items() if k not in ('TMUX', 'TMUX_PANE')}
-        self.env['TMUX_WORKSPACE_STATE_DIR'] = state
-        self.env['TERM'] = 'xterm-256color'
-        self.run_tmux('new-session', '-d', '-s', 'alpha', '-n', 'one', '-x', '120', '-y', '40', SLEEP)
-        self.addCleanup(self.stop_server, self.tmux('display-message', 'alpha', '-p', '#{socket_path}'))
-        self.tmux('source-file', 'alpha', str(CONF))
+        super().setUp()
         self.run_tmux('set-option', '-g', '@agent_sound_cmd', 'true')  # Tests never play a real sound.
-
-    def argv(self, *args):
-        return ['tmux', '-L', self.name, '-f', '/dev/null', *args]
-
-    def run_tmux(self, *args, check=True):
-        """Every tmux call goes through here. Only a call that may fail or that has no target calls it directly."""
-        result = subprocess.run(self.argv(*args), env=self.env, capture_output=True, text=True)
-        if check and result.returncode:
-            self.fail(f'tmux {args}: {result.stderr.strip()}')
-        return result
-
-    def tmux(self, command, target, *args):
-        return self.run_tmux(command, '-t', target, *args).stdout.rstrip('\n')
-
-    def stop_server(self, socket):
-        self.run_tmux('kill-server', check=False)
-        deadline = time.monotonic() + 3
-        while self.run_tmux('list-sessions', check=False).returncode == 0 and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertNotEqual(self.run_tmux('list-sessions', check=False).returncode, 0, 'scratch server still runs')
-        Path(socket).unlink(missing_ok=True)  # tmux leaves the socket file of a dead server.
-
-    def pane(self, command, target, *args, shell=SLEEP):
-        pane = self.tmux(command, target, '-d', '-P', '-F', '#{pane_id}', *args, shell)
-        if shell == SLEEP:
-            # A newborn pane may still be zsh, whose agent notifications are deliberately suppressed.
-            self.wait_for(lambda: self.expand(pane, '#{pane_current_command}'), 'sleep')
-        return pane
-
-    def expand(self, target, text):
-        return self.tmux('display-message', target, '-p', text)
 
     def status(self, pane, value=None):
         if value is None:
@@ -80,12 +45,6 @@ class ScratchTmux(unittest.TestCase):
     def turn_over(self, pane):
         self.tmux('set-option', pane, '-pF', '@workspace_agent', hook.TURN_OVER)
         return self.status(pane)
-
-    def wait_for(self, read, expected):
-        deadline = time.monotonic() + 3
-        while read() != expected and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertEqual(read(), expected)
 
     def control_client(self, session):
         """Attach a control-mode client. tmux counts it as a terminal with focus."""

@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from support import load_workspace
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('agent_hook', ROOT / 'integrations' / 'agent-hook.py')
 assert SPEC is not None and SPEC.loader is not None
@@ -244,20 +246,6 @@ class Helper(unittest.TestCase):
         self.assertEqual(len(self.writes), 1)
         for option in ('@workspace_app', '@workspace_agent', '@workspace_agent_wait', '@workspace_agent_failed'):
             self.assertIn('set-option -pu -t %7 ' + option, self.writes[0])
-
-
-def load_workspace():
-    """Load bin/tmux-workspace as a module. It has no .py suffix and sets the umask on import."""
-    path = str(ROOT / 'bin' / 'tmux-workspace')
-    spec = importlib.util.spec_from_loader('tmux_workspace', importlib.machinery.SourceFileLoader('tmux_workspace', path))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    mask = os.umask(0)
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        os.umask(mask)
-    return module
 
 
 ws = load_workspace()
