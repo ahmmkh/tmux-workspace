@@ -15,6 +15,7 @@ import time
 import unittest
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/support.py
 import support
 from support import SLEEP
 
@@ -119,6 +120,14 @@ class Marks(ScratchTmux):
         self.status('beta', 'working')
         self.assertEqual(self.expand('beta', '#{E:@agent_workspace}'), BLOCKED)
         self.assertEqual(self.expand('alpha', '#{E:@agent_workspace}'), ' ')
+
+    def test_bash_and_zsh_panes_show_no_mark(self):
+        for shell, name in (("bash --norc --noprofile -c 'read -t 300'", 'bash'), ("zsh -fc 'read -t 300'", 'zsh')):
+            with self.subTest(shell=name):
+                pane = self.pane('split-window', 'alpha', shell=shell)
+                self.wait_for(lambda: self.expand(pane, '#{pane_current_command}'), name)
+                self.status(pane, 'working')
+                self.assertEqual(self.expand(pane, '#{E:@agent_pane}'), '')
 
     def test_pane_at_the_shell_shows_no_mark(self):
         shell = self.pane('split-window', 'alpha:one', shell=SHELL)

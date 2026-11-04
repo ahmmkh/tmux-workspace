@@ -18,12 +18,12 @@ import uuid
 ROOT = Path(os.environ.get('TMUX_WORKSPACE_STATE_DIR', Path.home() / '.local/state/tmux-workspace')).expanduser()
 SELF = str(Path(__file__).resolve())
 TMUX = shutil.which('tmux') or '/opt/homebrew/bin/tmux'
-PARKING = '__parked'
 APP_COMMANDS = {'claude': ['claude', '--resume'], 'codex': ['codex', 'resume'], 'omp': ['omp', '--resume'], 'nvim': ['nvim', '-S']}
 SEP = '\x1f'
 os.umask(0o077)
 sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
 import paths  # noqa: E402
+from workspace_model import PARKING, roll_up  # noqa: E402,F401
 
 PROJECTS_ROOT = paths.projects_dir().resolve()
 
@@ -64,21 +64,6 @@ def pane_info(pane):
 
 
 AGENT_COLOURS = {'blocked': 31, 'done': 36, 'working': 33, 'idle': 32}  # Most urgent first.
-
-
-def roll_up(rows):
-    """Roll pane status up per tab and per workspace with the rules of agent-status.conf."""
-    by_pane, by_tab, by_workspace = {}, {}, {}
-    rank = list(AGENT_COLOURS).index
-    for row in rows:
-        status = row['@workspace_agent']
-        if row['pane_current_command'] == 'zsh' or status not in AGENT_COLOURS:
-            continue
-        by_pane[row['pane_id']] = status
-        workspace = row['@workspace_home'] if row['session_name'] == PARKING else row['session_name']
-        for group, key in ((by_tab, row['window_id']), (by_workspace, workspace)):
-            group[key] = min(group.get(key, status), status, key=rank)
-    return by_pane, by_tab, by_workspace
 
 
 def agent_status():
@@ -363,7 +348,16 @@ def pane_start(snapshot_path=None, uid=None):
         identity(pane)
         if not option('@workspace_label', pane):
             ask_label(pane)
-    os.execv('/bin/zsh', ['/bin/zsh', '-l'])
+    shell = login_shell()
+    os.execv(shell, [shell, '-l'])
+
+
+def login_shell():
+    """The user's shell, or /bin/sh when $SHELL is unset or names no executable file."""
+    shell = os.environ.get('SHELL', '')
+    if shell and os.path.isfile(shell) and os.access(shell, os.X_OK):
+        return shell
+    return '/bin/sh'
 
 
 def restore(locked=False):

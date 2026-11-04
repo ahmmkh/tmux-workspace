@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/support.py
 from support import load_workspace
 
 ROOT = Path(__file__).resolve().parents[1]
