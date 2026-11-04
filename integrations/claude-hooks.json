@@ -1,0 +1,77 @@
+{
+  "description": "Publish Claude Code status to its own tmux pane. No prompt or output logging.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON}} {{AGENT_HOOK}} claude",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON}} {{AGENT_HOOK}} claude",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON}} {{AGENT_HOOK}} claude",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && {{PYTHON}} {{AGENT_HOOK}} claude; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && {{PYTHON}} {{AGENT_HOOK}} claude; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && {{PYTHON}} {{AGENT_HOOK}} claude; true",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "{{PYTHON}} {{AGENT_HOOK}} claude-status",
+    "refreshInterval": 1
+  }
+}

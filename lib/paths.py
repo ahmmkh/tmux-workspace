@@ -50,3 +50,11 @@ def projects_dir():
 
 def agent_hook_path():
     return REPO / 'integrations' / 'agent-hook.py'
+
+
+def render_hooks(template, home):
+    """An integrations/*-hooks.json template with {{PYTHON}} and {{AGENT_HOOK}} filled for this machine."""
+    python = '/usr/bin/python3' if Path('/usr/bin/python3').exists() else '/usr/bin/env python3'
+    hook = Path(home) / '.local/lib/tmux-workspace/agent-hook.py'
+    text = Path(template).read_text().replace('{{PYTHON}}', python).replace('{{AGENT_HOOK}}', str(hook))
+    return json.loads(text)

@@ -40,13 +40,17 @@ def doctor(ws):
         target = live.resolve()
         check(str(live), target == source.resolve(), str(target) if live.exists() else 'missing; run install.sh')
 
-    codex = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex'))
+    codex = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
     try:
+        if not codex.is_dir():
+            raise LookupError
         hooks = json.loads((codex / 'hooks.json').read_text()).get('hooks', {})
-        expected = json.loads((project / 'integrations/codex-hooks.json').read_text())['hooks']
+        expected = paths.render_hooks(project / 'integrations/codex-hooks.json', Path.home())['hooks']
         missing = [event for event, groups in expected.items() if groups[0] not in hooks.get(event, [])]
         check('Codex hooks', not missing, 'missing: ' + ', '.join(missing) if missing else 'all workspace hooks installed')
         print('    Codex /hooks must show these definitions as trusted. New or changed hooks require review.')
+    except LookupError:
+        print('      Codex: not installed')
     except (OSError, ValueError, AttributeError) as exc:
         check('Codex hooks', False, str(exc))
     result = subprocess.run([ws['TMUX'], '-N', 'display-message', '-p', '#{socket_path}'],

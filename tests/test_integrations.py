@@ -3,19 +3,24 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-loader = importlib.machinery.SourceFileLoader('install_terminal', str(ROOT / 'bin/install-terminal-settings'))
+loader = importlib.machinery.SourceFileLoader('install_integrations', str(ROOT / 'bin/install-integrations'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 installer = importlib.util.module_from_spec(spec)
 loader.exec_module(installer)
 
 
 class Install(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop('CODEX_HOME', None)
+
     def test_install_preserves_other_hooks_backs_up_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             home = Path(directory)
@@ -25,7 +30,7 @@ class Install(unittest.TestCase):
                 {'type': 'command', 'command': 'existing-hook', 'timeout': 10}]}]}}
             original = json.dumps(existing).encode()
             hooks.write_bytes(original)
-            installer.install(home)
+            installer.install(home, system='Darwin')
             installed = hooks.read_bytes()
             data = json.loads(installed)
             self.assertEqual(data['hooks']['Stop'][0], existing['hooks']['Stop'][0])
@@ -37,7 +42,7 @@ class Install(unittest.TestCase):
             self.assertEqual(hooks.stat().st_mode & 0o777, 0o600)
             self.assertEqual((home / 'Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json').resolve(),
                              ROOT / 'integrations/iterm2-profile.json')
-            installer.install(home)
+            installer.install(home, system='Darwin')
             self.assertEqual(hooks.read_bytes(), installed)
             self.assertEqual(list((home / '.local/state/tmux-workspace/backups').glob('*/hooks.json')), backups)
             self.assertFalse((home / '.codex/config.toml').exists())
@@ -51,6 +56,79 @@ class Install(unittest.TestCase):
             with self.assertRaises(ValueError):
                 installer.install(home)
             self.assertEqual(hooks.read_text(), 'not json')
+
+    def test_rendered_codex_command_matches_the_legacy_absolute_form(self):
+        data = installer.render(ROOT / 'integrations/codex-hooks.json', Path('/Users/someone'))
+        command = data['hooks']['SessionStart'][0]['hooks'][0]['command']
+        self.assertIn('/Users/someone/.local/lib/tmux-workspace/agent-hook.py codex', command)
+        self.assertNotIn('{{', json.dumps(data))
+
+    def test_templates_name_no_author_paths(self):
+        for name in ('codex-hooks.json', 'claude-hooks.json'):
+            self.assertNotIn('/Users/', (ROOT / 'integrations' / name).read_text())
+
+    def test_merge_replaces_old_agent_hook_entries_instead_of_duplicating(self):
+        old = {'type': 'command', 'command': '/usr/bin/python3 /old/agent-hook.py codex', 'timeout': 3}
+        mine = {'type': 'command', 'command': 'existing-hook', 'timeout': 10}
+        existing = {'hooks': {'Stop': [{'hooks': [mine, old]}]}}
+        wanted = {'Stop': [{'hooks': [{'type': 'command', 'command': 'python3 /new/agent-hook.py codex', 'timeout': 3}]}]}
+        data, changed = installer.merge_hooks(existing, wanted)
+        commands = [h['command'] for g in data['hooks']['Stop'] for h in g['hooks']]
+        self.assertTrue(changed)
+        self.assertEqual(commands, ['existing-hook', 'python3 /new/agent-hook.py codex'])
+        self.assertEqual(installer.merge_hooks(data, wanted), (data, False))
+
+    def claude_install(self, settings=None):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        home = Path(directory)
+        (home / '.claude').mkdir()
+        if settings is not None:
+            (home / '.claude/settings.json').write_text(json.dumps(settings))
+        with contextlib.redirect_stdout(io.StringIO()):
+            actions = installer.install(home, system='Linux')
+        return home, json.loads((home / '.claude/settings.json').read_text()), actions
+
+    def test_claude_hooks_and_status_line_are_registered(self):
+        home, data, _ = self.claude_install({'model': 'opus'})
+        hook = str(home / '.local/lib/tmux-workspace/agent-hook.py')
+        self.assertEqual(data['model'], 'opus')
+        self.assertIn(hook + ' claude-status', data['statusLine']['command'])
+        for event in ('SessionStart', 'SessionEnd', 'CwdChanged', 'PermissionRequest', 'StopFailure', 'PreToolUse'):
+            self.assertTrue(any(hook in h['command'] for g in data['hooks'][event] for h in g['hooks']), event)
+        self.assertEqual(data['hooks']['PreToolUse'][0]['matcher'], 'AskUserQuestion|ExitPlanMode')
+
+    def test_existing_claude_status_line_is_kept(self):
+        _, data, actions = self.claude_install({'statusLine': {'type': 'command', 'command': 'mine'}})
+        self.assertEqual(data['statusLine']['command'], 'mine')
+        self.assertIn('Claude statusLine kept: mine', actions)
+
+    def test_linux_skips_iterm_and_absent_tools(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            home = Path(directory)
+            installer.install(home, system='Linux')
+            self.assertFalse((home / 'Library').exists())
+            self.assertFalse((home / '.claude').exists())
+            self.assertFalse((home / '.codex').exists())
+            self.assertFalse((home / '.omp').exists())
+            self.assertEqual((home / '.local/lib/tmux-workspace/agent-hook.py').resolve(), ROOT / 'integrations/agent-hook.py')
+
+    def test_omp_and_neovim_are_linked_when_present(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            home = Path(directory)
+            (home / '.omp').mkdir()
+            (home / '.config/nvim').mkdir(parents=True)
+            installer.install(home, system='Linux')
+            self.assertEqual((home / '.omp/agent/extensions/tmux-workspace.ts').resolve(), ROOT / 'integrations/tmux-workspace.ts')
+            self.assertEqual((home / '.config/nvim/lua/custom/tmux_workspace.lua').resolve(), ROOT / 'integrations/tmux_workspace.lua')
+
+    def test_codex_home_is_respected(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            home = Path(directory)
+            codex = home / 'custom-codex'
+            codex.mkdir()
+            with mock.patch.dict(os.environ, {'CODEX_HOME': str(codex)}):
+                installer.install(home, system='Linux')
+            self.assertIn('agent-hook.py codex', (codex / 'hooks.json').read_text())
 
 
 class Diagnostics(unittest.TestCase):
@@ -111,6 +189,24 @@ class Diagnostics(unittest.TestCase):
         self.assertIn('OK  ' + str(home / '.local/bin/tmux-workspace'), text)
         self.assertIn('WARN  ' + str(home / '.config/tmux-workspace/agent-status.conf'), text)
         self.assertIn('WARN  ' + str(home / '.tmux.conf'), text)
+
+
+    def test_doctor_skips_codex_when_it_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ):
+            os.environ.pop('CODEX_HOME', None)
+            text = self.doctor_output(Path(directory))
+        self.assertNotIn('WARN  Codex hooks', text)
+        self.assertIn('Codex: not installed', text)
+
+    def test_doctor_accepts_rendered_codex_hooks(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ):
+            os.environ.pop('CODEX_HOME', None)
+            home = Path(directory)
+            (home / '.codex').mkdir()
+            with contextlib.redirect_stdout(io.StringIO()):
+                installer.install(home, system='Linux')
+            text = self.doctor_output(home)
+        self.assertIn('OK  Codex hooks: all workspace hooks installed', text)
 
 
 if __name__ == '__main__':

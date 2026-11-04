@@ -617,9 +617,10 @@ Interactive behavior still requires real tmux/fzf checks.
 
 ## iTerm2 keyboard and scrolling setup
 
-Run `bin/install-terminal-settings` from this project to install the **tmux workspace**
-dynamic profile and merge the Codex hooks. The installer preserves unrelated hooks,
-keeps backups under `~/.local/state/tmux-workspace/backups/terminal-*`, and can be rerun.
+Run `bin/install-integrations` (or `install.sh --agents`) from this project to install the
+**tmux workspace** dynamic profile on macOS and merge the Claude Code and Codex hooks. The
+installer preserves unrelated hooks, keeps backups under
+`~/.local/state/tmux-workspace/backups/integrations-*`, and can be rerun.
 The profile inherits the appearance of **Default**. Select **Profiles > tmux workspace**
 in iTerm2 to open a tab with it, then run `work`. Existing sessions keep their profile;
 you do not need to stop their tmux processes. Set the profile as default in iTerm2's
