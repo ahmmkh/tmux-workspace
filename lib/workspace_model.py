@@ -64,9 +64,19 @@ def _number(value):
         return 0
 
 
+def option_json(raw):
+    """json.loads for a tmux option value. tmux 3.4 prints $ as \\$, which JSON rejects."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        if '\\$' not in raw:
+            raise
+        return json.loads(raw.replace('\\$', '$'))
+
+
 def _agent(row):
     try:
-        kind = json.loads(row.get('@workspace_app') or '{}').get('kind')
+        kind = option_json(row.get('@workspace_app') or '{}').get('kind')
     except (ValueError, AttributeError):
         kind = None
     if isinstance(kind, str) and kind:

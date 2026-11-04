@@ -237,7 +237,7 @@ def detached_codex(tmux, session_id):
 
 
 def clear_owned(tmux, pane, metadata):
-    raw = run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION])
+    raw = option_value(run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION]))
     if not raw:
         return
     current = published(raw)
@@ -258,8 +258,13 @@ class Pane(NamedTuple):
     app: str
 
 
+def option_value(raw):
+    """An option value as stored. tmux 3.4 prints $ as \\$; JSON never contains \\$, so undoing it is safe."""
+    return raw.replace("\\$", "$")
+
+
 def pane_state(tmux, pane):
-    fields = run([*tmux, "display-message", "-p", "-t", pane, PANE]).split("\t", 6)
+    fields = option_value(run([*tmux, "display-message", "-p", "-t", pane, PANE])).split("\t", 6)
     return Pane(*fields + [""] * (7 - len(fields)))
 
 
@@ -268,7 +273,10 @@ def published(raw):
     try:
         value = json.loads(raw) if raw else {}
     except ValueError:
-        return {}
+        try:
+            value = json.loads(option_value(raw))
+        except ValueError:
+            return {}
     return value if isinstance(value, dict) else {}
 
 
@@ -345,7 +353,7 @@ def codex_event(tmux, pane, data, metadata):
     # Tool hooks can overlap. Retry the whole read when another event wins the write.
     for _ in range(5):
         state = pane_state(tmux, pane)
-        raw = run([*tmux, "show-option", "-pqv", "-t", pane, CODEX])
+        raw = option_value(run([*tmux, "show-option", "-pqv", "-t", pane, CODEX]))
         previous = published(state.app)
         same_owner = all(previous.get(k) == metadata[k] for k in ("kind", "id", "pid", "birth"))
         if not same_owner and event not in ("SessionStart", "UserPromptSubmit"):
@@ -469,7 +477,7 @@ def main():
     if kind == "claude" and not status_line and event == "SessionStart" and data.get("source") == "fork":
         # /fork may copy a BACKGROUND conversation under the same PID. Invalidate
         # the old owner until the native status callback identifies the visible one.
-        current = published(run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION]))
+        current = published(option_value(run([*tmux, "show-option", "-p", "-v", "-q", "-t", pane, OPTION])))
         if all(current.get(key) == metadata[key] for key in ("kind", "pid", "birth")):
             clear_owned(tmux, pane, current)
         return

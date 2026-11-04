@@ -281,6 +281,30 @@ class RollUp(unittest.TestCase):
         self.assertEqual(panes['%2'], 'done')
         self.assertEqual(workspaces, {'alpha': 'working', 'beta': 'done'})
 
+    def test_tmux_3_4_escaped_separator_is_read(self):
+        """tmux 3.4 prints the \\x1f field separator as the four characters \\037 when not on a terminal."""
+        escaped = mock.Mock(stdout='smoke\\037%0\\037label\n', returncode=0)
+        with mock.patch.object(ws.subprocess, 'run', return_value=escaped):
+            self.assertEqual(ws.fields('list-panes', ['session_name', 'pane_id', '@workspace_label'], '-a'),
+                             [{'session_name': 'smoke', 'pane_id': '%0', '@workspace_label': 'label'}])
+
+    def test_captured_text_is_never_unescaped(self):
+        text = mock.Mock(stdout='printf "\\037"\n', returncode=0)
+        with mock.patch.object(ws.subprocess, 'run', return_value=text):
+            self.assertEqual(ws.tm('capture-pane', '-p', '-t', '%1'), 'printf "\\037"')
+
+    def test_window_preview_shows_home_as_a_tilde(self):
+        home = str(Path.home())
+        rows = [{'pane_index': '1', 'pane_current_command': 'zsh', 'pane_current_path': home + '/Projects/api',
+                 '@workspace_label': 'api'}]
+        def tm(*args, **kwargs):
+            return {'display-message': 'code (1 panes)', 'capture-pane': '$ ls'}.get(args[0], 'api')
+        with mock.patch.object(ws, 'tm', side_effect=tm), mock.patch.object(ws, 'fields', return_value=rows), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            ws.window_preview('1')
+        self.assertIn('Pane 1: api (zsh) in ~/Projects/api', out.getvalue())
+        self.assertNotIn(home + '/', out.getvalue())
+
     def test_failing_read_gives_no_status(self):
         with mock.patch.object(ws, 'tm', side_effect=subprocess.CalledProcessError(1, 'tmux')):
             self.assertEqual(ws.agent_status(), ({}, {}, {}))
@@ -312,6 +336,10 @@ class Rows(unittest.TestCase):
         self.assertEqual(ws.picked_name(' \n'), '')
         self.assertEqual(ws.picked_name(''), '')
 
+    def test_picked_name_is_the_selection_after_the_query(self):
+        self.assertEqual(ws.picked_name('odo\nodoo-project\t● odoo-project\t\n'), 'odoo-project')
+        self.assertEqual(ws.picked_name('new-client\n'), 'new-client')
+
     def test_picked_name_drops_the_label_and_status_fields(self):
         row = ws.workspace_row('odoo-project', '● odoo-project', 'blocked')
         self.assertEqual(ws.picked_name(row + '\n'), 'odoo-project')
@@ -319,7 +347,8 @@ class Rows(unittest.TestCase):
     def test_fzf_options_work_with_fzf_0_38(self):
         """Debian 12 ships fzf 0.38 and Ubuntu 24.04 ships 0.44; --accept-nth needs 0.60."""
         known = {'--ansi', '--delimiter', '--nth', '--with-nth', '--tiebreak', '--bind', '--header', '--prompt',
-                 '--height', '--layout', '--border', '--info', '--preview', '--preview-window', '--filter', '--multi'}
+                 '--height', '--layout', '--border', '--info', '--preview', '--preview-window', '--filter', '--multi',
+                 '--print-query'}
         for option in ws.WORKSPACE_FZF[1:] + ws.TAB_FZF[1:]:
             self.assertIn(option.split('=')[0], known)
 
@@ -353,8 +382,9 @@ class Rows(unittest.TestCase):
             return subprocess.run(ws.WORKSPACE_FZF + ['--filter=' + query], input=rows, capture_output=True, text=True).stdout
 
         self.assertEqual(ws.picked_name(filtered('odoo')), 'odoo-project')
-        self.assertEqual(ws.picked_name(filtered('blocked')), '')
-        self.assertIn('--bind=enter:accept-or-print-query', ws.WORKSPACE_FZF)
+        # Only the query comes back: no row matched on its status word. Enter would create 'blocked'.
+        self.assertEqual(filtered('blocked').splitlines(), ['blocked'])
+        self.assertIn('--print-query', ws.WORKSPACE_FZF)
 
     def test_tab_index_is_the_same_with_and_without_a_status_word(self):
         plain = ws.tab_row('3', 'editor', '2', '1:omp, 2:shell', False)

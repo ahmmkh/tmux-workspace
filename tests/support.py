@@ -11,7 +11,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 SELF = ROOT / 'bin' / 'tmux-workspace'
-SLEEP = 'sleep 300'  # Panes end by themselves, so a leftover server does too.
+# Panes end by themselves, so a leftover server does too. exec, because dash (Debian's sh) does not
+# hand the pane over to its last command, and the pane would show sh instead of sleep.
+SLEEP = 'exec sleep 300'
 
 
 def load_workspace():
@@ -44,7 +46,7 @@ class ScratchTmux(unittest.TestCase):
         self.run_tmux('new-session', '-d', '-s', 'alpha', '-n', 'one', '-x', '120', '-y', '40', SLEEP)
         self.addCleanup(self.stop_server, self.socket())
         for path in self.CONFIGS:
-            self.tmux('source-file', 'alpha', str(path))
+            self.run_tmux('source-file', str(path))  # no -t: source-file -t needs tmux 3.4
 
     def remove_state(self):
         subprocess.run(['rm', '-rf', self.state], check=False)
@@ -53,7 +55,8 @@ class ScratchTmux(unittest.TestCase):
         return self.tmux('display-message', 'alpha', '-p', '#{socket_path}')
 
     def argv(self, *args):
-        return ['tmux', '-L', self.name, '-f', '/dev/null', *args]
+        # -u: UTF-8 output even without a UTF-8 locale; tmux 3.3 prints ● as _ otherwise.
+        return ['tmux', '-u', '-L', self.name, '-f', '/dev/null', *args]
 
     def run_tmux(self, *args, check=True):
         """Every tmux call goes through here. Only a call that may fail or that has no target calls it directly."""

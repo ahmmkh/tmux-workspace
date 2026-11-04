@@ -95,5 +95,22 @@ class Rows(unittest.TestCase):
                          {'blocked': 1, 'done': 1, 'working': 1, 'idle': 1, 'panes': 6, 'workspaces': 4})
 
 
+class OptionJson(unittest.TestCase):
+    def test_plain_json(self):
+        self.assertEqual(model.option_json('{"kind": "claude"}'), {'kind': 'claude'})
+
+    def test_tmux_3_4_escaped_dollar(self):
+        """tmux 3.4 prints $ in an option value as \\$, which JSON rejects."""
+        self.assertEqual(model.option_json('{"id": "\\$HOME and \\\\"}'), {'id': '$HOME and \\'})
+
+    def test_broken_value_still_raises(self):
+        with self.assertRaises(ValueError):
+            model.option_json('{broken')
+
+    def test_agent_from_an_escaped_identity(self):
+        row = dict(FIXTURE[0], **{'@workspace_app': '{"kind": "claude", "id": "\\$x"}', 'pane_current_command': 'node'})
+        self.assertEqual(model.build_rows([row])[0].agent, 'claude')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import shlex
 import shutil
 import subprocess
@@ -28,7 +29,25 @@ SPEC.loader.exec_module(hook)
 BLOCKED, DONE, WORKING, IDLE = '#[fg=#f7768e]●', '#[fg=#7dcfff]●', '#[fg=#e0af68]●', '#[fg=#9ece6a]○'
 ORDER = [('blocked', BLOCKED), ('done', DONE), ('working', WORKING), ('idle', IDLE)]
 # The one pane that must look like a shell. The zsh builtin read keeps zsh in the foreground.
-SHELL = "zsh -fc 'read -t 300'"
+SHELL = "exec zsh -fc 'read -t 300'"
+
+
+class HookJson(unittest.TestCase):
+    def test_published_identity_survives_tmux_3_4_dollar_escaping(self):
+        self.assertEqual(hook.published('{"kind": "claude", "id": "\\$HOME"}'), {'kind': 'claude', 'id': '$HOME'})
+
+    def test_values_read_from_tmux_3_4_are_unescaped(self):
+        """The guard compares with the stored value, so the read copy must be the stored text."""
+        self.assertEqual(hook.option_value('{"id": "\\$HOME"}'), '{"id": "$HOME"}')
+        self.assertEqual(hook.option_value('working'), 'working')
+
+    def test_pane_state_unescapes_the_identity(self):
+        line = '\t'.join(('4242', '/dev/ttys001', 'working', '', '', 'idle', '{"id": "\\$x"}'))
+        with mock.patch.object(hook, 'run', return_value=line):
+            self.assertEqual(hook.pane_state(['tmux'], '%1').app, '{"id": "$x"}')
+
+    def test_published_garbage_is_no_identity(self):
+        self.assertEqual(hook.published('{broken'), {})
 
 
 class ScratchTmux(support.ScratchTmux):
@@ -78,7 +97,7 @@ class ScratchTmux(support.ScratchTmux):
 class Parse(ScratchTmux):
     def test_parse_accepts_both_config_files(self):
         for path in (ROOT / 'tmux.conf', CONF):
-            self.tmux('source-file', 'alpha', '-n', str(path))
+            self.run_tmux('source-file', '-n', str(path))
 
     def test_config_has_no_author_paths(self):
         for name in ('tmux.conf', 'agent-status.conf', 'shell.zsh', 'shell/work.sh', 'shell/work.fish'):
@@ -105,7 +124,7 @@ class Parse(ScratchTmux):
         with tempfile.NamedTemporaryFile('w', suffix='.conf') as bad:
             bad.write("set-hook -g client-focus-in { if -F 1 {\n")
             bad.flush()
-            self.assertNotEqual(self.run_tmux('source-file', '-t', 'alpha', '-n', bad.name, check=False).returncode, 0)
+            self.assertNotEqual(self.run_tmux('source-file', '-n', bad.name, check=False).returncode, 0)
 
 
 class Marks(ScratchTmux):
@@ -143,7 +162,7 @@ class Marks(ScratchTmux):
         self.assertEqual(self.expand('alpha', '#{E:@agent_workspace}'), ' ')
 
     def test_bash_and_zsh_panes_show_no_mark(self):
-        for shell, name in (("bash --norc --noprofile -c 'read -t 300'", 'bash'), ("zsh -fc 'read -t 300'", 'zsh')):
+        for shell, name in (("exec bash --norc --noprofile -c 'read -t 300'", 'bash'), ("exec zsh -fc 'read -t 300'", 'zsh')):
             with self.subTest(shell=name):
                 pane = self.pane('split-window', 'alpha', shell=shell)
                 self.wait_for(lambda: self.expand(pane, '#{pane_current_command}'), name)
@@ -433,10 +452,10 @@ class HelperWrites(ScratchTmux):
         session = 'it\'s #1, {a} "b" #{pane_id} $HOME ; kill-server'
         self.call('claude-status', session=session)
         expected = {'kind': 'claude', 'id': session, 'pid': self.PID, 'cwd': '/work', 'birth': 'Thu Oct  1 20:23:29 2026'}
-        self.assertEqual(json.loads(self.option('@workspace_app')), expected)
+        self.assertEqual(hook.published(self.option('@workspace_app')), expected)
         self.status(self.hidden, 'working')
         self.call('claude-status', session=session, cwd='/else, where}')
-        self.assertEqual(json.loads(self.option('@workspace_app')), dict(expected, cwd='/else, where}'))
+        self.assertEqual(hook.published(self.option('@workspace_app')), dict(expected, cwd='/else, where}'))
         self.assertEqual(self.status(self.hidden), 'working')
         self.call('claude', session=session, cwd='/else, where}', hook_event_name='SessionEnd')
         self.assertEqual((self.option('@workspace_app'), self.status(self.hidden)), ('', ''))
@@ -451,7 +470,13 @@ class HelperWrites(ScratchTmux):
         self.assertEqual(self.option('@workspace_agent_failed'), '')
 
 
+def tmux_version():
+    found = re.search(r'(\d+)\.(\d+)', subprocess.run(['tmux', '-V'], capture_output=True, text=True).stdout)
+    return tuple(map(int, found.groups())) if found else (99, 0)
+
+
 class PaneZoom(ScratchTmux):
+    @unittest.skipIf(tmux_version() < (3, 4), 'send-keys -K, which drives the binding here, needs tmux 3.4')
     def test_zoom_shortcut_restores_layout_and_keeps_processes(self):
         settings = [line for line in (ROOT / 'tmux.conf').read_text().splitlines()
                     if line.startswith(('set -g prefix ', 'bind z ', 'set -g status-right '))]

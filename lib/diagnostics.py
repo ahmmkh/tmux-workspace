@@ -8,6 +8,7 @@ import subprocess
 import time
 
 import paths
+from workspace_model import option_json
 
 
 def doctor(ws):
@@ -92,7 +93,7 @@ def doctor(ws):
         command, status = row['pane_current_command'], row['@workspace_agent']
         detail = ''
         try:
-            event = json.loads(row['@workspace_codex'] or '{}')
+            event = option_json(row['@workspace_codex'] or '{}')
             if event:
                 detail = f"  {event['event']} {int(time.time() - event['at'])}s ago"
         except (ValueError, KeyError, TypeError):

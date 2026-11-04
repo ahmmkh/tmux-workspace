@@ -109,8 +109,12 @@ def fit_left(text, width):
 
 
 def short_path(path):
-    home = str(Path.home())
-    return '~' + path[len(home):] if path == home or path.startswith(home + '/') else path
+    """~/code for a path under the home folder, also when one of them is reached through a symlink."""
+    home = Path.home()
+    for prefix in dict.fromkeys((str(home), str(home.resolve()))):
+        if path == prefix or path.startswith(prefix + '/'):
+            return '~' + path[len(prefix):]
+    return path
 
 
 def fit_line(line, width):

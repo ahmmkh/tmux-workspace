@@ -151,6 +151,9 @@ class FakeTmux:
 
 class ActionSafety(unittest.TestCase):
     def setUp(self):
+        # A model of its own: a clone has no config.json, and the user's must not matter.
+        for module in (ai_core, ai):  # ai imports config by name
+            self.enterContext(patch.object(module, 'config', return_value={'model': 'typesafe/jev-test'}))
         self.tmux = FakeTmux()
         self.ws = self.tmux.workspace
         self.enterContext(patch.dict(os.environ, {'TMUX_PANE': '%1', 'PATH': ''}))

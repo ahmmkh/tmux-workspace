@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # tmux-workspace for bash and zsh: the work command. Sourced from ~/.bashrc or ~/.zshrc.
 #   work            pick a workspace
 #   work NAME       open or create a workspace

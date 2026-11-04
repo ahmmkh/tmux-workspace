@@ -37,6 +37,20 @@ class Width(unittest.TestCase):
         self.assertEqual(dashboard.cell_width(dashboard.fit('日本語ラベル', 5)), 5)
 
 
+class ShortPath(unittest.TestCase):
+    def test_home_through_a_symlink_still_shortens(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory).resolve() / 'real'
+            (real / 'code').mkdir(parents=True)
+            link = Path(directory) / 'link'
+            link.symlink_to(real)
+            with mock.patch.object(dashboard.Path, 'home', return_value=link):
+                self.assertEqual(dashboard.short_path(str(real / 'code')), '~/code')
+                self.assertEqual(dashboard.short_path(str(link / 'code')), '~/code')
+                self.assertEqual(dashboard.short_path('/srv/elsewhere'), '/srv/elsewhere')
+
+
 class Render(unittest.TestCase):
     def test_every_line_fills_the_width(self):
         for w, h in ((120, 40), (80, 24), (50, 20), (40, 12), (30, 6)):

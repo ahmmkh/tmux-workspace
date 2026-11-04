@@ -23,13 +23,15 @@ SEP = '\x1f'
 os.umask(0o077)
 sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
 import paths  # noqa: E402
-from workspace_model import PARKING, roll_up  # noqa: E402,F401
+from workspace_model import PARKING, option_json, roll_up  # noqa: E402,F401
 
 PROJECTS_ROOT = paths.projects_dir().resolve()
 
 
 def tm(*args, check=True):
-    return subprocess.run([TMUX, *map(str, args)], capture_output=True, text=True, check=check).stdout.rstrip('\n')
+    out = subprocess.run([TMUX, *map(str, args)], capture_output=True, text=True, check=check).stdout.rstrip('\n')
+    # tmux 3.4 prints the SEP control character of a -F format as the text \037 when not on a terminal.
+    return out.replace('\\037', SEP) if '-F' in args else out
 
 
 def option(name, target=None):
@@ -196,7 +198,7 @@ def live_app(pane, table):
     if not raw:
         return None
     try:
-        app = json.loads(raw)
+        app = option_json(raw)
         pid = int(app['pid'])
         proc = table.get(pid)
         if not proc or proc[3] != app['birth'] or app['kind'] not in APP_COMMANDS:
@@ -533,7 +535,8 @@ def connect_session(name):
 # fzf searches only the label and prints only the hidden name, or the typed text when no row matches.
 TAB_FZF = ['fzf', '--ansi', '--delimiter=\t', '--nth=1']
 # No --accept-nth (fzf 0.60+): picked_name keeps the first field, so fzf 0.38 works too.
-WORKSPACE_FZF = ['fzf', '--delimiter=\t', '--with-nth=2..', '--nth=1', '--ansi', '--tiebreak=index', '--bind=enter:accept-or-print-query']
+# --print-query, not the accept-or-print-query action (fzf 0.47+): the query is the first line, a chosen row the last.
+WORKSPACE_FZF = ['fzf', '--delimiter=\t', '--with-nth=2..', '--nth=1', '--ansi', '--tiebreak=index', '--print-query']
 
 
 def choose_or_create_workspace():
@@ -599,7 +602,7 @@ def choose_or_create_workspace():
         '--info=inline'
     ]
     p = subprocess.run(fzf_cmd, input='\n'.join(display_items), text=True, capture_output=True)
-    if p.returncode != 0:
+    if p.returncode not in (0, 1):  # 1: no row matched, so the typed query names a new workspace
         return
     target = picked_name(p.stdout)
     if target:
@@ -738,11 +741,11 @@ def window_preview(window_index=None):
     try:
         raw_win = tm('display-message', '-p', '-t', f"={session}:{idx}", '#{window_name} (#{window_panes} panes)', check=False)
         print(f"=== Window {idx}: {raw_win} ===\n")
-        raw_panes = tm('list-panes', '-t', f"={session}:{idx}",
-                       '-F', '  • Pane #{pane_index}: #{?@workspace_label,#{@workspace_label},#{pane_current_command}} (#{pane_current_command}) in #{pane_current_path}',
-                       check=False)
-        if raw_panes:
-            print(raw_panes)
+        from dashboard import short_path
+        for pane in fields('list-panes', ['pane_index', 'pane_current_command', 'pane_current_path', '@workspace_label'],
+                           '-t', f"={session}:{idx}"):
+            label = pane['@workspace_label'] or pane['pane_current_command']
+            print(f"  • Pane {pane['pane_index']}: {label} ({pane['pane_current_command']}) in {short_path(pane['pane_current_path'])}")
         print("\n--- Terminal View ---\n")
         screen = tm('capture-pane', '-p', '-t', f"={session}:{idx}", check=False)
         print(screen)
