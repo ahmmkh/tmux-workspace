@@ -15,9 +15,13 @@ def config_dir():
     return Path(base) / 'tmux-workspace'
 
 
+def user_config_path():
+    return config_dir() / 'config.json'
+
+
 def config_path():
     """The user's config, then the legacy config inside the clone, then the shipped example."""
-    for path in (config_dir() / 'config.json', REPO / 'config.json'):
+    for path in (user_config_path(), REPO / 'config.json'):
         if path.is_file():
             return path
     return REPO / 'config.example.json'
@@ -32,6 +36,30 @@ def load_config():
     if not isinstance(value, dict):
         raise ValueError(f'Cannot read {path}: the top level must be an object')
     return value
+
+
+def needs_onboarding():
+    """True until the user has chosen a projects folder. A broken config is reported, never replaced."""
+    try:
+        data = json.loads(user_config_path().read_text())
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and 'projects_dir' not in data
+
+
+def save_config(updates):
+    """Merge updates into the user's config, starting from the legacy or example config the first time."""
+    data = load_config()
+    data.update(updates)
+    path = user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name('.config.json.' + str(os.getpid()))
+    temporary.write_text(json.dumps(data, indent=2) + '\n')
+    temporary.chmod(0o600)
+    temporary.replace(path)
+    return path
 
 
 def projects_dir():

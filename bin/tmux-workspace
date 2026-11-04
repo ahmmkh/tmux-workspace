@@ -583,7 +583,17 @@ def choose_or_create_workspace():
         open_workspace(target)
 
 
+def onboard():
+    """Ask a new user for their projects folder once, before their first workspace."""
+    global PROJECTS_ROOT
+    if paths.needs_onboarding() and sys.stdin.isatty() and sys.stdout.isatty():
+        import onboarding
+        onboarding.setup([])
+        PROJECTS_ROOT = paths.projects_dir().resolve()
+
+
 def open_workspace(name=None):
+    onboard()
     if not name:
         choose_or_create_workspace()
         return
@@ -1475,6 +1485,9 @@ def main():
         window_preview(*args)
     elif command in ('kill-workspace', 'delete', 'rm'):
         delete_workspace(*args)
+    elif command == 'setup':
+        import onboarding
+        sys.exit(onboarding.setup(args))
     elif command in ('dash', 'dashboard'):
         import dashboard
         sys.exit(dashboard.main(globals(), args))

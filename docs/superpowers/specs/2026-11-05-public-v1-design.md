@@ -164,10 +164,15 @@ shellcheck.
    `~/.config/fish/functions/` when fish exists. Skip with `--no-shell`.
 6. Create `~/.config/tmux-workspace/config.json` from the example, or migrate the repo's
    legacy `config.json` when it exists and the target does not.
-7. With `--agents`: register the Claude Code, Codex, omp and Neovim integrations, and on macOS
+7. Onboarding (added 2026-11-05 at the author's request): `tmux-workspace setup` asks
+   "Where do you keep your projects? [~/Projects]", creates the folder, saves `projects_dir` and
+   prints the first keys to try. The installer runs it on `/dev/tty` when one exists, so
+   `curl | bash` can ask too; `--projects DIR` answers it without a prompt. An unattended
+   install leaves it pending, and the first interactive `work` asks once.
+8. With `--agents`: register the Claude Code, Codex, omp and Neovim integrations, and on macOS
    run `bin/install-terminal-settings`.
-8. Reload a running tmux server (`tmux source-file ~/.tmux.conf`) when one exists.
-9. Run `tmux-workspace doctor` and print next steps.
+9. Reload a running tmux server (`tmux source-file ~/.tmux.conf`) when one exists.
+10. Run `tmux-workspace doctor` and print next steps.
 
 ### Safety
 
@@ -180,7 +185,7 @@ shellcheck.
 - A second run with the same flags changes nothing and prints "already installed".
 - `--yes` answers prompts; without a tty, prompts take their safe default (do not replace an
   existing `~/.tmux.conf` that is not ours unless `--yes`).
-- Flags: `--deps`, `--agents`, `--no-shell`, `--no-tmux-conf`, `--dry-run`, `--yes`,
+- Flags: `--deps`, `--agents`, `--projects DIR`, `--no-shell`, `--no-tmux-conf`, `--dry-run`, `--yes`,
   `--uninstall`, `--help`.
 
 ## 4. Tests and CI
