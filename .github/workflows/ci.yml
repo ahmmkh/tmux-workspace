@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux fzf zsh shellcheck
+      - name: Install tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux fzf shellcheck
+      - run: tmux -V
+      - run: make lint test
+
+  python39:
+    name: Python 3.9 runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Runtime code compiles on Python 3.9
+        run: for f in bin/tmux-workspace bin/install-integrations lib/*.py integrations/agent-hook.py scripts/*.py; do python -m py_compile "$f"; done
+      - run: python -m unittest tests.test_workspace_model tests.test_dashboard
+
+  install-linux:
+    name: Install on ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:24.04', 'debian:12', 'fedora:latest', 'archlinux:latest', 'alpine:3.20']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/install/matrix.sh '${{ matrix.image }}'
+
+  install-macos:
+    name: Install on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash install.sh --deps --yes --projects "$HOME/Projects"
+      - run: sh tests/install/smoke.sh --checks

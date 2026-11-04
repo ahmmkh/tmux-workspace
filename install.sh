@@ -133,6 +133,8 @@ script_dir() {
 
 PM='' SUDO=''
 detect_platform() {
+    # Package managers live in sbin, which a non-root login PATH may lack (busybox su on Alpine).
+    PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
     local pm
     for pm in brew apt-get dnf pacman apk zypper; do
         if has "$pm"; then PM=$pm; break; fi
