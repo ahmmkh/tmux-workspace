@@ -22,7 +22,10 @@ PARKING = '__parked'
 APP_COMMANDS = {'claude': ['claude', '--resume'], 'codex': ['codex', 'resume'], 'omp': ['omp', '--resume'], 'nvim': ['nvim', '-S']}
 SEP = '\x1f'
 os.umask(0o077)
-PROJECTS_ROOT = (Path.home() / 'Projects').resolve()
+sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
+import paths  # noqa: E402
+
+PROJECTS_ROOT = paths.projects_dir().resolve()
 
 
 def tm(*args, check=True):
@@ -231,7 +234,7 @@ def snapshot(force=False):
         if not all_panes:
             return
         table = process_table()
-        agent_hooks = runpy.run_path(str(Path.home() / '.local/lib/tmux-workspace/agent-hook.py'))
+        agent_hooks = runpy.run_path(str(paths.agent_hook_path()))
         codex_processes = None
         codex_scan_error = None
         snapshot_id = str(time.time_ns())
@@ -1405,15 +1408,12 @@ def main():
     args = sys.argv[1:]
     command = args.pop(0) if args else 'open'
     if command == 'ai':
-        sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
         import ai
         ai.main(globals(), args)
     elif command == 'doctor':
-        sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
         from diagnostics import doctor
         sys.exit(doctor(globals()))
     elif command == 'cleanup':
-        sys.path.insert(0, str(Path(SELF).parent.parent / 'lib'))
         from cleanup import cleanup
         cleanup(globals())
     elif command == 'pane-start':

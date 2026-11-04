@@ -12,6 +12,8 @@ import time
 import urllib.error
 import urllib.request
 
+import paths
+
 HOME = Path(__file__).resolve().parent.parent
 ENDPOINT = 'https://openrouter.ai/api/v1/systemone'
 
@@ -41,12 +43,15 @@ def clean(text):
 @lru_cache(maxsize=1)
 def config():
     try:
-        value = json.loads((HOME / 'config.json').read_text())
-        if not isinstance(value, dict) or not isinstance(value.get('model'), str) or not value['model'].startswith(('typesafe/jev-', '~typesafe/jev-')):
-            raise ValueError('model must name a Jev model on OpenRouter')
-        return value
-    except (OSError, ValueError) as exc:
-        raise AIError('Cannot read workspace config.json: ' + str(exc)) from exc
+        value = paths.load_config()
+    except ValueError as exc:
+        raise AIError(str(exc)) from exc
+    model = value.get('model')
+    if not model:
+        raise AIError(f'Set "model" in {paths.config_dir() / "config.json"} to use AI tools.')
+    if not isinstance(model, str) or not model.startswith(('typesafe/jev-', '~typesafe/jev-')):
+        raise AIError(f'Cannot read {paths.config_path()}: model must name a Jev model on OpenRouter')
+    return value
 
 
 @lru_cache(maxsize=1)
@@ -57,7 +62,7 @@ def api_key():
     settings = config()
     provider = settings.get('doppler', {})
     if not isinstance(provider, dict) or not all(isinstance(provider.get(k), str) and provider[k] for k in ('project', 'config', 'scope')):
-        raise AIError('Set OPENROUTER_API_KEY or configure Doppler in config.json.')
+        raise AIError('Set OPENROUTER_API_KEY or configure Doppler in ' + str(paths.config_path()) + '.')
     try:
         result = subprocess.run([
             'doppler', 'secrets', 'get', 'OPENROUTER_API_KEY', '--plain',
