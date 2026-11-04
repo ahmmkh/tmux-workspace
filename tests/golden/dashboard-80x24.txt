@@ -1,11 +1,11 @@
 ┌ tmux-workspace ───────────────────── 1 blocked · 1 done · 1 working · 1 idle ┐
-│   WORKSPACE TAB       PANE                               AGENT    STATUS     │
-│ ▸ api       1:code    1:claude                           claude   ● blocked  │
-│   api       2:servers 1:logs                             —        —          │
-│   ⇣ parked  api       1:tests                            —        —          │
-│   frontend  1:code    2:ui                               codex    ● done     │
-│   infra     1:deploy  1:terraform                        omp      ● working  │
-│   docs      1:write   1:guide                            omp      ○ idle     │
+│   WORKSPACE TAB       PANE        AGENT    STATUS     PATH                   │
+│ ▸ api       1:code    1:claude    claude   ● blocked  /srv/projects/api      │
+│   api       2:servers 1:logs      —        —          /srv/projects/api      │
+│   ⇣ parked  api       1:tests     —        —          /srv/projects/api      │
+│   frontend  1:code    2:ui        codex    ● done     /srv/projects/frontend │
+│   infra     1:deploy  1:terraform omp      ● working  /srv/projects/infra    │
+│   docs      1:write   1:guide     omp      ○ idle     /srv/projects/docs     │
 │                                                                              │
 │                                                                              │
 │                                                                              │

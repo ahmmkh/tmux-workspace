@@ -6,12 +6,16 @@ layout is tested without a terminal.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import re
+import subprocess
+import sys
 import time
 from typing import List, Optional, Tuple
 import unicodedata
 
-from workspace_model import AGENT_ORDER, summary
+from workspace_model import AGENT_ORDER, PANE_FIELDS, build_rows, filter_rows, summary
 
 Segment = Tuple[str, str]  # (text, style)
 Line = List[Segment]
@@ -142,8 +146,9 @@ def columns(rows, width):
         ws, tab = min(ws, 12), min(tab, 8)
     gaps = 4 if agent else 3
     pane, path = inner - ws - tab - agent - STATUS_W - gaps, 0
-    if pane > PANE_MAX + 1 + PATH_MIN:
-        pane, path = PANE_MAX, pane - PANE_MAX - 1
+    cap = min(PANE_MAX, max([8] + [cell_width(f'{r.pane_index}:{r.label}') for r in rows]))
+    if pane > cap + 1 + PATH_MIN:
+        pane, path = cap, pane - cap - 1
     while pane < 8 and tab > 4:
         tab, pane = tab - 1, pane + 1
     while pane < 8 and ws > 6:
@@ -287,3 +292,311 @@ def frame_text(lines, color):
     if not color:
         return '\n'.join(''.join(text for text, _ in line) for line in lines)
     return '\n'.join(''.join(sgr(style) + text for text, style in line) + '\x1b[0m' for line in lines)
+
+
+# ---------------------------------------------------------------------------------------------
+# Keys and actions. handle_key only calls the controller functions it gets in ws.
+
+MOVES = {'j': 1, 'KEY_DOWN': 1, 'k': -1, 'KEY_UP': -1}
+ENTER = ('\n', '\r', 'KEY_ENTER')
+BACKSPACE = ('KEY_BACKSPACE', '\x7f', '\b')
+ESCAPE = '\x1b'
+MESSAGE_SECONDS = 3
+
+
+def say(state, text):
+    state.message, state.message_until = text, time.time() + MESSAGE_SECONDS
+    return state
+
+
+def error_text(exc):
+    detail = getattr(exc, 'stderr', None)
+    if isinstance(detail, bytes):
+        detail = detail.decode(errors='replace')
+    return (detail or str(exc)).strip()
+
+
+def handle_key(key, state, rows, ws):
+    """Apply one key to the state. rows are the visible rows, in table order."""
+    if state.mode == 'help':
+        state.mode = 'normal'
+        return state
+    if state.mode in ('filter', 'rename'):
+        return typing(key, state, rows, ws)
+    if state.mode == 'confirm-kill':
+        state.mode = 'normal'
+        if key in ('y', 'Y') and rows:
+            act(state, ws, lambda: ws['tm']('kill-pane', '-t', current(rows, state).pane_id))
+        return state
+    if key in ('q',):
+        state.quit = True
+    elif key == ESCAPE:
+        if state.query or state.agents_only:
+            state.query, state.agents_only = '', False
+        else:
+            state.quit = True
+    elif key == '/':
+        state.mode, state.text = 'filter', state.query
+    elif key == 'a':
+        state.agents_only = not state.agents_only
+    elif key == '?':
+        state.mode = 'help'
+    elif not rows:
+        pass
+    elif key in MOVES:
+        index = min(max(selected_index(rows, state) + MOVES[key], 0), len(rows) - 1)
+        state.selected = rows[index].pane_id
+    elif key in ('g', 'KEY_HOME'):
+        state.selected = rows[0].pane_id
+    elif key in ('G', 'KEY_END'):
+        state.selected = rows[-1].pane_id
+    elif key in ENTER:
+        jump(state, rows, ws)
+    elif key == 'p':
+        row = current(rows, state)
+        if row.pane_id == state.origin:
+            say(state, 'Cannot park the pane this dashboard was opened from')
+        elif row.parked:
+            say(state, 'That pane is already parked')
+        else:
+            act(state, ws, lambda: ws['park'](row.pane_id))
+    elif key == 'u':
+        row = current(rows, state)
+        if not row.parked:
+            say(state, 'That pane is not parked')
+        else:
+            bring_back(state, row, ws)
+    elif key == 'r':
+        state.mode, state.text = 'rename', current(rows, state).label
+    elif key == 'x':
+        state.mode = 'confirm-kill'
+    return state
+
+
+def typing(key, state, rows, ws):
+    if key == ESCAPE:
+        if state.mode == 'filter':
+            state.query = ''
+        state.mode, state.text = 'normal', ''
+    elif key in ENTER:
+        if state.mode == 'rename' and rows:
+            row, label = current(rows, state), state.text
+            act(state, ws, lambda: ws['set_label'](row.pane_id, label))
+        state.mode, state.text = 'normal', ''
+    elif key in BACKSPACE:
+        state.text = state.text[:-1]
+    elif len(key) == 1 and key.isprintable():
+        state.text += key
+    if state.mode == 'filter':
+        state.query = state.text
+    return state
+
+
+def current(rows, state):
+    return rows[selected_index(rows, state)]
+
+
+def act(state, ws, action):
+    """Run a tmux action; a failure becomes a footer message instead of a crash."""
+    try:
+        action()
+        return True
+    except Exception as exc:  # noqa: BLE001 - tmux, OSError and ValueError all end up here
+        say(state, error_text(exc))
+        return False
+
+
+def jump(state, rows, ws):
+    row = current(rows, state)
+    if row.parked:
+        bring_back(state, row, ws)
+        return
+
+    def go():
+        ws['tm']('select-window', '-t', row.pane_id)
+        ws['tm']('select-pane', '-t', row.pane_id)
+        ws['tm']('switch-client', '-t', row.pane_id, check=False)  # No client when run outside a popup.
+    state.quit = act(state, ws, go)
+
+
+def bring_back(state, row, ws):
+    if not state.origin:
+        say(state, 'Open the dashboard from a pane to bring parked panes back')
+        return
+    state.quit = act(state, ws, lambda: ws['rejoin'](row.pane_id, state.origin))
+
+
+# ---------------------------------------------------------------------------------------------
+# Reading tmux, the curses loop and the command line.
+
+CSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
+
+
+def read_rows(ws):
+    return build_rows(ws['fields']('list-panes', PANE_FIELDS, '-a'))
+
+
+def read_preview(ws, pane_id, lines):
+    try:
+        text = ws['tm']('capture-pane', '-p', '-J', '-t', pane_id)
+    except Exception:  # noqa: BLE001 - the pane may be gone already
+        return []
+    out = [''.join(c for c in CSI.sub('', line) if c.isprintable() or c == '\t').expandtabs()
+           for line in text.splitlines()]
+    while out and not out[-1].strip():
+        out.pop()
+    return out[-lines:]
+
+
+def server_running(ws):
+    try:
+        ws['tm']('display-message', '-p', '#{socket_path}')
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def visible_rows(rows, state):
+    return filter_rows(rows, state.query, state.agents_only)
+
+
+def keep_selection(rows, state, previous_index):
+    """Follow the same pane across refreshes; if it is gone, stay at the same height."""
+    if rows and not any(r.pane_id == state.selected for r in rows):
+        state.selected = rows[min(previous_index, len(rows) - 1)].pane_id
+
+
+def main(ws, args):
+    if not server_running(ws):
+        sys.stderr.write('tmux-workspace dash: no tmux server is running (start one with: work)\n')
+        return 1
+    if '--once' in args:
+        def number(flag, default):
+            try:
+                return int(args[args.index(flag) + 1])
+            except (ValueError, IndexError):
+                return default
+        width = number('--width', 100) if '--width' in args else 100
+        height = number('--height', 30) if '--height' in args else 30
+        state = State(origin=os.environ.get('TMUX_PANE', ''))
+        rows = read_rows(ws)
+        preview = read_preview(ws, rows[0].pane_id, 10) if rows and height >= 20 else []
+        print(frame_text(render(rows, state, width, height, preview), color='--color' in args))
+        return 0
+    return run(ws)
+
+
+def usable_terminal():
+    """macOS's system curses lacks tmux-256color; fall back to a terminal it knows."""
+    import curses
+    for term in (os.environ.get('TERM', ''), 'xterm-256color', 'xterm'):
+        try:
+            curses.setupterm(term or None, sys.stdout.fileno())
+            os.environ['TERM'] = term
+            return
+        except curses.error:
+            continue
+
+
+def run(ws):
+    import curses
+    os.environ.setdefault('ESCDELAY', '25')
+    usable_terminal()
+    return curses.wrapper(lambda screen: Screen(screen, ws).loop())
+
+
+class Screen:
+    """Paints rendered lines with curses colours and turns key presses into handle_key calls."""
+
+    def __init__(self, screen, ws):
+        import curses
+        self.curses, self.screen, self.ws = curses, screen, ws
+        self.pairs = {}
+        curses.curs_set(0)
+        screen.timeout(1000)
+        screen.keypad(True)
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+
+    def colour(self, hex_colour):
+        if self.curses.COLORS < 256:
+            return {'#f7768e': 1, '#9ece6a': 2, '#e0af68': 3, '#7aa2f7': 4, '#7dcfff': 6}.get(hex_colour, 7)
+        r, g, b = (int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+        cube = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40
+        index = 16 + 36 * cube(r) + 6 * cube(g) + cube(b)
+        grey = 232 + min(23, max(0, (r + g + b) // 3 - 8) // 10)
+        level = lambda i: (0, 95, 135, 175, 215, 255)[i]
+        cube_rgb = (level(cube(r)), level(cube(g)), level(cube(b)))
+        grey_v = 8 + 10 * (grey - 232)
+        distance = lambda rgb: sum((a - b) ** 2 for a, b in zip(rgb, (r, g, b)))
+        return index if distance(cube_rgb) <= distance((grey_v,) * 3) else grey
+
+    def attr(self, style):
+        if style not in self.pairs:
+            names = style.split()
+            fg, bg, bold = STYLES.get(names[0] if names and names[0] != 'sel' else '', STYLES[''])
+            selected = 'sel' in names
+            number = len(self.pairs) + 1
+            extra = 0
+            try:
+                if selected and self.curses.COLORS < 256:
+                    self.curses.init_pair(number, self.colour(fg), -1)
+                    extra = self.curses.A_REVERSE
+                else:
+                    self.curses.init_pair(number, self.colour(fg), self.colour(SELECTION) if selected else -1)
+                value = self.curses.color_pair(number)
+            except self.curses.error:
+                value = 0
+            if style.startswith(('dim', 'frame', 'header')) and self.curses.COLORS < 256:
+                extra |= self.curses.A_DIM
+            self.pairs[style] = value | extra | (self.curses.A_BOLD if bold else 0)
+        return self.pairs[style]
+
+    def paint(self, lines):
+        self.screen.erase()
+        for y, line in enumerate(lines):
+            x = 0
+            for text, style in line:
+                try:
+                    self.screen.addstr(y, x, text, self.attr(style))
+                except self.curses.error:
+                    pass  # The bottom-right cell cannot be written without scrolling.
+                x += cell_width(text)
+        self.screen.refresh()
+
+    def key(self):
+        try:
+            key = self.screen.get_wch()
+        except self.curses.error:
+            return None
+        if isinstance(key, int):
+            return self.curses.keyname(key).decode(errors='replace')
+        return key
+
+    def loop(self):
+        state = State(origin=os.environ.get('TMUX_PANE', ''))
+        rows, read_at, index = [], 0.0, 0
+        while not state.quit:
+            if time.time() - read_at >= 1:
+                try:
+                    rows = read_rows(self.ws)
+                except Exception as exc:  # noqa: BLE001 - keep the last rows and say why
+                    say(state, error_text(exc))
+                read_at = time.time()
+            shown = visible_rows(rows, state)
+            keep_selection(shown, state, index)
+            index = selected_index(shown, state) if shown else 0
+            height, width = self.screen.getmaxyx()
+            preview = read_preview(self.ws, shown[index].pane_id, 10) if shown and height >= 20 else []
+            self.paint(render(shown, state, width, height, preview))
+            key = self.key()
+            if key is None or key == 'KEY_RESIZE':
+                continue
+            before = (state.mode, state.message)
+            state = handle_key(key, state, shown, self.ws)
+            if (state.mode, state.message) != before or key in ENTER or key in ('p', 'u', 'y'):
+                read_at = 0.0  # An action changed tmux; read it again now.
+        return 0

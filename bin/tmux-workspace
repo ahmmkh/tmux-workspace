@@ -488,7 +488,13 @@ def unpark(target, direction='right', choose=False):
         if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
             raise ValueError('Choose a listed pane number')
         selected = choices[int(answer) - 1]
-    source = selected['pane_id']
+    rejoin(selected['pane_id'], target, direction)
+
+
+def rejoin(source, target, direction='right'):
+    """Bring the parked pane source back next to target."""
+    if pane_info(target)['session_name'] == PARKING:
+        raise ValueError('Switch to a project window before restoring a parked pane')
     tm('join-pane', '-h' if direction == 'right' else '-v', '-s', source, '-t', target, '-l', '40%')
     tm('set-option', '-pu', '-t', source, '@workspace_parked')
     tm('set-option', '-pu', '-t', source, '@workspace_home')
@@ -778,6 +784,25 @@ def history(pane):
 
 
 HELP_TOPICS = [
+    {
+        'id': 'dashboard',
+        'display': 'Ctrl+a A             Agent and workspace dashboard',
+        'title': 'Dashboard',
+        'text': """SHORTCUT: Ctrl+a then A (capital A)
+
+DESCRIPTION:
+  One table of every pane in every workspace, with its agent and live status.
+  Workspaces with a blocked agent come first, then done, working and idle.
+  Parked panes appear under the workspace they came from.
+
+KEYS:
+  j k ↓ ↑     move            enter   jump to the pane
+  /           filter          a       only panes with an agent
+  p / u       park / unpark   r       rename the label
+  x           close the pane  ?       help, q or esc closes
+
+  From a shell: tmux-workspace dash, or tmux-workspace dash --once for one frame."""
+    },
     {
         'id': 'cleanup',
         'display': 'Ctrl+a C             Review inactive terminals and close selected panes',
@@ -1450,6 +1475,9 @@ def main():
         window_preview(*args)
     elif command in ('kill-workspace', 'delete', 'rm'):
         delete_workspace(*args)
+    elif command in ('dash', 'dashboard'):
+        import dashboard
+        sys.exit(dashboard.main(globals(), args))
     else:
         raise ValueError('Unknown workspace command: ' + command)
 

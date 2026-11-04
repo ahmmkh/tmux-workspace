@@ -1,9 +1,13 @@
 """The dashboard's pure renderer and key handling. Runs on Python 3.9: no enterContext."""
+import contextlib
 import dataclasses
+import io
 import os
+import subprocess
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -128,6 +132,133 @@ class Golden(unittest.TestCase):
                 if os.environ.get('UPDATE_GOLDEN') == '1':
                     path.write_text(frame)
                 self.assertEqual(frame, path.read_text())
+
+
+PARKED = [r for r in ROWS if r.parked][0]
+
+
+class Keys(unittest.TestCase):
+    def setUp(self):
+        self.ws = {'tm': mock.Mock(return_value=''), 'park': mock.Mock(), 'rejoin': mock.Mock(), 'set_label': mock.Mock()}
+
+    def press(self, keys, state=None, rows=ROWS):
+        state = state or State(origin='%9')
+        for key in keys:
+            state = dashboard.handle_key(key, state, rows, self.ws)
+        return state
+
+    def test_down_then_enter_jumps_to_second_row(self):
+        state = self.press(['KEY_DOWN', '\n'])
+        pane = ROWS[1].pane_id
+        self.ws['tm'].assert_any_call('select-window', '-t', pane)
+        self.ws['tm'].assert_any_call('select-pane', '-t', pane)
+        self.ws['tm'].assert_any_call('switch-client', '-t', pane, check=False)
+        self.assertTrue(state.quit)
+
+    def test_j_k_g_and_G_move(self):
+        self.assertEqual(self.press(['j', 'j']).selected, ROWS[2].pane_id)
+        self.assertEqual(self.press(['j', 'j', 'k']).selected, ROWS[1].pane_id)
+        self.assertEqual(self.press(['G']).selected, ROWS[-1].pane_id)
+        self.assertEqual(self.press(['G', 'g']).selected, ROWS[0].pane_id)
+        self.assertEqual(self.press(['k']).selected, ROWS[0].pane_id)
+
+    def test_enter_on_parked_row_rejoins_next_to_origin(self):
+        state = self.press(['\n'], State(origin='%9', selected=PARKED.pane_id))
+        self.ws['rejoin'].assert_called_once_with(PARKED.pane_id, '%9')
+        self.assertTrue(state.quit)
+
+    def test_park_refuses_origin_pane(self):
+        state = self.press(['p'], State(origin=ROWS[0].pane_id))
+        self.ws['park'].assert_not_called()
+        self.assertIn('Cannot park the pane this dashboard was opened from', state.message)
+
+    def test_park_selected_pane(self):
+        self.press(['j', 'p'])
+        self.ws['park'].assert_called_once_with(ROWS[1].pane_id)
+
+    def test_unpark_needs_a_parked_row(self):
+        self.assertIn('not parked', self.press(['u']).message)
+        self.press(['u'], State(origin='%9', selected=PARKED.pane_id))
+        self.ws['rejoin'].assert_called_once_with(PARKED.pane_id, '%9')
+
+    def test_rename_prompt_sets_label(self):
+        state = self.press(['r'] + ['KEY_BACKSPACE'] * 10 + list('logs') + ['\n'])
+        self.ws['set_label'].assert_called_once_with(ROWS[0].pane_id, 'logs')
+        self.assertEqual(state.mode, 'normal')
+
+    def test_rename_escape_cancels(self):
+        self.press(['r', 'x', '\x1b'])
+        self.ws['set_label'].assert_not_called()
+
+    def test_kill_needs_y(self):
+        self.press(['x', 'n'])
+        self.assertNotIn(mock.call('kill-pane', '-t', ROWS[0].pane_id), self.ws['tm'].call_args_list)
+        self.press(['x', 'y'])
+        self.ws['tm'].assert_called_with('kill-pane', '-t', ROWS[0].pane_id)
+
+    def test_filter_is_live_and_escape_clears(self):
+        state = self.press(['/', 'i', 'n', 'f'])
+        self.assertEqual((state.mode, state.query), ('filter', 'inf'))
+        self.assertEqual(self.press(['\n'], state).query, 'inf')
+        self.assertEqual(self.press(['\x1b'], state).query, '')
+
+    def test_escape_clears_a_filter_before_quitting(self):
+        state = self.press(['/', 'x', '\n', '\x1b'])
+        self.assertEqual((state.query, state.quit), ('', False))
+        self.assertTrue(self.press(['\x1b'], state).quit)
+
+    def test_a_toggles_agents_only(self):
+        self.assertTrue(self.press(['a']).agents_only)
+        self.assertFalse(self.press(['a', 'a']).agents_only)
+
+    def test_help_opens_and_any_key_closes(self):
+        self.assertEqual(self.press(['?']).mode, 'help')
+        self.assertEqual(self.press(['?', 'j']).mode, 'normal')
+
+    def test_vanished_pane_error_reaches_footer(self):
+        self.ws['tm'].side_effect = subprocess.CalledProcessError(1, 'tmux', stderr="can't find pane: %1\n")
+        state = self.press(['\n'])
+        self.assertIn("can't find pane", state.message)
+        self.assertFalse(state.quit)
+
+    def test_keys_on_an_empty_table_do_nothing(self):
+        state = self.press(['j', '\n', 'p', 'x', 'y', 'r', '\n'], rows=[])
+        self.ws['park'].assert_not_called()
+        self.ws['tm'].assert_not_called()
+        self.assertFalse(state.quit)
+
+
+class Main(unittest.TestCase):
+    def test_main_outside_tmux_exits_1_without_traceback(self):
+        ws = {'tm': mock.Mock(side_effect=subprocess.CalledProcessError(1, 'tmux', stderr='no server running'))}
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False), contextlib.redirect_stderr(err):
+            os.environ.pop('TMUX', None)
+            code = dashboard.main(ws, ['--once'])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.getvalue().strip(), 'tmux-workspace dash: no tmux server is running (start one with: work)')
+
+    def test_once_prints_one_frame_of_the_requested_size(self):
+        ws = {'tm': mock.Mock(return_value=''), 'fields': mock.Mock(return_value=FIXTURE)}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = dashboard.main(ws, ['--once', '--width', '90', '--height', '12'])
+        lines = out.getvalue().rstrip('\n').split('\n')
+        self.assertEqual((code, len(lines)), (0, 12))
+        self.assertEqual({dashboard.cell_width(line) for line in lines}, {90})
+        self.assertIn('infra', out.getvalue())
+
+    def test_once_does_not_read_terminal_text_it_will_not_show(self):
+        ws = {'tm': mock.Mock(return_value=''), 'fields': mock.Mock(return_value=FIXTURE)}
+        with contextlib.redirect_stdout(io.StringIO()):
+            dashboard.main(ws, ['--once', '--height', '19'])
+        self.assertNotIn('capture-pane', str(ws['tm'].call_args_list))
+
+    def test_preview_strips_control_sequences_and_trailing_blanks(self):
+        ws = {'tm': mock.Mock(return_value='one\n\x1b[31mtwo\x07\n\n\n')}
+        self.assertEqual(dashboard.read_preview(ws, '%1', 5), ['one', 'two'])
+        ws['tm'].side_effect = subprocess.CalledProcessError(1, 'tmux')
+        self.assertEqual(dashboard.read_preview(ws, '%1', 5), [])
 
 
 if __name__ == '__main__':
