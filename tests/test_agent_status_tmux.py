@@ -104,6 +104,18 @@ class Parse(ScratchTmux):
             with self.subTest(name=name):
                 self.assertNotIn('/Users/', (ROOT / name).read_text())
 
+    def test_tmux_runs_commands_with_posix_sh(self):
+        """Bindings are sh syntax; a nu, elvish or pwsh login shell must not run them."""
+        conf = (ROOT / 'tmux.conf').read_text()
+        self.assertIn('set -g default-shell /bin/sh\n', conf)
+        self.assertIn('tmux-workspace" exec-shell', conf)
+        self.assertNotIn('"$SHELL" -i', conf)
+
+    def test_status_regex_matches_every_known_shell(self):
+        for shell in ('zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'nu', 'elvish', 'xonsh', 'pwsh'):
+            with self.subTest(shell=shell):
+                self.assertIn(shell, CONF.read_text().split('\n')[2].split('$,')[0])
+
     def test_config_loads_without_errors(self):
         # Real sourcing reports unknown options, which parsing alone does not.
         with tempfile.TemporaryDirectory() as home:

@@ -14,32 +14,56 @@ ws = load_workspace()
 
 
 class ShellFallback(unittest.TestCase):
-    """A new pane execs the user's login shell, and never ends up dead."""
+    """A new pane execs the user's real shell, and never ends up dead.
 
-    def start(self, shell):
-        env = {k: v for k, v in os.environ.items() if k != 'SHELL'}
+    tmux.conf runs commands with /bin/sh, so tmux hands every pane SHELL=/bin/sh; the real shell comes
+    from an override, the SHELL the server started with, or the account."""
+
+    def start(self, env_shell=None, server='', account='', override=None):
+        env = {k: v for k, v in os.environ.items() if k not in ('SHELL', 'TMUX_WORKSPACE_SHELL')}
         env['TMUX_PANE'] = '%1'
-        if shell is not None:
-            env['SHELL'] = shell
+        if env_shell is not None:
+            env['SHELL'] = env_shell
+        if override is not None:
+            env['TMUX_WORKSPACE_SHELL'] = override
+        shown = 'SHELL=' + server if server else '-SHELL'
         with mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch.object(ws, 'identity'), \
                 mock.patch.object(ws, 'option', return_value='label'), \
+                mock.patch.object(ws, 'tm', return_value=shown), \
+                mock.patch.object(ws.pwd, 'getpwuid', return_value=mock.Mock(pw_shell=account)), \
                 mock.patch.object(ws.os, 'execv') as execv:
             ws.pane_start()
+            self.shell_seen = os.environ.get('SHELL')
         return execv
+
+    def test_server_shell_wins_over_the_pane_shell(self):
+        execv = self.start(env_shell='/bin/sh', server='/bin/bash', account='/bin/sh')
+        execv.assert_called_once_with('/bin/bash', ['/bin/bash', '-l'])
+        self.assertEqual(self.shell_seen, '/bin/bash')  # programs in the pane see the real shell
+
+    def test_override_wins(self):
+        self.start(server='/bin/bash', override='/bin/sh').assert_called_once_with('/bin/sh', ['/bin/sh', '-l'])
+
+    def test_account_shell_when_the_server_has_none(self):
+        self.start(env_shell='/bin/sh', account='/bin/bash').assert_called_once_with('/bin/bash', ['/bin/bash', '-l'])
 
     def test_pane_start_execs_shell_from_environment(self):
         shell = '/bin/bash' if Path('/bin/bash').exists() else '/bin/sh'
-        self.start(shell).assert_called_once_with(shell, [shell, '-l'])
+        self.start(env_shell=shell).assert_called_once_with(shell, [shell, '-l'])
 
     def test_pane_start_falls_back_to_bin_sh(self):
         for value in (None, '', '/nonexistent/zsh', '/etc'):
             with self.subTest(shell=value):
-                self.start(value).assert_called_once_with('/bin/sh', ['/bin/sh', '-l'])
+                self.start(env_shell=value, server='/nonexistent/fish', account='/etc').assert_called_once_with('/bin/sh', ['/bin/sh', '-l'])
 
-
-if __name__ == '__main__':
-    unittest.main()
+    def test_shells_without_a_login_flag_get_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            elvish = Path(directory) / 'elvish'
+            elvish.write_text('#!/bin/sh\n')
+            elvish.chmod(0o755)
+            self.start(server=str(elvish)).assert_called_once_with(str(elvish), [str(elvish)])
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -126,6 +150,8 @@ class PaneStart(unittest.TestCase):
         with mock.patch.dict(os.environ, {'TMUX_PANE': '%1', 'SHELL': '/bin/sh'}), \
                 mock.patch.object(ws, 'put'), mock.patch.object(ws, 'set_label'), \
                 mock.patch.object(ws, 'option', return_value=''), \
+                mock.patch.object(ws, 'tm', return_value='-SHELL'), \
+                mock.patch.object(ws.pwd, 'getpwuid', return_value=mock.Mock(pw_shell='')), \
                 mock.patch.object(ws.subprocess, 'run', return_value=mock.Mock(returncode=0)) as run, \
                 mock.patch.object(ws.os, 'execv') as execv, contextlib.redirect_stdout(out):
             ws.pane_start(str(snapshot), 'u' * 32)

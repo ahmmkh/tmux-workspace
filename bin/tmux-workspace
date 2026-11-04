@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import runpy
 import shlex
@@ -366,16 +367,37 @@ def pane_start(snapshot_path=None, uid=None):
         identity(pane)
         if not option('@workspace_label', pane):
             ask_label(pane)
-    shell = login_shell()
-    os.execv(shell, [shell, '-l'])
+    exec_shell()
+
+
+# Shells known to accept -l for a login shell; elvish and others start without it.
+LOGIN_FLAG_SHELLS = {'sh', 'bash', 'zsh', 'ksh', 'mksh', 'dash', 'fish', 'tcsh', 'csh', 'nu', 'xonsh', 'pwsh'}
+
+
+def usable_shell(path):
+    return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
 
 
 def login_shell():
-    """The user's shell, or /bin/sh when $SHELL is unset or names no executable file."""
-    shell = os.environ.get('SHELL', '')
-    if shell and os.path.isfile(shell) and os.access(shell, os.X_OK):
-        return shell
+    """The user's real shell. tmux.conf runs commands with /bin/sh and so hands panes SHELL=/bin/sh;
+    the real one is TMUX_WORKSPACE_SHELL, the SHELL the server started with, or the account's."""
+    shown = tm('show-environment', '-g', 'SHELL', check=False)
+    server = shown[len('SHELL='):] if shown.startswith('SHELL=') else ''
+    try:
+        account = pwd.getpwuid(os.getuid()).pw_shell
+    except KeyError:
+        account = ''
+    for shell in (os.environ.get('TMUX_WORKSPACE_SHELL', ''), server, account, os.environ.get('SHELL', '')):
+        if usable_shell(shell):
+            return shell
     return '/bin/sh'
+
+
+def exec_shell():
+    """Replace this process with the user's shell, and tell the programs it starts which shell that is."""
+    shell = login_shell()
+    os.environ['SHELL'] = shell
+    os.execv(shell, [shell, '-l'] if Path(shell).name in LOGIN_FLAG_SHELLS else [shell])
 
 
 def restore(locked=False):
@@ -1511,6 +1533,8 @@ def main():
         window_preview(*args)
     elif command in ('kill-workspace', 'delete', 'rm'):
         delete_workspace(*args)
+    elif command == 'exec-shell':
+        exec_shell()
     elif command == 'setup':
         import onboarding
         sys.exit(onboarding.setup(args))

@@ -57,6 +57,12 @@ class Demo:
         self.home = self.root / 'home'
         self.home.mkdir()
         self.env = {k: v for k, v in os.environ.items() if k not in ('TMUX', 'TMUX_PANE')}
+        # Every place a tool may write is inside the sandbox; a real XDG_CONFIG_HOME once leaked through.
+        for name, folder in (('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'),
+                             ('XDG_STATE_HOME', '.local/state'), ('XDG_CACHE_HOME', '.cache')):
+            self.env[name] = str(self.home / folder)
+        for name in ('ZDOTDIR', 'CODEX_HOME', '_ZO_DATA_DIR', 'TMUX_WORKSPACE_PROJECTS', 'TMUX_WORKSPACE_HOME'):
+            self.env.pop(name, None)
         self.env.update(HOME=str(self.home), TMUX_TMPDIR=str(self.root / 'sockets'),
                         TMUX_WORKSPACE_STATE_DIR=str(self.root / 'state'), TERM='xterm-256color',
                         SHELL='/bin/sh', LANG=os.environ.get('LANG', 'en_US.UTF-8'))

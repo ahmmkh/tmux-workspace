@@ -4,7 +4,7 @@ import json
 from pathlib import PurePath
 
 AGENT_ORDER = ('blocked', 'done', 'working', 'idle')  # Most urgent first.
-SHELLS = frozenset({'zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh'})
+SHELLS = frozenset({'zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'nu', 'elvish', 'xonsh', 'pwsh'})
 AGENTS = ('claude', 'codex', 'omp')
 PARKING = '__parked'
 BOOTSTRAP = '__workspace_bootstrap'  # Placeholder session that `work` starts a server with.

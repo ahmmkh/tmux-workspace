@@ -16,7 +16,7 @@ def pane(pane_id, status, window='@1', session='alpha', command='omp', home=''):
 
 class Status(unittest.TestCase):
     def test_every_supported_shell_hides_the_status(self):
-        for shell in ('zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', '-zsh', '/bin/bash'):
+        for shell in ('zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'nu', 'elvish', 'xonsh', 'pwsh', '-zsh', '/bin/bash'):
             with self.subTest(shell=shell):
                 self.assertEqual(model.pane_status({'pane_current_command': shell, '@workspace_agent': 'working'}), '')
 
