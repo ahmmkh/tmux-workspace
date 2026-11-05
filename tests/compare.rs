@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 use tmux_workspace::hook::{self, HookEnv};
 use tmux_workspace::pyjson::{Style, dumps, float_repr};
@@ -41,6 +41,14 @@ enum Side {
 
 const BOTH: [Side; 2] = [Side::Python, Side::Rust];
 
+/// The two working folders of the scenarios. Their names carry non-ASCII text (an accent, a symbol
+/// outside the Basic Multilingual Plane, Japanese, a space), so that the folder of a pane, the `-c` of a
+/// restored pane and the `cwd` of a record all have to survive in both languages.
+const HERE: &str = "a bé 😀";
+const THERE: &str = "c ü日本";
+/// A folder as a hook is told about it.
+const ACCENTED: &str = "/wörk/日本 😀, é";
+
 // ---------------------------------------------------------------------------------------------
 // Running the two
 
@@ -54,7 +62,11 @@ fn cli(side: Side, scratch: &ScratchTmux, args: &[&str]) -> Command {
             command
         }
     };
-    command.args(args).env("PYTHONDONTWRITEBYTECODE", "1");
+    // UTF-8 whatever the locale of the machine, as the Python of a user's account has it.
+    command
+        .args(args)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONUTF8", "1");
     command
 }
 
@@ -200,10 +212,14 @@ fn normalise(v: &Value) -> Value {
 }
 
 /// The same for the text of a file in the layout `json.dumps(indent=2)` gives, which has one key to a
-/// line: the volatile values go, and so do the ids, and everything else is compared byte for byte.
+/// line: the volatile values go, and so do the ids, and everything else is compared byte for byte,
+/// the end of each line and the end of the file included (Python writes no newline at the end).
 fn normalise_text(raw: &str) -> String {
     let mut lines = Vec::new();
-    for line in raw.lines() {
+    for line in raw.split('\n') {
+        let (line, cr) = line
+            .strip_suffix('\r')
+            .map_or((line, ""), |line| (line, "\r"));
         let indent = line.len() - line.trim_start().len();
         let rest = line.trim_start();
         let comma = if rest.ends_with(',') { "," } else { "" };
@@ -212,7 +228,7 @@ fn normalise_text(raw: &str) -> String {
             .find_map(|key| {
                 let head = format!("\"{key}\": ");
                 rest.starts_with(&head)
-                    .then(|| format!("{}{head}<{key}>{comma}", " ".repeat(indent)))
+                    .then(|| format!("{}{head}<{key}>{comma}{cr}", " ".repeat(indent)))
             });
         let birth = rest
             .strip_prefix("\"birth\": \"")
@@ -223,7 +239,7 @@ fn normalise_text(raw: &str) -> String {
             })
             .map(|value| {
                 format!(
-                    "{}\"birth\": <birth of {} characters>{comma}",
+                    "{}\"birth\": <birth of {} characters>{comma}{cr}",
                     " ".repeat(indent),
                     value.chars().count()
                 )
@@ -233,11 +249,28 @@ fn normalise_text(raw: &str) -> String {
             .is_some_and(|value| !value.starts_with('"'));
         lines.push(match replaced.or(birth) {
             Some(line) => line,
-            None if parked => format!("{}\"parked\": <parked>{comma}", " ".repeat(indent)),
-            None => line.to_string(),
+            None if parked => format!("{}\"parked\": <parked>{comma}{cr}", " ".repeat(indent)),
+            None => format!("{line}{cr}"),
         });
     }
     Seen::default().scrub(&lines.join("\n"))
+}
+
+/// The two volatile values of `latest.json`, which Python writes as one line with the separators of
+/// `json.dumps` and no newline: `(saved_at as written, path)`. Anything else is not that file.
+fn latest_values(raw: &str) -> Option<(&str, &str)> {
+    let rest = raw.strip_prefix("{\"saved_at\": ")?;
+    let (saved_at, path) = rest.split_once(", \"path\": \"")?;
+    Some((saved_at, path.strip_suffix("\"}")?))
+}
+
+/// The text of `latest.json` with its two volatile values replaced; a text of another shape is kept
+/// as it is, so that it differs from the right one.
+fn normalise_latest(raw: &str) -> String {
+    match latest_values(raw) {
+        Some(_) => "{\"saved_at\": <saved_at>, \"path\": \"<path>\"}".to_string(),
+        None => format!("not the shape of latest.json: {raw:?}"),
+    }
 }
 
 #[test]
@@ -277,18 +310,56 @@ fn normalise_text_keeps_the_bytes_that_are_not_volatile() {
             "{{\n  \"saved_at\": {at},\n  \"directory\": \"{dir}\",\n  \"panes\": [\n    {{\n      \"id\": \"{uid}\",\n      \"parked\": \"{stamp}\",\n      \"label\": \"a{gap}b\"\n    }}\n  ]\n}}"
         )
     };
+    let base = file("1.5", "/x/1", "17", " ");
     assert_eq!(
-        normalise_text(&file("1.5", "/x/1", "17", " ")),
+        normalise_text(&base),
         normalise_text(&file("2.75", "/y/22", "99", " "))
     );
     assert_ne!(
-        normalise_text(&file("1.5", "/x/1", "17", " ")),
+        normalise_text(&base),
         normalise_text(&file("1.5", "/x/1", "17", "  "))
     );
     assert_ne!(
-        normalise_text(&file("1.5", "/x/1", "17", " ")),
+        normalise_text(&base),
         normalise_text(&file("1.5", "/x/1", "", " "))
     );
+    // The end of the file and of every line count: a newline at the end, and a carriage return.
+    assert_ne!(normalise_text(&base), normalise_text(&format!("{base}\n")));
+    assert_ne!(
+        normalise_text(&base),
+        normalise_text(&base.replace('\n', "\r\n"))
+    );
+    assert_ne!(
+        normalise_text(&base),
+        normalise_text(&base.replace("\"saved_at\": 1.5,", "\"saved_at\": 1.5,\r"))
+    );
+}
+
+#[test]
+fn normalise_latest_keeps_the_shape_of_latest_json() {
+    let latest = |at: &str, path: &str| format!("{{\"saved_at\": {at}, \"path\": \"{path}\"}}");
+    let base = latest("1.5", "/x/snapshots/1/workspace.json");
+    assert_eq!(
+        normalise_latest(&base),
+        normalise_latest(&latest("2.25", "/y/snapshots/22/workspace.json"))
+    );
+    assert_eq!(
+        latest_values(&base),
+        Some(("1.5", "/x/snapshots/1/workspace.json"))
+    );
+    for other in [
+        format!("{base}\n"),
+        base.replace(", ", ","),
+        base.replace("\"path\": ", "\"path\":"),
+        base.replace("{\"saved_at\"", "{ \"saved_at\""),
+        "{\"path\": \"/x\", \"saved_at\": 1.5}".to_string(),
+    ] {
+        assert_ne!(
+            normalise_latest(&base),
+            normalise_latest(&other),
+            "{other:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -335,7 +406,7 @@ fn listing(scratch: &ScratchTmux) -> Vec<String> {
 #[rustfmt::skip]
 fn populate(s: &ScratchTmux, work: &Path) {
     let sleep = "exec sleep 300";
-    let (here, there) = (work.join("a b"), work.join("c"));
+    let (here, there) = (work.join(HERE), work.join(THERE));
     let (here, there) = (here.to_str().unwrap(), there.to_str().unwrap());
     s.tmux(&["set-option", "-g", "default-shell", "/bin/sh"]);
     s.tmux(&["set-environment", "-g", "SHELL", "/bin/sh"]);
@@ -395,7 +466,7 @@ fn add_extras(s: &ScratchTmux) {
         let (pane, label, pid) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
         let birth = Command::new("ps").args(["-p", pid, "-o", "lstart="]).output().unwrap();
         let birth = text(&birth.stdout).trim().to_string();
-        let live = |kind: &str, id: &str| json!({"kind": kind, "id": id, "pid": pid.parse::<i64>().unwrap(), "cwd": "/work dir", "birth": birth});
+        let live = |kind: &str, id: &str| json!({"kind": kind, "id": id, "pid": pid.parse::<i64>().unwrap(), "cwd": "/wörk dir 😀", "birth": birth});
         let record = match label {
             "日本語 🙂" => live("claude", "$HOME \"q\" ünï 😀 #{x}"),
             r#"a'b "c""# => live("omp", "/sessions/a b.jsonl"),
@@ -411,7 +482,7 @@ fn add_extras(s: &ScratchTmux) {
 /// A shared working folder with the two subfolders the scenario runs panes in.
 fn work_folder() -> TempDir {
     let work = TempDir::new();
-    for name in ["a b", "c"] {
+    for name in [HERE, THERE] {
         std::fs::create_dir(work.path().join(name)).unwrap();
     }
     work
@@ -506,15 +577,47 @@ fn save_writes_the_same_snapshot() {
     assert_eq!(py.value["panes"].as_array().unwrap().len(), 7);
     assert_eq!(normalise(&py.value), normalise(&rs.value));
     assert_eq!(normalise_text(&py.text), normalise_text(&rs.text));
-    // The time is written as Python's repr of a float.
-    for (side, saved) in [("python", &py), ("rust", &rs)] {
+    // Python writes no newline at the end; the comparison above would see one more, and so does this.
+    assert!(!py.text.ends_with('\n') && !rs.text.ends_with('\n'));
+
+    // Each side says where its snapshot is: `directory` is the folder that holds workspace.json, a
+    // folder named by digits under `snapshots`, and `latest.json` points at the file in it.
+    // `latest.json` is compared as written, with only its two volatile values replaced.
+    let latest_text = |scratch: &ScratchTmux| {
+        std::fs::read_to_string(scratch.state_dir().join("latest.json")).unwrap()
+    };
+    for (side, scratch, saved) in [("python", &python, &py), ("rust", &rust, &rs)] {
+        let (snapshots, folder) = (scratch.state_dir().join("snapshots"), &saved.directory);
+        assert_eq!(folder.parent().unwrap(), snapshots, "{side}");
+        let name = folder.file_name().unwrap().to_str().unwrap();
+        assert!(name.bytes().all(|b| b.is_ascii_digit()), "{side}: {name}");
+        assert_eq!(
+            saved.value["directory"],
+            json!(folder.to_str().unwrap()),
+            "{side}"
+        );
+        let raw = latest_text(scratch);
+        let (at, path) = latest_values(&raw).unwrap_or_else(|| panic!("{side}: {raw:?}"));
+        assert_eq!(
+            path,
+            folder.join("workspace.json").to_str().unwrap(),
+            "{side}"
+        );
+        assert!(folder.join("workspace.json").is_file(), "{side}");
+        // Both files carry the time of the save, as Python writes a float.
         let line = saved
             .text
             .lines()
             .find_map(|l| l.trim().strip_prefix("\"saved_at\": "));
-        let at = line.unwrap().trim_end_matches(',');
+        let in_snapshot = line.unwrap().trim_end_matches(',');
+        assert_eq!(in_snapshot, at, "{side}: the same time in both files");
         assert_eq!(float_repr(at.parse().unwrap()), at, "{side}");
     }
+    assert_eq!(
+        normalise_latest(&latest_text(&python)),
+        normalise_latest(&latest_text(&rust))
+    );
+    assert!(latest_values(&latest_text(&python)).is_some());
 
     // The saved text of every pane, and who may read the files.
     let (py_files, rs_files) = (snapshot_files(&py), snapshot_files(&rs));
@@ -541,22 +644,6 @@ fn save_writes_the_same_snapshot() {
             assert_eq!(mode(&entry.unwrap().path()), 0o600);
         }
     }
-    // latest.json: the same two keys in the same order.
-    let latest = |scratch: &ScratchTmux| {
-        let raw = std::fs::read_to_string(scratch.state_dir().join("latest.json")).unwrap();
-        let value: Value = serde_json::from_str(&raw).unwrap();
-        (
-            value
-                .as_object()
-                .unwrap()
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
-            normalise(&value),
-        )
-    };
-    assert_eq!(latest(&python), latest(&rust));
-
     // What the save did to the server: every pane has an id, the same options are set.
     let server = |scratch: &ScratchTmux| {
         let format = "#{session_name}|#{window_index}|#{pane_index}|#{@workspace_id}";
@@ -613,7 +700,7 @@ fn rust_snapshot_restores_with_python() {
 fn crowd(s: &ScratchTmux, work: &Path) {
     s.tmux(&["set-option", "-g", "default-shell", "/bin/sh"]);
     s.tmux(&["set-environment", "-g", "SHELL", "/bin/sh"]);
-    let dir = work.join("c");
+    let dir = work.join(THERE);
     let dir = dir.to_str().unwrap();
     let first = s.tmux(&["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "gamma", "-n", "grid", "-x", "120", "-y", "40", "-c", dir, "exec sleep 300"]);
     wait_for(|| s.expand(&first, "#{pane_current_command}"), "sleep");
@@ -669,46 +756,92 @@ fn restore_lays_out_a_crowded_window_as_python_does() {
     assert_eq!(by_python, by_rust);
 }
 
-/// Both lock `<state>/lock` with flock, so a Python save and a Rust save take turns.
+/// Wait for `child` to end, for up to `limit`; `None` if it is still there.
+fn wait_for_exit(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How long a save that does not wait for the lock is given to finish before it counts as waiting. It
+/// takes a fraction of this. A machine too slow for that can only make a save that ignores the lock
+/// look as if it waited; it can never make one that waits fail, because nothing else is timed.
+const GRACE: Duration = Duration::from_millis(700);
+
+/// Both lock `<state>/lock` with flock, so a Python save and a Rust save take turns. Each half starts
+/// the save while the other side holds the lock, shows that the save has not finished (it has not
+/// written `latest.json`) after the grace time, and only then lets go of the lock: the save must then
+/// finish by itself. The holder says when it holds the lock and keeps it until it is told to let go, so
+/// nothing depends on how long a process takes to start.
 #[test]
 fn a_save_waits_for_the_lock_of_the_other_side() {
+    // Python holds the lock; the Rust save waits for it.
     let scratch = ScratchTmux::new();
-    let lock = scratch.state_dir().join("lock");
-
-    // Python holds the lock for a while; Rust's save has to wait for it.
+    let latest = scratch.state_dir().join("latest.json");
     let mut holder = Command::new("python3")
-        .args(["-c", "import fcntl, sys, time; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(1.5)"])
-        .arg(&lock)
+        .args([
+            "-c",
+            "import fcntl, sys; f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.readline()",
+        ])
+        .arg(scratch.state_dir().join("lock"))
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut line = String::new();
+    let mut said = String::new();
     std::io::BufRead::read_line(
         &mut std::io::BufReader::new(holder.stdout.take().unwrap()),
-        &mut line,
+        &mut said,
     )
     .unwrap();
-    assert_eq!(line, "held\n");
-    let started = Instant::now();
-    run_ok(Side::Rust, &scratch, &["save"]);
-    assert!(
-        started.elapsed() > Duration::from_millis(1000),
-        "Rust did not wait: {:?}",
-        started.elapsed()
-    );
-    holder.wait().unwrap();
-
-    // Rust holds it; Python's save waits.
-    let held = tmux_workspace::snapshot::lock_in(scratch.state_dir()).unwrap();
-    let mut child = cli(Side::Python, &scratch, &["save"])
+    assert_eq!(said, "held\n", "Python holds the lock");
+    let mut save = cli(Side::Rust, &scratch, &["save"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(1200));
-    assert!(child.try_wait().unwrap().is_none(), "Python did not wait");
+    std::thread::sleep(GRACE);
+    assert!(
+        save.try_wait().unwrap().is_none() && !latest.exists(),
+        "the Rust save went on while Python held the lock"
+    );
+    writeln!(holder.stdin.take().unwrap(), "let go").unwrap();
+    let status = wait_for_exit(&mut save, Duration::from_secs(60));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the Rust save: {status:?}"
+    );
+    assert!(latest.exists());
+    holder.wait().unwrap();
+
+    // Rust holds the lock; the Python save waits for it.
+    let scratch = ScratchTmux::new();
+    let latest = scratch.state_dir().join("latest.json");
+    let held = tmux_workspace::snapshot::lock_in(scratch.state_dir()).unwrap();
+    let mut save = cli(Side::Python, &scratch, &["save"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(GRACE);
+    assert!(
+        save.try_wait().unwrap().is_none() && !latest.exists(),
+        "the Python save went on while Rust held the lock"
+    );
     drop(held);
-    assert!(child.wait().unwrap().success());
+    let status = wait_for_exit(&mut save, Duration::from_secs(60));
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "the Python save: {status:?}"
+    );
+    assert!(latest.exists());
 }
 
 /// The snapshot folders of a state folder, oldest first.
@@ -818,6 +951,8 @@ struct Started {
 }
 
 const UID: &str = "0123456789abcdef0123456789abcdef";
+/// The folder an application is started in: its name is not ASCII.
+const CWD: &str = "cwd é 日本 😀";
 
 impl Starts {
     fn new() -> Starts {
@@ -825,7 +960,7 @@ impl Starts {
         let pane = scratch.expand("alpha:one", "#{pane_id}");
         let files = TempDir::new();
         let dir = files.path();
-        for name in ["bin", "shells", "cwd"] {
+        for name in ["bin", "shells", CWD] {
             std::fs::create_dir(dir.join(name)).unwrap();
         }
         for app in ["claude", "codex", "omp", "nvim"] {
@@ -945,8 +1080,8 @@ fn pane_start_prints_and_starts_the_same() {
         ("a long label", |_| record(&"x".repeat(100), json!(null)), None, "0"),
         ("saved text with control characters", |_| record("t", json!(null)), Some("plain\ttab\n\u{1b}[31mred\u{7}\r\nnext\rlast\ncaf\u{e9}\u{200b}\u{85}\u{2028}x\n"), "0"),
         ("saved text that ends without a newline", |_| record("t", json!(null)), Some("no newline"), "0"),
-        ("claude", |r| record("c", json!({"kind": "claude", "id": "abc", "cwd": r.path("cwd")})), None, "0"),
-        ("claude that fails", |r| record("c", json!({"kind": "claude", "id": "abc", "cwd": r.path("cwd")})), None, "3"),
+        ("claude", |r| record("c", json!({"kind": "claude", "id": "abc", "cwd": r.path(CWD)})), None, "0"),
+        ("claude that fails", |r| record("c", json!({"kind": "claude", "id": "abc", "cwd": r.path(CWD)})), None, "3"),
         ("codex without a folder of its own", |_| record("c", json!({"kind": "codex", "id": "abc"})), None, "0"),
         ("omp with a session file", |r| record("o", json!({"kind": "omp", "id": r.path("session.jsonl")})), None, "0"),
         ("omp with a file that is gone", |_| record("o", json!({"kind": "omp", "id": "/nowhere/s.jsonl"})), None, "0"),
@@ -1434,6 +1569,7 @@ impl HookRig {
                     .args([HOOK_DRIVER, mode, &PID.to_string(), BIRTH])
                     .arg(self.sessions.path())
                     .env("PYTHONDONTWRITEBYTECODE", "1")
+                    .env("PYTHONUTF8", "1")
                     .env("TMUX_PANE", &self.hidden);
                 let done = finish(command, &payload.to_string());
                 assert_eq!(
@@ -1552,10 +1688,11 @@ fn claude_steps() -> Vec<(&'static str, Step)> {
         ("status: a new folder", status(&elsewhere)),
         ("SessionEnd of the new session", claude("SessionEnd", elsewhere.clone())),
         ("status: back to the first session", status(&nowhere)),
+        ("status: a folder with accents", status(&json!({"cwd": ACCENTED}))),
         ("SessionEnd", claude("SessionEnd", json!({}))),
         ("omp SessionStart", omp("SessionStart", "/work")),
-        ("omp CwdChanged", omp("CwdChanged", "/other")),
-        ("omp SessionEnd", omp("SessionEnd", "/other")),
+        ("omp CwdChanged", omp("CwdChanged", ACCENTED)),
+        ("omp SessionEnd", omp("SessionEnd", ACCENTED)),
     ]
 }
 
@@ -1572,7 +1709,7 @@ fn codex_steps() -> Vec<(&'static str, Step)> {
     let finished = |text: &str, id: &str| json!({"turn_id": "turn-4", "tool_name": "Bash", "tool_use_id": id, "tool_input": {"command": text}});
     let (one, two) = ("private command one ünï 😀", "private command two");
     vec![
-        ("SessionStart", codex("SessionStart", json!({}))),
+        ("SessionStart", codex("SessionStart", json!({"cwd": ACCENTED}))),
         ("UserPromptSubmit", codex("UserPromptSubmit", turn("turn-1"))),
         ("PermissionRequest", codex("PermissionRequest", json!({"turn_id": "turn-1", "tool_name": "Bash"}))),
         ("PostToolUse of another tool", codex("PostToolUse", json!({"turn_id": "turn-1", "tool_name": "Read"}))),
@@ -1594,7 +1731,7 @@ fn codex_steps() -> Vec<(&'static str, Step)> {
         ("approval two", codex("PermissionRequest", command(two))),
         ("approval one is done", codex("PostToolUse", finished(one, "first"))),
         ("approval two is done", codex("PostToolUse", finished(two, "second"))),
-        ("a turn with questions", codex("UserPromptSubmit", turn("turn-5"))),
+        ("a turn with questions", codex("UserPromptSubmit", json!({"turn_id": "turn-5", "cwd": ACCENTED}))),
         ("question a", codex("PreToolUse", ask("a"))),
         ("question b", codex("PreToolUse", ask("b"))),
         ("answer a", codex("PostToolUse", ask("a"))),
