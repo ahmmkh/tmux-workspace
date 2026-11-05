@@ -195,7 +195,9 @@ pub fn strftime(fmt: &str, epoch: f64) -> String {
     if fmt.is_empty() {
         return String::new();
     }
-    let secs = epoch.floor() as libc::time_t;
+    // `time_t` is `c_long` on every target this builds for. libc deprecates the alias on musl (it is
+    // to become 64-bit there, which `c_long` already is), so the alias is not named.
+    let secs = epoch.floor() as libc::c_long;
     // SAFETY: `tm` is plain data that `localtime_r` fills in; `strftime` writes at most `size`
     // bytes into `buf` and reads the NUL-terminated `format`.
     unsafe {
