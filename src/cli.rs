@@ -2,8 +2,10 @@
 
 use crate::error::{Error, Result, fail};
 use crate::hook;
+use crate::host::RealHost;
 use crate::onboarding;
 use crate::pane;
+use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
 
@@ -27,10 +29,20 @@ fn makes_private_files(command: &str) -> bool {
     command != "agent-hook"
 }
 
+/// Whether this runs inside tmux, where a message goes on the status line.
+pub fn in_tmux() -> bool {
+    std::env::var_os("TMUX").is_some_and(|value| !value.is_empty())
+}
+
 /// Tell the user something: on the tmux status line inside tmux, else on stdout.
 pub fn message(text: &str) {
-    if std::env::var_os("TMUX").is_some_and(|value| !value.is_empty()) {
-        Tmux::new().quiet(&["display-message", text]);
+    message_via(&Tmux::new(), text);
+}
+
+/// `message`, through this tmux client.
+pub fn message_via(tmux: &Tmux, text: &str) {
+    if in_tmux() {
+        tmux.quiet(&["display-message", text]);
     } else {
         let _ = writeln!(std::io::stdout(), "{text}");
     }
@@ -61,6 +73,27 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         .map(|()| 0),
         "exec-shell" => Err(pane::exec_shell(&Tmux::new())),
         "label" => pane::label(&Tmux::new(), args.first().map(String::as_str)).map(|()| 0),
+        // At server start (from tmux.conf): bring back the missing sessions and start the autosave.
+        "init" => snapshot::initialize(&Tmux::new()).map(|()| 0),
+        "tick" => snapshot::tick(&Tmux::new(), &RealHost).map(|()| 0),
+        "save" => snapshot::save(&Tmux::new(), &RealHost, true).map(|()| 0),
+        "restore" => {
+            let restored = snapshot::restore(&Tmux::new(), false)?;
+            message(if restored {
+                "Missing workspaces restored"
+            } else {
+                "No missing saved workspaces to restore"
+            });
+            Ok(0)
+        }
+        "history" => {
+            let tmux = Tmux::new();
+            let pane = match args.first() {
+                Some(pane) => pane.clone(),
+                None => tmux.run(&["display-message", "-p", "#{pane_id}"])?,
+            };
+            snapshot::history(&tmux, &pane).map(|()| 0)
+        }
         _ => fail(format!("Unknown workspace command: {command}")),
     }
 }

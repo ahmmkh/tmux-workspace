@@ -293,7 +293,7 @@ pub fn cannot_write(path: &Path, why: impl Display) -> Error {
 
 /// `mkdir(parents=True, exist_ok=True, mode=0o700)`: the folder is private, its parents are not
 /// made so.
-fn make_private_dir(dir: &Path) -> io::Result<()> {
+pub fn make_private_dir(dir: &Path) -> io::Result<()> {
     if dir.is_dir() {
         return Ok(());
     }

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// The program that reopens each kind of application's saved session; the session follows.
-const APP_COMMANDS: [(&str, &[&str]); 4] = [
+pub const APP_COMMANDS: [(&str, &[&str]); 4] = [
     ("claude", &["claude", "--resume"]),
     ("codex", &["codex", "resume"]),
     ("omp", &["omp", "--resume"]),
@@ -52,7 +52,7 @@ fn say(text: &str) {
 // Identity and label
 
 /// Whether this is a pane identity: 32 lowercase hexadecimal digits.
-fn is_identity(value: &str) -> bool {
+pub fn is_identity(value: &str) -> bool {
     value.len() == 32
         && value
             .bytes()
@@ -388,7 +388,7 @@ enum Recovery {
 }
 
 /// Python's truthiness of a JSON value.
-fn truthy(value: &Value) -> bool {
+pub fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(flag) => *flag,

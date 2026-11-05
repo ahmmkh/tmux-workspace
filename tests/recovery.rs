@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use tmux_workspace::pane::{choose_shell, server_shell, shell_argv};
+use tmux_workspace::pyjson::{Style, dumps};
 use tmux_workspace::testing::{ScratchTmux, TempDir};
 
 const EXE: &str = env!("CARGO_BIN_EXE_tmux-workspace");
@@ -878,4 +879,692 @@ fn a_pane_start_that_cannot_write_fails_with_the_error_contract() {
         text(&out.stderr)
     );
     assert!(world.fakes.shell_log().is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// SnapshotRestore: save and restore on a scratch server with an empty state directory.
+
+const SLEEP: &str = "exec sleep 300";
+
+/// A scratch server with session `alpha` and session `beta`: tab `code` with the panes `api` and `logs`
+/// (30% wide, so that a tiled layout would be wrong), and tab `db` with the pane `psql`.
+/// Restored panes exec `/bin/sh`, never the developer's shell.
+struct Saved {
+    scratch: ScratchTmux,
+    /// The first pane of tab `code`.
+    api: String,
+}
+
+impl Saved {
+    fn new() -> Saved {
+        let scratch = ScratchTmux::new();
+        scratch.tmux(&["set-option", "-g", "default-shell", "/bin/sh"]);
+        scratch.tmux(&["set-environment", "-g", "SHELL", "/bin/sh"]);
+        scratch.tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "beta",
+            "-n",
+            "code",
+            "-x",
+            "120",
+            "-y",
+            "40",
+            SLEEP,
+        ]);
+        let api = scratch.expand("beta:code", "#{pane_id}");
+        let logs = scratch.pane(&["split-window", "-t", &api, "-h", "-l", "30%"]);
+        let psql = scratch.pane(&["new-window", "-t", "beta:", "-n", "db"]);
+        for (pane, label) in [(&api, "api"), (&logs, "logs"), (&psql, "psql")] {
+            scratch.tmux(&["set-option", "-p", "-t", pane, "@workspace_label", label]);
+        }
+        Saved { scratch, api }
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = self.scratch.bin(EXE);
+        command.args(args).stdin(Stdio::null());
+        command
+    }
+
+    /// Run the binary; it must succeed.
+    fn controller(&self, args: &[&str]) -> Output {
+        let out = self.command(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        out
+    }
+
+    /// Pane geometry, not `window_layout`: the layout string names pane ids, which a restore renews.
+    fn layout(&self) -> Vec<String> {
+        let format = "#{window_index}:#{window_name}:#{pane_index}:#{pane_left},#{pane_top},#{pane_width}x#{pane_height}";
+        self.beta_panes(format)
+    }
+
+    fn labels(&self) -> Vec<String> {
+        self.beta_panes("#{window_name}:#{@workspace_label}")
+    }
+
+    fn beta_panes(&self, format: &str) -> Vec<String> {
+        let out = self
+            .scratch
+            .run(&["list-panes", "-s", "-t", "=beta", "-F", format]);
+        text(&out.stdout)
+            .split_whitespace()
+            .map(String::from)
+            .collect()
+    }
+
+    fn has_beta(&self) -> bool {
+        self.scratch
+            .run(&["has-session", "-t", "=beta"])
+            .status
+            .success()
+    }
+
+    fn state(&self) -> &Path {
+        self.scratch.state_dir()
+    }
+
+    /// The snapshot `latest.json` points at.
+    fn latest(&self) -> (std::path::PathBuf, Value) {
+        let latest: Value =
+            serde_json::from_slice(&std::fs::read(self.state().join("latest.json")).unwrap())
+                .unwrap();
+        let path = std::path::PathBuf::from(latest["path"].as_str().unwrap());
+        let data = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        (path, data)
+    }
+
+    /// The names of the snapshot folders, oldest first.
+    fn snapshots(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.state().join("snapshots"))
+            .map(|dir| {
+                dir.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+}
+
+/// Poll until `read` gives `expected`, for up to 10 s, then assert that it does.
+fn eventually<T: PartialEq + std::fmt::Debug>(read: impl Fn() -> T, expected: T) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while read() != expected && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(read(), expected);
+}
+
+#[test]
+fn round_trip_restores_sessions_tabs_labels_and_layout() {
+    let saved = Saved::new();
+    let (layout, labels) = (saved.layout(), saved.labels());
+    assert_eq!(labels, ["code:api", "code:logs", "db:psql"]);
+    saved.controller(&["save"]);
+    saved.scratch.tmux(&["kill-session", "-t", "=beta"]);
+    saved.controller(&["restore"]);
+    eventually(|| saved.labels(), labels);
+    assert_eq!(saved.layout(), layout);
+}
+
+#[test]
+fn initialize_restores_once_per_server() {
+    let saved = Saved::new();
+    saved.controller(&["save"]);
+    saved.scratch.tmux(&["kill-session", "-t", "=beta"]);
+    saved.controller(&["init"]);
+    eventually(|| saved.has_beta(), true);
+    saved.scratch.tmux(&["kill-session", "-t", "=beta"]);
+    saved.controller(&["init"]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !saved.has_beta(),
+        "a second init restored a workspace the user closed"
+    );
+}
+
+#[test]
+fn snapshot_files_are_private() {
+    let saved = Saved::new();
+    saved.controller(&["save"]);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let (path, _) = saved.latest();
+    let directory = path.parent().unwrap();
+    assert_eq!(mode(saved.state()), 0o700);
+    assert_eq!(mode(&saved.state().join("snapshots")), 0o700);
+    assert_eq!(mode(directory), 0o700);
+    assert_eq!(mode(&saved.state().join("latest.json")), 0o600);
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        assert_eq!(mode(&entry.path()), 0o600, "{:?}", entry.file_name());
+    }
+}
+
+#[test]
+fn save_writes_python_shaped_json() {
+    let saved = Saved::new();
+    saved.controller(&["save"]);
+    let (path, data) = saved.latest();
+    let file = std::fs::read_to_string(&path).unwrap();
+    let keys =
+        |value: &Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(
+        keys(&data),
+        [
+            "version",
+            "saved_at",
+            "directory",
+            "active_session",
+            "windows",
+            "panes"
+        ]
+    );
+    assert_eq!(data["version"], json!(1));
+    assert!(data["saved_at"].is_f64(), "{}", data["saved_at"]);
+    assert_eq!(data["directory"], json!(path.parent().unwrap()));
+    // The text is what json.dumps(indent=2) writes, with no newline at the end.
+    assert_eq!(file, dumps(&data, Style::Indent2, false));
+    assert!(!file.ends_with('\n'));
+
+    let panes = data["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 4, "alpha:one and the three of beta");
+    for pane in panes {
+        assert_eq!(
+            keys(pane),
+            [
+                "id", "session", "window", "index", "label", "cwd", "active", "parked", "home",
+                "app"
+            ]
+        );
+        let id = pane["id"].as_str().unwrap();
+        assert!(
+            id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{id}"
+        );
+        assert!(pane["window"].is_u64() && pane["index"].is_u64());
+        assert!(pane["active"].is_boolean());
+        assert_eq!(
+            (pane["parked"].as_str(), pane["home"].as_str()),
+            (Some(""), Some(""))
+        );
+        assert!(pane["app"].is_null());
+        assert!(path.parent().unwrap().join(format!("{id}.txt")).is_file());
+    }
+    let labelled: Vec<(&str, &str)> = panes
+        .iter()
+        .map(|p| (p["session"].as_str().unwrap(), p["label"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        labelled,
+        [
+            ("alpha", "shell"),
+            ("beta", "api"),
+            ("beta", "logs"),
+            ("beta", "psql")
+        ]
+    );
+    // The panes' ids are the ones now stored in tmux.
+    let stored = saved
+        .scratch
+        .tmux(&["show-options", "-pqv", "-t", &saved.api, "@workspace_id"]);
+    assert_eq!(panes[1]["id"], json!(stored));
+
+    let windows = data["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 3);
+    for window in windows {
+        assert_eq!(
+            keys(window),
+            [
+                "session_name",
+                "window_index",
+                "window_name",
+                "window_layout",
+                "window_active",
+                "window_width",
+                "window_height",
+                "window_zoomed_flag"
+            ]
+        );
+        assert!(window.as_object().unwrap().values().all(Value::is_string));
+    }
+    assert_eq!(windows[1]["window_name"], json!("code"));
+    assert_eq!(
+        (
+            windows[1]["window_width"].as_str(),
+            windows[1]["window_height"].as_str()
+        ),
+        (Some("120"), Some("40"))
+    );
+
+    // latest.json is json.dumps with the default separators.
+    let latest = std::fs::read_to_string(saved.state().join("latest.json")).unwrap();
+    let parsed: Value = serde_json::from_str(&latest).unwrap();
+    assert_eq!(keys(&parsed), ["saved_at", "path"]);
+    assert_eq!(parsed["saved_at"], data["saved_at"]);
+    assert_eq!(parsed["path"], json!(path));
+    assert_eq!(latest, dumps(&parsed, Style::Default, false));
+    assert!(latest.starts_with("{\"saved_at\": "), "{latest}");
+}
+
+#[test]
+fn a_panes_terminal_text_is_saved_with_one_newline_after_it() {
+    let saved = Saved::new();
+    let pane = saved.scratch.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "beta:",
+        "-n",
+        "text",
+        "printf 'first line\\nsecond line\\n\\n\\n'; exec sleep 300",
+    ]);
+    eventually(
+        || {
+            saved
+                .scratch
+                .tmux(&["capture-pane", "-p", "-t", &pane])
+                .starts_with("first line")
+        },
+        true,
+    );
+    saved.controller(&["save"]);
+    let (path, data) = saved.latest();
+    let record = data["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["window"] == json!(2))
+        .unwrap();
+    let file = path
+        .parent()
+        .unwrap()
+        .join(format!("{}.txt", record["id"].as_str().unwrap()));
+    assert_eq!(
+        std::fs::read_to_string(file).unwrap(),
+        "first line\nsecond line\n"
+    );
+}
+
+#[test]
+fn the_bootstrap_session_and_unparked_parking_panes_are_not_saved() {
+    let saved = Saved::new();
+    saved
+        .scratch
+        .tmux(&["new-session", "-d", "-s", "__workspace_bootstrap", SLEEP]);
+    saved
+        .scratch
+        .tmux(&["new-session", "-d", "-s", "__parked", "-n", "stash", SLEEP]);
+    let parked = saved
+        .scratch
+        .pane(&["new-window", "-t", "__parked:", "-n", "kept"]);
+    saved.scratch.tmux(&[
+        "set-option",
+        "-p",
+        "-t",
+        &parked,
+        "@workspace_parked",
+        "1700000000",
+    ]);
+    saved.scratch.tmux(&[
+        "set-option",
+        "-p",
+        "-t",
+        &parked,
+        "@workspace_home",
+        "beta:code",
+    ]);
+    saved.controller(&["save"]);
+    let (_, data) = saved.latest();
+    let sessions: Vec<&str> = data["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["session"].as_str().unwrap())
+        .collect();
+    assert_eq!(sessions, ["__parked", "alpha", "beta", "beta", "beta"]);
+    let kept = &data["panes"][0];
+    assert_eq!(kept["parked"], json!("1700000000"));
+    assert_eq!(kept["home"], json!("beta:code"));
+    let windows: Vec<&str> = data["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["session_name"].as_str().unwrap())
+        .collect();
+    assert!(!windows.contains(&"__workspace_bootstrap"), "{windows:?}");
+    assert_eq!(
+        windows.iter().filter(|name| **name == "__parked").count(),
+        1
+    );
+}
+
+#[test]
+fn a_save_while_restoring_does_nothing() {
+    let saved = Saved::new();
+    saved
+        .scratch
+        .tmux(&["set-option", "-g", "@workspace_restoring", "1"]);
+    saved.controller(&["save"]);
+    assert!(!saved.state().join("latest.json").exists());
+    assert!(saved.snapshots().is_empty());
+}
+
+#[test]
+fn save_keeps_the_three_newest_snapshots() {
+    let saved = Saved::new();
+    let mut made = Vec::new();
+    for _ in 0..5 {
+        saved.controller(&["save"]);
+        made.push(
+            saved
+                .latest()
+                .0
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    assert_eq!(saved.snapshots(), made[2..]);
+    // What is not a snapshot folder is never pruned, whatever its place in the order.
+    std::fs::create_dir(saved.state().join("snapshots/keep-me")).unwrap();
+    std::fs::write(saved.state().join("snapshots/0"), "x").unwrap();
+    saved.controller(&["save"]);
+    let left = saved.snapshots();
+    assert!(
+        left.contains(&"keep-me".to_string()) && left.contains(&"0".to_string()),
+        "{left:?}"
+    );
+}
+
+#[test]
+fn save_records_the_time_and_clears_the_error() {
+    let saved = Saved::new();
+    saved
+        .scratch
+        .tmux(&["set-option", "-g", "@workspace_save_error", "old"]);
+    saved.controller(&["save"]);
+    let option = |name: &str| saved.scratch.tmux(&["show-options", "-gqv", name]);
+    let shown = option("@workspace_saved");
+    assert!(
+        shown.len() == 5
+            && shown.as_bytes()[2] == b':'
+            && shown.bytes().filter(u8::is_ascii_digit).count() == 4,
+        "{shown}"
+    );
+    assert_eq!(option("@workspace_save_error"), "");
+}
+
+#[test]
+fn save_after_a_recent_save_is_not_skipped_but_tick_is() {
+    let saved = Saved::new();
+    saved.controller(&["tick"]);
+    assert_eq!(saved.snapshots().len(), 1);
+    saved.controller(&["tick"]);
+    assert_eq!(
+        saved.snapshots().len(),
+        1,
+        "an autosave within five minutes of the last save"
+    );
+    saved.controller(&["save"]);
+    assert_eq!(saved.snapshots().len(), 2, "a save by hand always saves");
+    // An old latest.json lets the next tick save again.
+    let latest = saved.state().join("latest.json");
+    let mut old: Value = serde_json::from_slice(&std::fs::read(&latest).unwrap()).unwrap();
+    old["saved_at"] = json!(1.0);
+    std::fs::write(&latest, old.to_string()).unwrap();
+    saved.controller(&["tick"]);
+    assert_eq!(saved.snapshots().len(), 3);
+}
+
+#[test]
+fn tick_and_init_schedule_the_next_tick_in_five_minutes() {
+    let saved = Saved::new();
+    let dir = TempDir::new();
+    let trace = dir.path().join("trace");
+    let run = |command: &str| {
+        let out = saved
+            .command(&[command])
+            .env("TMUX_WORKSPACE_TRACE", &trace)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    };
+    let scheduled = || -> Vec<String> {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("tmux run-shell -b -d 300 "))
+            .map(String::from)
+            .collect()
+    };
+    run("tick");
+    let ticks = scheduled();
+    assert_eq!(ticks.len(), 1, "{ticks:?}");
+    assert!(ticks[0].ends_with(" tick"), "{ticks:?}");
+    let program = ticks[0]
+        .trim_start_matches("tmux run-shell -b -d 300 ")
+        .trim_end_matches(" tick");
+    assert!(Path::new(program).is_file(), "{program}");
+    saved.scratch.tmux(&["kill-session", "-t", "=beta"]);
+    run("init");
+    assert_eq!(scheduled().len(), 2);
+    assert_eq!(scheduled()[1], ticks[0]);
+    assert_eq!(
+        saved
+            .scratch
+            .tmux(&["show-options", "-gqv", "@workspace_initialized"]),
+        "1"
+    );
+    run("init");
+    assert_eq!(scheduled().len(), 2, "a second init starts no second timer");
+}
+
+/// A folder to put first on `PATH`: its `tmux` fails `capture-pane` and runs the real one otherwise.
+fn tmux_without_capture(dir: &Path) -> String {
+    let real = tmux_workspace::process::which("tmux").expect("tmux on PATH");
+    let wrapper = dir.join("tmux");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = capture-pane ] && exit 1; done\nexec '{}' \"$@\"\n",
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// test_performance.py::Saves, second half: a save that fails changes nothing the next restore reads.
+#[test]
+fn a_failed_capture_aborts_the_save_and_keeps_the_last_snapshot() {
+    let saved = Saved::new();
+    saved.controller(&["save"]);
+    let before = std::fs::read(saved.state().join("latest.json")).unwrap();
+    let folders = saved.snapshots();
+    let dir = TempDir::new();
+    let out = saved
+        .command(&["save"])
+        .env("PATH", tmux_without_capture(dir.path()))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).starts_with("Workspace error: Command '["),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(saved.state().join("latest.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        saved.snapshots(),
+        folders,
+        "a failed save leaves no half snapshot behind"
+    );
+}
+
+#[test]
+fn a_failed_autosave_is_reported_and_the_timer_goes_on() {
+    let saved = Saved::new();
+    let dir = TempDir::new();
+    let trace = dir.path().join("trace");
+    let out = saved
+        .command(&["tick"])
+        .env("PATH", tmux_without_capture(dir.path()))
+        .env("TMUX_WORKSPACE_TRACE", &trace)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let error = saved
+        .scratch
+        .tmux(&["show-options", "-gqv", "@workspace_save_error"]);
+    assert!(error.starts_with("Command '["), "{error}");
+    assert!(error.contains("capture-pane"), "{error}");
+    assert!(
+        std::fs::read_to_string(&trace)
+            .unwrap()
+            .contains("run-shell -b -d 300 "),
+        "the next autosave must be scheduled after a failure too"
+    );
+    assert!(!saved.state().join("latest.json").exists());
+}
+
+#[test]
+fn concurrent_saves_take_the_lock() {
+    let saved = Saved::new();
+    let children: Vec<Child> = (0..2)
+        .map(|_| {
+            saved
+                .command(&["save"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in children {
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    }
+    let folders = saved.snapshots();
+    assert_eq!(folders.len(), 2, "one snapshot per call: {folders:?}");
+    for folder in &folders {
+        let names: Vec<String> = std::fs::read_dir(saved.state().join("snapshots").join(folder))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"workspace.json".to_string()), "{names:?}");
+        assert!(
+            names.iter().all(|name| !name.starts_with('.')),
+            "a partial file: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            5,
+            "workspace.json and the text of four panes: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn save_waits_while_another_process_holds_the_lock() {
+    let saved = Saved::new();
+    let held = tmux_workspace::snapshot::lock_in(saved.state()).unwrap();
+    let mut child = saved
+        .command(&["save"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(
+        !wait_for_exit(&mut child, Duration::from_millis(700)),
+        "save ignored the lock"
+    );
+    assert!(!saved.state().join("latest.json").exists());
+    drop(held);
+    assert!(wait_for_exit(&mut child, Duration::from_secs(10)));
+    assert!(saved.state().join("latest.json").exists());
+}
+
+#[test]
+fn history_opens_the_saved_text_of_the_pane_in_less() {
+    let saved = Saved::new();
+    let fakes = Fakes::new();
+    let log = fakes.dir.path().join("less.log");
+    Fakes::write(
+        &fakes.dir.path().join("bin/less"),
+        &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+    );
+    let run = |pane: &str| {
+        saved
+            .command(&["history", pane])
+            .env("PATH", fakes.bin())
+            .output()
+            .unwrap()
+    };
+    let out = run(&saved.api);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "Workspace error: No saved history yet; use prefix Ctrl+s first\n"
+    );
+    saved.controller(&["save"]);
+    let (path, data) = saved.latest();
+    let id = data["panes"][1]["id"].as_str().unwrap();
+    assert!(run(&saved.api).status.success());
+    assert_eq!(
+        fakes.lines("less.log"),
+        [format!(
+            "-- {}",
+            path.parent().unwrap().join(format!("{id}.txt")).display()
+        )]
+    );
+    // A pane made after the save is not in it.
+    let newer = saved
+        .scratch
+        .pane(&["new-window", "-t", "beta:", "-n", "newer"]);
+    let out = run(&newer);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "Workspace error: This pane is not in the latest snapshot\n"
+    );
+    assert_eq!(fakes.lines("less.log").len(), 1);
+}
+
+#[test]
+fn a_damaged_latest_snapshot_is_an_error_and_nothing_is_restored() {
+    let saved = Saved::new();
+    std::fs::write(saved.state().join("latest.json"), "{").unwrap();
+    for command in ["restore", "init"] {
+        let out = saved.command(&[command]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{command}");
+        assert!(
+            text(&out.stderr).starts_with("Workspace error: "),
+            "{}",
+            text(&out.stderr)
+        );
+    }
+    for option in ["@workspace_restoring", "@workspace_initialized"] {
+        assert_eq!(
+            saved.scratch.tmux(&["show-options", "-gqv", option]),
+            "",
+            "{option}"
+        );
+    }
 }

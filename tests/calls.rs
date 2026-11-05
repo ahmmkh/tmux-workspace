@@ -187,3 +187,94 @@ fn pane_start_reads_label_with_dollar() {
         "a$b"
     );
 }
+
+/// Two sessions, four tabs, five panes.
+fn five_panes() -> ScratchTmux {
+    let scratch = ScratchTmux::new();
+    scratch.pane(&["split-window", "-t", "alpha:one"]);
+    scratch.pane(&["new-window", "-t", "alpha:", "-n", "two"]);
+    scratch.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        "beta",
+        "-n",
+        "code",
+        "exec sleep 300",
+    ]);
+    scratch.pane(&["new-window", "-t", "beta:", "-n", "db"]);
+    assert_eq!(scratch.tmux(&["list-panes", "-a"]).lines().count(), 5);
+    scratch
+}
+
+/// Run `command` with a trace and give the trace file.
+fn traced(scratch: &ScratchTmux, dir: &Path, command: &str) -> std::path::PathBuf {
+    let trace = dir.join(format!("trace-{command}"));
+    let out = scratch
+        .bin(EXE)
+        .arg(command)
+        .env("TMUX_WORKSPACE_TRACE", &trace)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    trace
+}
+
+#[test]
+fn save_with_five_panes_makes_at_most_nine_tmux_calls_and_two_ps_calls() {
+    let scratch = five_panes();
+    let dir = TempDir::new();
+    // New panes: their identities are written too, which is the most calls a save makes.
+    let trace = traced(&scratch, dir.path(), "save");
+    let text = std::fs::read_to_string(&trace).unwrap();
+    assert!(started(&trace, "tmux") <= 9, "{text}");
+    assert!(started(&trace, "ps") <= 2, "{text}");
+    assert_eq!(
+        started(&trace, "ps"),
+        2,
+        "the process table and the Codex scan\n{text}"
+    );
+    // One capture per pane, and nothing else per pane.
+    let captures = text
+        .lines()
+        .filter(|line| line.contains(" capture-pane "))
+        .count();
+    assert_eq!(captures, 5, "{text}");
+    // Saved again, every pane has its identity: one call fewer.
+    let again = dir.path().join("again");
+    let out = scratch
+        .bin(EXE)
+        .arg("save")
+        .env("TMUX_WORKSPACE_TRACE", &again)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        started(&again, "tmux") <= 8,
+        "{}",
+        std::fs::read_to_string(&again).unwrap()
+    );
+    assert!(started(&again, "ps") <= 2);
+}
+
+#[test]
+fn a_tick_soon_after_a_save_makes_two_tmux_calls_and_no_ps() {
+    let scratch = five_panes();
+    let dir = TempDir::new();
+    traced(&scratch, dir.path(), "save");
+    // One read tells that nothing is to be done; the other schedules the next tick.
+    let trace = traced(&scratch, dir.path(), "tick");
+    assert_eq!(
+        started(&trace, "tmux"),
+        2,
+        "{}",
+        std::fs::read_to_string(&trace).unwrap()
+    );
+    assert_eq!(started(&trace, "ps"), 0);
+}

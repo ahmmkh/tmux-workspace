@@ -22,6 +22,11 @@ impl Fields {
         self.0.get(name).map_or("", String::as_str)
     }
 
+    /// Whether the row has this name at all, even with an empty value.
+    pub fn has(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
     pub fn set(&mut self, name: &str, value: impl Into<String>) {
         self.0.insert(name.to_string(), value.into());
     }
@@ -157,6 +162,33 @@ impl Tmux {
     }
 }
 
+/// The `-F` format of one listing chained with others: `tag`, then the values of `names`. The tag tells
+/// the rows of this listing from the rows of the others in the one output.
+pub fn tagged_format(tag: &str, names: &[&str]) -> String {
+    format!("{tag}{SEP}{}", format_of(names))
+}
+
+/// Split the output of listings run in one call, each with a `tagged_format`: the rows of each listing, in
+/// the order of `listings`. A row of no listing, or with the wrong number of values, is the error of `fields`.
+pub fn parse_tagged(output: &str, listings: &[(&str, &[&str])]) -> Result<Vec<Vec<Fields>>> {
+    let mut found = vec![Vec::new(); listings.len()];
+    if output.is_empty() {
+        return Ok(found);
+    }
+    for line in py_splitlines(output) {
+        let listing = listings.iter().position(|(tag, _)| {
+            line.strip_prefix(tag)
+                .is_some_and(|rest| rest.starts_with(SEP))
+        });
+        let Some(at) = listing else {
+            return fail(CONTROL_CHARACTERS);
+        };
+        let (tag, names) = listings[at];
+        found[at].push(row(&line[tag.len() + SEP.len_utf8()..], names)?);
+    }
+    Ok(found)
+}
+
 /// Undo tmux 3.4's escaping of the separator in a format call's output. Text that did not come
 /// from a format, such as `capture-pane`, is left as it is.
 pub fn unescape_sep(output: &str, args: &[&str]) -> String {
@@ -277,6 +309,50 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].get("x"), rows[0].get("y")), ("a", "b"));
         assert_eq!((rows[1].get("x"), rows[1].get("y")), ("", "d"));
+    }
+
+    #[test]
+    fn listings_chained_in_one_call_are_told_apart_by_their_tag() {
+        assert_eq!(tagged_format("P", &["a", "b"]), "P\x1f#{a}\x1f#{b}");
+        let listings: [(&str, &[&str]); 2] = [("P", &["x", "y"]), ("W", &["z"])];
+        let found = parse_tagged("P\x1fa\x1fb\nW\x1fw\nP\x1f\x1fd\nW\x1f", &listings).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].len(), 2);
+        assert_eq!((found[0][0].get("x"), found[0][0].get("y")), ("a", "b"));
+        assert_eq!((found[0][1].get("x"), found[0][1].get("y")), ("", "d"));
+        assert_eq!(found[1].len(), 2);
+        assert_eq!((found[1][0].get("z"), found[1][1].get("z")), ("w", ""));
+        assert_eq!(parse_tagged("", &listings).unwrap(), [vec![], vec![]]);
+        // A listing with no rows is an empty list, not a missing one.
+        let found = parse_tagged("W\x1fw", &listings).unwrap();
+        assert!(found[0].is_empty() && found[1].len() == 1);
+    }
+
+    #[test]
+    fn a_tagged_row_with_the_wrong_number_of_values_is_the_control_character_error() {
+        let listings: [(&str, &[&str]); 1] = [("P", &["x", "y"])];
+        for output in [
+            "P\x1fa",
+            "P\x1fa\x1fb\x1fc",
+            "P\x1fa\x1fb\nsecond half of a path",
+            "Q\x1fa\x1fb",
+            "Pa\x1fb",
+        ] {
+            let e = parse_tagged(output, &listings).unwrap_err();
+            assert_eq!(
+                e.to_string(),
+                "A workspace name or directory contains unsupported control characters",
+                "{output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fields_know_which_names_they_hold() {
+        let mut f = Fields::default();
+        assert!(!f.has("k"));
+        f.set("k", "");
+        assert!(f.has("k"));
     }
 
     #[test]
