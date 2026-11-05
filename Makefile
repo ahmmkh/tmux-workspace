@@ -26,6 +26,8 @@ lint:
 	for f in $(RUNTIME); do $(PYTHON) -m py_compile "$$f" || exit 1; done
 	cargo clippy --all-targets --features testing -- -D warnings
 	cargo fmt --check
+	@if command -v actionlint >/dev/null 2>&1; then echo actionlint; actionlint; \
+	else echo 'make lint: actionlint is not installed, so .github/workflows is not checked'; fi
 
 # The release archive of this machine in dist/: make dist TARGET=x86_64-apple-darwin for another one.
 dist:

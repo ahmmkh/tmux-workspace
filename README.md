@@ -263,7 +263,7 @@ Your snapshots and `~/.config/tmux-workspace` stay, and so does the folder `~/.l
 ## Contributing
 
 ```sh
-make lint test        # shellcheck, clippy, rustfmt, a Python 3.9 compile check; the cargo tests, then the Python tests
+make lint test        # shellcheck, clippy, rustfmt, actionlint (when installed), a Python 3.9 compile check; the cargo tests, then the Python tests
 make bench            # time the hot paths against the Python of v1 (needs hyperfine)
 make test-install     # install in Ubuntu, Debian, Fedora, Arch and Alpine containers (Docker)
 make dist             # build the release archive of this machine into dist/

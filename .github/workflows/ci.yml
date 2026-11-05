@@ -31,7 +31,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux fzf zsh shellcheck lsof
       - name: Install tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install tmux fzf shellcheck
+        # actionlint: make lint checks the workflows when it is installed (here, not on the Linux runner).
+        run: brew install tmux fzf shellcheck actionlint
       - run: tmux -V
       - run: rustup component add clippy rustfmt
       - run: cargo --version
