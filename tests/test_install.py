@@ -141,10 +141,24 @@ class Package(unittest.TestCase):
         self.assertIn('usage: scripts/package.sh TARGET [OUTDIR]', result.stderr)
 
 
+def git_of_checkout(*args):
+    """The output of `git -C ROOT ARGS`. When git fails, say why and what usually fixes it: most tests start from
+    checkout(), and a CalledProcessError says neither. In a container that runs as root over a checkout that
+    another user made (a CI job's), git refuses with "detected dubious ownership" until the checkout is trusted."""
+    result = subprocess.run(['git', '-C', str(ROOT), *args], capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f'git {" ".join(args)} failed in {ROOT} (exit status {result.returncode}): '
+            f'{result.stderr.decode(errors="replace").strip()}\n'
+            f'These tests need git to read the checkout. If git says "dubious ownership", the checkout belongs to '
+            f'another user than the one running the tests: run  git config --global --add safe.directory {ROOT}\n'
+            f'If it does not know a commit, the clone is shallow: fetch the whole history (git fetch --unshallow).')
+    return result.stdout
+
+
 def copy_tree(dest):
     """The working tree as a clone has it: tracked and new files, none that git ignores (no binary, no target/)."""
-    listed = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-                            capture_output=True, check=True).stdout.decode().split('\0')
+    listed = git_of_checkout('ls-files', '-z', '--cached', '--others', '--exclude-standard').decode().split('\0')
     for name in filter(None, listed):
         source = ROOT / name
         if source.is_file():
@@ -902,8 +916,8 @@ class Installer(unittest.TestCase):
     @staticmethod
     def v1(folder):
         """The Python version, 1.0.0, as a v1 clone has it."""
-        archive = subprocess.run(['git', '-C', str(ROOT), 'archive', '30b1401'], capture_output=True, check=True)
-        subprocess.run(['tar', '-x', '-C', str(folder)], input=archive.stdout, check=True)
+        archive = git_of_checkout('archive', '30b1401')
+        subprocess.run(['tar', '-x', '-C', str(folder)], input=archive, check=True)
 
     def upstream_and_clone(self, first, clone):
         """An upstream repository whose main has commit FIRST, and a shallow clone of it at CLONE."""

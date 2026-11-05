@@ -97,7 +97,7 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends tmux fzf zsh python3 git curl ca-certificates build-essential procps lsof
+          apt-get install -y -qq --no-install-recommends tmux fzf zsh python3 git curl ca-certificates build-essential procps lsof perl
       - name: The tmux of the floor
         run: |
           tmux -V
@@ -106,6 +106,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Trust the checkout
+        # The container runs as root over a checkout that the runner (uid 1001) made, and git refuses such
+        # a repository ("detected dubious ownership"). tests/test_install.py lists the files with git.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
