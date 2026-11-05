@@ -825,6 +825,9 @@ class Installer(unittest.TestCase):
     def v1_install(self, *flags):
         """A v1 piped install: the clone at the install home, set up by its own (Python era) install.sh.
         Returns the upstream repository and the clone's commit."""
+        known = subprocess.run(['git', '-C', str(ROOT), 'cat-file', '-e', '30b1401^{commit}'], capture_output=True)
+        if known.returncode != 0:
+            self.skipTest('v1 (commit 30b1401) is not in this clone; a shallow checkout needs fetch-depth: 0')
         upstream = self.upstream_and_clone(self.v1, self.share)
         self.run_script(['/bin/bash', str(self.share / 'install.sh'), '--yes', *flags], True, **self.clone_env())
         self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / 'bin/tmux-workspace')
