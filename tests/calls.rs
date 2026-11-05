@@ -180,10 +180,9 @@ fn pane_start_reads_label_with_dollar() {
     pane_start(&scratch, &pane, dir.path(), |command| {
         command.env("TMUX_WORKSPACE_SHELL", &shell);
     });
-    assert_eq!(
-        scratch.tmux(&["show-options", "-pqv", "-t", &pane, "@workspace_label"]),
-        "a$b"
-    );
+    // tmux 3.4 prints a $ of its output as \$ (3.3a and 3.8 do not); the stored label is what was set.
+    let label = scratch.tmux(&["show-options", "-pqv", "-t", &pane, "@workspace_label"]);
+    assert_eq!(label.replace("\\$", "$"), "a$b");
 }
 
 /// Two sessions, four tabs, five panes.
