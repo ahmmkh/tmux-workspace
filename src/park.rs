@@ -4,10 +4,10 @@
 //! nanoseconds) and the workspace it came from (`@workspace_home`); both go when it is restored.
 
 use crate::cli::message_via;
-use crate::error::{Error, Result, fail, py_repr_str};
+use crate::error::{Error, Result, fail};
 use crate::model::PARKING;
 use crate::pick::{agent_status, status_word};
-use crate::text::{now_ns, py_strip};
+use crate::text::{now_ns, py_int, py_strip};
 use crate::tmux::{Fields, Tmux};
 use std::io::{self, BufRead, Write};
 
@@ -119,12 +119,7 @@ fn parked_in(rows: &[Fields]) -> Result<Vec<Fields>> {
         if row.get("session_name") != PARKING || stamp.is_empty() {
             continue;
         }
-        let time: i128 = py_strip(stamp).parse().or_else(|_| {
-            fail(format!(
-                "invalid literal for int() with base 10: {}",
-                py_repr_str(stamp)
-            ))
-        })?;
+        let time = py_int(stamp)?;
         let mut pane = row.clone();
         pane.set(
             "label",

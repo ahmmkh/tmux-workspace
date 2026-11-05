@@ -7,6 +7,7 @@ use crate::host::RealHost;
 use crate::onboarding;
 use crate::pane;
 use crate::park;
+use crate::pick;
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
@@ -103,6 +104,23 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             let (target, direction) = park::unpark_args(args);
             let target = pane_or_current(&tmux, target.as_ref())?;
             park::unpark(&tmux, &target, &direction, command == "choose-park").map(|()| 0)
+        }
+        // `work NAME` and `prefix s`; without a name, the workspace picker.
+        "open" => pick::open_workspace(&Tmux::new(), args.first().map(String::as_str)).map(|()| 0),
+        "pick-window" => pick::pick_window(&Tmux::new()).map(|()| 0),
+        // The preview of the tab picker: it reads the index from its argument.
+        "window-preview" => {
+            pick::window_preview(&Tmux::new(), args.first().map(String::as_str));
+            Ok(0)
+        }
+        "new-tab" => pick::new_tab(
+            &Tmux::new(),
+            args.first().map(String::as_str),
+            args.get(1).map(String::as_str),
+        )
+        .map(|()| 0),
+        "kill-workspace" | "delete" | "rm" => {
+            pick::delete_workspace(&Tmux::new(), args.first().map(String::as_str)).map(|()| 0)
         }
         // Reads no pane and asks tmux nothing: fzf shows this program's own topics.
         "help" => help::help_interactive().map(|()| 0),

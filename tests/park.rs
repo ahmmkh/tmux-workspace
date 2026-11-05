@@ -5,21 +5,12 @@
 //! prints (scripts/gen_help.py loads it). The fzf and pager paths run on a pseudo-terminal with fake
 //! `fzf` and `less` programs that record how they were started.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
+mod common;
+
+use common::{EXE, Fakes, on_a_terminal, self_path, shell_quote, text};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
 use tmux_workspace::testing::{ScratchTmux, TempDir};
-
-const EXE: &str = env!("CARGO_BIN_EXE_tmux-workspace");
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
 
 /// A scratch server with two panes side by side in `alpha:one`: `first`, and `second`.
 struct World {
@@ -490,73 +481,7 @@ fn help_without_a_terminal_prints_the_guide_when_there_is_one() {
 // ---------------------------------------------------------------------------------------------
 // help on a terminal
 
-/// Executable programs in a folder that records how they ran: the arguments of call N in
-/// `<name>.args.N` (one per line), what call N read in `<name>.input.N` when its input was a pipe,
-/// and the number of calls in `<name>.count`.
-struct Fakes {
-    dir: TempDir,
-}
-
 impl Fakes {
-    fn new() -> Fakes {
-        Fakes {
-            dir: TempDir::new(),
-        }
-    }
-
-    /// A program `name` that records itself, then runs `after`.
-    fn add(&self, name: &str, after: &str) {
-        let script = format!(
-            r#"#!/bin/sh
-dir="${{0%/*}}"
-n=0
-[ -f "$dir/{name}.count" ] && read -r n < "$dir/{name}.count"
-n=$((n + 1))
-echo "$n" > "$dir/{name}.count"
-printf '%s\n' "$@" > "$dir/{name}.args.$n"
-[ -t 0 ] || /bin/cat > "$dir/{name}.input.$n"
-{after}
-"#
-        );
-        let path = self.dir.path().join(name);
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    /// An fzf that picks `$PICK` the first time and is cancelled (status 130) after that.
-    fn fzf(&self) {
-        self.add(
-            "fzf",
-            r#"if [ "$n" = 1 ]; then printf '%s\n' "$PICK"; exit 0; fi
-exit 130"#,
-        );
-    }
-
-    fn less(&self) {
-        self.add("less", "exit 0");
-    }
-
-    fn read(&self, file: &str) -> Option<String> {
-        std::fs::read_to_string(self.dir.path().join(file)).ok()
-    }
-
-    fn calls(&self, name: &str) -> usize {
-        self.read(&format!("{name}.count"))
-            .map_or(0, |count| count.trim().parse().unwrap())
-    }
-
-    fn args(&self, name: &str, call: usize) -> Vec<String> {
-        self.read(&format!("{name}.args.{call}"))
-            .unwrap_or_else(|| panic!("{name} call {call} left no arguments"))
-            .lines()
-            .map(String::from)
-            .collect()
-    }
-
-    fn input(&self, name: &str, call: usize) -> Option<String> {
-        self.read(&format!("{name}.input.{call}"))
-    }
-
     /// `help` with only these fakes on `PATH`, in a home with a guide when `guide` says so.
     fn help(&self, home: &Path, pick: &str) -> Command {
         let mut command = Command::new(EXE);
@@ -580,85 +505,6 @@ fn home_with_guide() -> (TempDir, String) {
     std::fs::write(&guide, "the guide\n").unwrap();
     let shown = guide.to_str().unwrap().to_string();
     (home, shown)
-}
-
-/// Run `command` with a pseudo-terminal for its input and output, after typing `typed` on it. Give
-/// what it wrote to its error output and to the terminal, and its exit status.
-fn on_a_terminal(mut command: Command, typed: &str) -> (i32, String, String) {
-    let (mut master, mut slave) = (0, 0);
-    // SAFETY: fills in two file descriptors; the null pointers ask for no name, mode or size.
-    let opened = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(opened, 0, "openpty");
-    // SAFETY: both descriptors are new and owned by nobody else.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    // Raw: what is typed is not echoed, and the output's line ends stay as they are.
-    // SAFETY: `termios` is plain data that `tcgetattr` fills in before it is used.
-    unsafe {
-        let mut mode: libc::termios = std::mem::zeroed();
-        assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut mode), 0);
-        libc::cfmakeraw(&mut mode);
-        assert_eq!(libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &mode), 0);
-    }
-    let written = unsafe { libc::write(master.as_raw_fd(), typed.as_ptr().cast(), typed.len()) };
-    assert_eq!(written, typed.len() as isize, "type on the terminal");
-    command
-        .stdin(Stdio::from(slave.try_clone().unwrap()))
-        .stdout(Stdio::from(slave.try_clone().unwrap()))
-        .stderr(Stdio::piped());
-    let child = command.spawn().unwrap();
-    drop(command);
-    drop(slave);
-
-    // Everything the child writes must be read, or a full terminal holds it up.
-    let reader = thread::spawn(move || {
-        let mut shown = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            // SAFETY: reads into `buffer`, which is that long.
-            let count = unsafe { libc::read(master.as_raw_fd(), buffer.as_mut_ptr().cast(), 4096) };
-            if count <= 0 {
-                return shown;
-            }
-            shown.extend_from_slice(&buffer[..count as usize]);
-        }
-    });
-    let (pid, finished) = (child.id() as i32, Arc::new(AtomicBool::new(false)));
-    let watchdog = Arc::clone(&finished);
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(30));
-        if !watchdog.load(Ordering::Relaxed) {
-            // SAFETY: ends a child that does not finish.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-    });
-    let out = child.wait_with_output().unwrap();
-    finished.store(true, Ordering::Relaxed);
-    let shown = text(&reader.join().unwrap());
-    (out.status.code().unwrap_or(-1), text(&out.stderr), shown)
-}
-
-/// The path the binary shows for itself in previews: the binary, as the home has no link to it.
-fn self_path() -> String {
-    std::fs::canonicalize(EXE).unwrap().to_str().unwrap().into()
-}
-
-fn shell_quote(text: &str) -> String {
-    if text
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
-    {
-        text.to_string()
-    } else {
-        format!("'{}'", text.replace('\'', r#"'"'"'"#))
-    }
 }
 
 #[test]

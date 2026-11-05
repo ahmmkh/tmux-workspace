@@ -66,6 +66,13 @@ impl Tmux {
         self
     }
 
+    /// Run this program instead of `tmux`: a script that stands in for it in a test.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn program(mut self, program: &str) -> Self {
+        self.program = program.to_string();
+        self
+    }
+
     /// Kill a call that takes longer.
     pub fn timeout(mut self, limit: Duration) -> Self {
         self.timeout = Some(limit);
@@ -276,7 +283,7 @@ fn py_splitlines(text: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::ScratchTmux;
+    use crate::testing::{ScratchTmux, ScriptedTmux};
 
     fn client(scratch: &ScratchTmux) -> Tmux {
         Tmux::new().socket(scratch.socket())
@@ -289,6 +296,37 @@ mod tests {
             "a\x1fb"
         );
         assert_eq!(unescape_sep("a\\037b", &["capture-pane", "-p"]), "a\\037b"); // captured text untouched
+    }
+
+    // tests/test_agent_status.py::RollUp::test_tmux_3_4_escaped_separator_is_read
+    #[test]
+    fn tmux_3_4_escaped_separator_is_read() {
+        // tmux 3.4 prints the \x1f field separator as the four characters \037 when not on a terminal.
+        let escaped = ScriptedTmux::new("smoke\\037%0\\037label\n", 0);
+        let rows = escaped
+            .client()
+            .fields(
+                "list-panes",
+                &["session_name", "pane_id", "@workspace_label"],
+                &["-a"],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("session_name"), "smoke");
+        assert_eq!(rows[0].get("pane_id"), "%0");
+        assert_eq!(rows[0].get("@workspace_label"), "label");
+    }
+
+    // tests/test_agent_status.py::RollUp::test_captured_text_is_never_unescaped
+    #[test]
+    fn captured_text_is_never_unescaped() {
+        let text = ScriptedTmux::new("printf \"\\037\"\n", 0);
+        assert_eq!(
+            text.client()
+                .run(&["capture-pane", "-p", "-t", "%1"])
+                .unwrap(),
+            "printf \"\\037\""
+        );
     }
 
     #[test]

@@ -209,6 +209,43 @@ impl Drop for ScratchTmux {
     }
 }
 
+/// A `tmux` that is a script: it records every call and prints a fixed answer. For the tests of what the
+/// client makes of tmux's output, and of how often it asks.
+pub struct ScriptedTmux {
+    dir: TempDir,
+}
+
+impl ScriptedTmux {
+    /// A tmux that prints `stdout` and exits with `status`, whatever it is asked.
+    pub fn new(stdout: &str, status: i32) -> ScriptedTmux {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        std::fs::write(dir.path().join("stdout"), stdout).expect("write the answer");
+        let script = format!(
+            "#!/bin/sh\ndir=\"${{0%/*}}\"\nfor a in \"$@\"; do printf '%s\\037' \"$a\"; done >> \"$dir/calls\"\n\
+             printf '\\n' >> \"$dir/calls\"\n/bin/cat \"$dir/stdout\"\nexit {status}\n"
+        );
+        let path = dir.path().join("tmux");
+        std::fs::write(&path, script).expect("write the script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make the script runnable");
+        ScriptedTmux { dir }
+    }
+
+    /// A client that runs the script.
+    pub fn client(&self) -> crate::tmux::Tmux {
+        crate::tmux::Tmux::new().program(&self.dir.path().join("tmux").to_string_lossy())
+    }
+
+    /// The arguments of every call so far, in order.
+    pub fn calls(&self) -> Vec<Vec<String>> {
+        let text = std::fs::read_to_string(self.dir.path().join("calls")).unwrap_or_default();
+        text.lines()
+            .map(|line| line.split_terminator('\x1f').map(str::to_string).collect())
+            .collect()
+    }
+}
+
 /// One process of a [`FakeHost`]: what `ps` would say about it.
 #[derive(Clone, Debug, Default)]
 pub struct Proc {

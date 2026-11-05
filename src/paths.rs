@@ -174,6 +174,35 @@ pub fn normalize(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
+/// Python's `Path.resolve()`: the absolute path with every symlink followed. A part that does not
+/// exist yet is kept as it is, so a folder that is about to be made resolves too.
+pub fn resolve(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+    };
+    let parts: Vec<Component> = absolute.components().collect();
+    // The longest prefix that exists is resolved by the OS; a `..` after it takes its parent.
+    for existing in (1..=parts.len()).rev() {
+        let prefix: PathBuf = parts[..existing].iter().collect();
+        let Ok(mut resolved) = prefix.canonicalize() else {
+            continue;
+        };
+        for part in &parts[existing..] {
+            match part {
+                Component::ParentDir => {
+                    resolved.pop();
+                }
+                Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
+        return resolved;
+    }
+    normalize(&absolute)
+}
+
 /// `$HOME`, else the password database. `/` when neither answers.
 pub fn home() -> PathBuf {
     home_from(std::env::var_os("HOME"))
@@ -437,6 +466,39 @@ mod tests {
             fs::write(&path, dumps(value, Style::Default, false)).unwrap();
             path
         }
+    }
+
+    #[test]
+    fn resolve_follows_links_and_keeps_what_does_not_exist_yet() {
+        let tmp = TempDir::new();
+        let real = tmp.path().canonicalize().unwrap();
+        fs::create_dir(real.join("projects")).unwrap();
+        symlink(real.join("projects"), real.join("link")).unwrap();
+        // A link is followed, also in the middle of a path.
+        assert_eq!(resolve(&real.join("link")), real.join("projects"));
+        assert_eq!(
+            resolve(&real.join("link/new/deeper")),
+            real.join("projects/new/deeper")
+        );
+        // A `..` takes the parent of what is resolved so far, also past a part that is not there.
+        assert_eq!(
+            resolve(&real.join("link/../projects/a")),
+            real.join("projects/a")
+        );
+        assert_eq!(resolve(&real.join("missing/../b")), real.join("b"));
+        // Repeated and inner `.` parts go; the root stays the root.
+        assert_eq!(
+            resolve(&real.join("projects/./x//y")),
+            real.join("projects/x/y")
+        );
+        assert_eq!(resolve(Path::new("/")), Path::new("/"));
+        // A relative path is taken from the working directory.
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            resolve(Path::new("nothing-here/x")),
+            cwd.join("nothing-here/x")
+        );
+        assert_eq!(resolve(Path::new(".")), cwd);
     }
 
     // tests/test_portability.py::Config

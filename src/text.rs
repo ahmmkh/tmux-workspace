@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::error::{Result, fail};
+use crate::error::{Result, fail, py_repr_str};
 
 /// Code points `str.isprintable()` rejects, other than Cc (`char::is_control`): Zs except the
 /// space, Zl, Zp, Co, and the Cf characters Python lists. Sorted and non-overlapping, inclusive.
@@ -265,6 +265,16 @@ pub fn py_strip(s: &str) -> &str {
     s.trim_matches(is_py_space)
 }
 
+/// `int(s)` for decimal text: surrounding whitespace and a sign are allowed. The error carries Python's message.
+pub fn py_int(s: &str) -> Result<i128> {
+    py_strip(s).parse().or_else(|_| {
+        fail(format!(
+            "invalid literal for int() with base 10: {}",
+            py_repr_str(s)
+        ))
+    })
+}
+
 /// `s.splitlines()`: lines end at `\n`, `\r`, `\r\n`, `\v`, `\f`, U+001C to U+001E, U+0085, U+2028 and U+2029.
 pub fn py_splitlines(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
@@ -506,6 +516,20 @@ mod tests {
         assert_eq!(ljust("é😀", 4), "é😀  ");
         assert_eq!(ljust("abcdef", 3), "abcdef");
         assert_eq!(ljust("", 2), "  ");
+    }
+
+    #[test]
+    fn py_int_reads_decimal_text_like_int() {
+        assert_eq!(py_int("300").unwrap(), 300);
+        assert_eq!(py_int(" -5\n").unwrap(), -5);
+        assert_eq!(py_int("+7").unwrap(), 7);
+        for bad in ["", "soon", "1.5", "0x10"] {
+            assert_eq!(
+                py_int(bad).unwrap_err().to_string(),
+                format!("invalid literal for int() with base 10: '{bad}'"),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
 //! The binary's top level: dispatch, the error contract and the process trace.
 
+mod common;
+
 use tmux_workspace::testing::{ScratchTmux, TempDir};
 
-const EXE: &str = env!("CARGO_BIN_EXE_tmux-workspace");
+const EXE: &str = common::EXE;
 
 #[test]
 fn unknown_command_reports_and_exits_1() {
@@ -64,13 +66,21 @@ fn outside_tmux_the_message_goes_to_stdout_and_no_tmux_runs() {
 
 #[test]
 fn no_argument_dispatches_open() {
-    // `open` is ported in a later task; until then the dispatcher reports it as unknown.
+    // `open` without a workspace name is the picker, which needs fzf or sesh and a terminal: on a
+    // `PATH` that has only tmux, it says what to install. (Not a terminal: stdin is closed.)
     let scratch = ScratchTmux::new();
-    let out = scratch.bin(EXE).output().unwrap();
+    let fakes = common::Fakes::new();
+    fakes.real_tmux();
+    let out = common::quietly({
+        let mut command = scratch.bin(EXE);
+        command.env("PATH", fakes.path());
+        command
+    });
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "Workspace error: Unknown workspace command: open\n"
+        "Workspace error: Install fzf to pick a workspace, or run: work NAME\n"
     );
+    assert_eq!(out.status.code(), Some(1));
 }
 
 /// `tmux-workspace setup`, run in a scratch world. A pipe is not a terminal, so these take the
