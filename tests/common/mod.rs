@@ -3,15 +3,15 @@
 
 #![allow(dead_code)]
 
+use std::ffi::OsString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use tmux_workspace::testing::TempDir;
+use tmux_workspace::testing::{TempDir, write_script};
 
 pub const EXE: &str = env!("CARGO_BIN_EXE_tmux-workspace");
 
@@ -33,8 +33,20 @@ impl Fakes {
         }
     }
 
-    /// A program `name` that records itself, then runs `after`.
+    /// A program `name` that records itself, then runs `after`. Not `tmux`: that name is for
+    /// `real_tmux`, `outside_tmux` and `stand_in_tmux`, which leave no way to the developer's server.
     pub fn add(&self, name: &str, after: &str) {
+        assert_ne!(name, "tmux", "Fakes::add refuses tmux; see stand_in_tmux");
+        self.install(name, after);
+    }
+
+    /// A tmux of the test's own, in place of any other: it records its calls and runs `after`, so it
+    /// reaches no server unless `after` sends it to one.
+    pub fn stand_in_tmux(&self, after: &str) {
+        self.install("tmux", after);
+    }
+
+    fn install(&self, name: &str, after: &str) {
         let script = format!(
             r#"#!/bin/sh
 dir="${{0%/*}}"
@@ -47,9 +59,7 @@ printf '%s\n' "$@" > "$dir/{name}.args.$n"
 {after}
 "#
         );
-        let path = self.dir.path().join(name);
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&self.dir.path().join(name), &script);
     }
 
     /// An fzf that picks `$PICK` the first time and is cancelled (status 130) after that.
@@ -216,28 +226,39 @@ exit 0"#
     pub fn real_tmux(&self) {
         std::os::unix::fs::symlink(find_in_path("tmux"), self.path().join("tmux")).unwrap();
     }
+}
 
-    /// A `tmux` for a run outside tmux: every command goes to the server on `socket`, except
-    /// `attach-session`, which is recorded in `attach.args` (one argument per line) and does nothing. So a
-    /// test sees where `work` would have attached without a terminal being taken over.
-    pub fn tmux_outside(&self, socket: &str) {
-        let real = find_in_path("tmux");
-        let script = format!(
-            r#"#!/bin/sh
+/// Make `command` a run outside tmux (no `TMUX`, no `TMUX_PANE`) that still cannot reach any server but
+/// the one on `socket`. A `tmux` is installed in `dir`, over whatever is there (the link to the real
+/// tmux of `Fakes::real_tmux` included), and put first on the `PATH` the command has. Every command it
+/// is given goes to the server on `socket`, except `attach-session`, which is recorded in `attach.args`
+/// (one argument per line) and does nothing: a test sees where `work` would have attached without a
+/// terminal being taken over. Call it after the `PATH` of the command is set. Give the path of a
+/// socket where no server runs for a command that must not reach tmux at all.
+pub fn outside_tmux<'a>(command: &'a mut Command, dir: &Path, socket: &str) -> &'a mut Command {
+    let real = find_in_path("tmux");
+    let script = format!(
+        r#"#!/bin/sh
 dir="${{0%/*}}"
 case "$1" in
   attach-session) printf '%s\n' "$@" > "$dir/attach.args"; exit 0;;
 esac
 exec '{}' -u -S '{socket}' "$@"
 "#,
-            real.display()
-        );
-        let path = self.path().join("tmux");
-        // Not a write through a link to the real tmux.
-        let _ = std::fs::remove_file(&path);
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+        real.display()
+    );
+    write_script(&dir.join("tmux"), &script);
+    let own = command
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .map(|(_, value)| value.map(OsString::from));
+    let path = own.flatten().or_else(|| std::env::var_os("PATH"));
+    let mut dirs = vec![dir.to_path_buf()];
+    dirs.extend(std::env::split_paths(&path.unwrap_or_default()).filter(|other| other != dir));
+    command
+        .env("PATH", std::env::join_paths(dirs).unwrap())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
 }
 
 /// The first `name` on the real `PATH`.

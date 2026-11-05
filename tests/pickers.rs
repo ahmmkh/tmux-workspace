@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{EXE, Fakes, on_a_terminal, quietly, started, text};
+use common::{EXE, Fakes, on_a_terminal, outside_tmux, quietly, started, text};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -85,6 +85,15 @@ impl World {
             .current_dir(self.work.path())
             .env("PATH", self.fakes.path())
             .env("TMUX_WORKSPACE_SHARE", self.share.path());
+        command
+    }
+
+    /// The binary run outside tmux, as `bin`: the `tmux` it finds sends everything to the scratch server and
+    /// only records `attach-session`. It is installed here every time, so no run outside tmux can
+    /// reach another server, nor leave a link to the real tmux in the way.
+    fn outside_bin(&self, args: &[&str]) -> Command {
+        let mut command = self.bin(args);
+        outside_tmux(&mut command, self.fakes.path(), self.scratch.socket());
         command
     }
 
@@ -736,10 +745,7 @@ fn a_projects_folder_that_cannot_be_made_is_an_error() {
 #[test]
 fn outside_tmux_the_workspace_is_attached_with_exec() {
     let world = World::new();
-    world.fakes.tmux_outside(world.scratch.socket());
-    let mut command = world.bin(&["open", "alpha"]);
-    command.env_remove("TMUX");
-    let out = quietly(command);
+    let out = quietly(world.outside_bin(&["open", "alpha"]));
     assert_eq!(
         (text(&out.stderr).as_str(), out.status.code()),
         ("", Some(0))
@@ -747,9 +753,7 @@ fn outside_tmux_the_workspace_is_attached_with_exec() {
     let attached = std::fs::read_to_string(world.fakes.path().join("attach.args")).unwrap();
     assert_eq!(attached, "attach-session\n-t\n=alpha\n");
     // A new workspace is made first.
-    let mut command = world.bin(&["open", "fresh"]);
-    command.env_remove("TMUX");
-    let out = quietly(command);
+    let out = quietly(world.outside_bin(&["open", "fresh"]));
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(world.sessions(), ["alpha", "fresh"]);
     let attached = std::fs::read_to_string(world.fakes.path().join("attach.args")).unwrap();
@@ -1061,25 +1065,18 @@ fn a_workspace_named_on_the_command_line_is_closed() {
 fn outside_tmux_the_closing_is_told_on_stdout() {
     let world = World::new();
     world.session("beta", &world.folder("beta"));
-    world.fakes.tmux_outside(world.scratch.socket());
-    let mut command = world.bin(&["kill-workspace", "beta"]);
-    command.env_remove("TMUX");
-    let out = quietly(command);
+    let out = quietly(world.outside_bin(&["kill-workspace", "beta"]));
     assert_eq!(text(&out.stdout), "Workspace 'beta' closed.\n");
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(world.sessions(), ["alpha"]);
 
-    let mut command = world.bin(&["kill-workspace", "nope"]);
-    command.env_remove("TMUX");
-    let out = quietly(command);
+    let out = quietly(world.outside_bin(&["kill-workspace", "nope"]));
     assert_eq!(text(&out.stdout), "Workspace 'nope' not found.\n");
     assert_eq!(world.sessions(), ["alpha"]);
     // The parking session is not a workspace.
     world.scratch.tmux(&["new-session", "-d", "-s", "__parked"]);
-    let mut command = world.bin(&["kill-workspace", "__parked"]);
-    command.env_remove("TMUX");
     assert_eq!(
-        text(&quietly(command).stdout),
+        text(&quietly(world.outside_bin(&["kill-workspace", "__parked"])).stdout),
         "Workspace '__parked' not found.\n"
     );
     assert_eq!(world.sessions(), ["__parked", "alpha"]);
@@ -1133,10 +1130,7 @@ fn with_no_workspace_there_is_nothing_to_close() {
     let world = World::new();
     world.scratch.tmux(&["new-session", "-d", "-s", "__parked"]);
     world.scratch.tmux(&["kill-session", "-t", "alpha"]);
-    world.fakes.tmux_outside(world.scratch.socket());
-    let mut command = world.bin(&["kill-workspace", "alpha"]);
-    command.env_remove("TMUX");
-    let out = quietly(command);
+    let out = quietly(world.outside_bin(&["kill-workspace", "alpha"]));
     assert_eq!(text(&out.stdout), "No active workspaces to delete.\n");
     assert_eq!(out.status.code(), Some(0));
 }
@@ -1145,12 +1139,7 @@ fn with_no_workspace_there_is_nothing_to_close() {
 fn on_a_terminal_closing_is_confirmed_first() {
     let world = World::new();
     world.session("beta", &world.folder("beta"));
-    world.fakes.tmux_outside(world.scratch.socket());
-    let outside = |args: &[&str]| {
-        let mut command = world.bin(args);
-        command.env_remove("TMUX");
-        command
-    };
+    let outside = |args: &[&str]| world.outside_bin(args);
     // No, and an empty answer, keep it. (The end of input is a unit test: a terminal has none.)
     for typed in ["n\n", "\n"] {
         let (status, stderr, shown) = on_a_terminal(outside(&["kill-workspace", "beta"]), typed);
@@ -1173,12 +1162,7 @@ fn without_a_name_a_workspace_is_chosen_from_a_numbered_list_or_fzf() {
     let world = World::new();
     world.session("beta", &world.folder("beta"));
     world.session("gamma", &world.folder("gamma"));
-    world.fakes.tmux_outside(world.scratch.socket());
-    let outside = |args: &[&str]| {
-        let mut command = world.bin(args);
-        command.env_remove("TMUX");
-        command
-    };
+    let outside = |args: &[&str]| world.outside_bin(args);
     // No fzf: a list. The number is asked for, then the confirmation.
     let (status, stderr, shown) = on_a_terminal(outside(&["kill-workspace"]), "2\ny\n");
     assert_eq!((status, stderr.as_str()), (0, ""));

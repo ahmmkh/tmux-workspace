@@ -45,13 +45,12 @@ fn outside_tmux_the_message_goes_to_stdout_and_no_tmux_runs() {
     let scratch = ScratchTmux::new();
     let dir = TempDir::new();
     let trace = dir.path().join("trace");
-    let out = scratch
-        .bin(EXE)
-        .arg("nope")
-        .env_remove("TMUX")
-        .env("TMUX_WORKSPACE_TRACE", &trace)
-        .output()
-        .unwrap();
+    let mut command = scratch.bin(EXE);
+    command.arg("nope").env("TMUX_WORKSPACE_TRACE", &trace);
+    // Outside tmux, and with a tmux on `PATH` that goes to the scratch server: were one to run, it
+    // would show in the trace and still not reach another server.
+    common::outside_tmux(&mut command, dir.path(), scratch.socket());
+    let out = command.output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         "Workspace error: Unknown workspace command: nope\n"
@@ -398,7 +397,6 @@ exit 7"#,
 mod agent_hook_shim {
     use super::*;
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
 
@@ -427,15 +425,13 @@ mod agent_hook_shim {
         let bin = home.path().join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("tmux-workspace");
-        std::fs::write(
+        tmux_workspace::testing::write_script(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}/argv'\n/bin/cat > '{0}/stdin'\necho out\necho err >&2\nexit 3\n",
                 home.path().display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         // Not text: the bytes pass through untouched.
         let input = b"{\"session_id\": \"s\"}\xff\x00 and no newline";
         let out = run(home.path(), &["claude"], input);
@@ -457,5 +453,59 @@ mod agent_hook_shim {
         assert_eq!(out.stdout, b"");
         assert_eq!(out.stderr, b"");
         assert_eq!(out.status.code(), Some(0));
+    }
+}
+
+/// The shared helpers keep a test away from the developer's tmux and from the programs they installed.
+mod harness {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    #[should_panic(expected = "Fakes::add refuses tmux")]
+    fn fakes_do_not_take_the_name_tmux() {
+        common::Fakes::new().add("tmux", "exit 0");
+    }
+
+    #[test]
+    fn a_run_outside_tmux_gets_a_tmux_that_goes_to_the_scratch_server_only() {
+        let scratch = ScratchTmux::new();
+        let fakes = common::Fakes::new();
+        fakes.real_tmux();
+        let real = common::find_in_path("tmux");
+        let before = std::fs::metadata(&real).unwrap();
+        let list = |socket: &str| {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "tmux list-sessions -F '#{session_name}'; echo \"[$TMUX|$TMUX_PANE]\"",
+                ])
+                .env("PATH", fakes.path())
+                // What the developer's own tmux window would have set.
+                .env("TMUX", "/not/a/socket,1,0")
+                .env("TMUX_PANE", "%9");
+            common::outside_tmux(&mut command, fakes.path(), socket);
+            common::quietly(command)
+        };
+        let out = list(scratch.socket());
+        assert_eq!(common::text(&out.stdout), "alpha\n[|]\n");
+        // The link to the real tmux was replaced by the wrapper, not written through.
+        assert!(std::fs::read_link(fakes.path().join("tmux")).is_err());
+        let after = std::fs::metadata(&real).unwrap();
+        assert_eq!(
+            (before.len(), before.modified().unwrap()),
+            (after.len(), after.modified().unwrap())
+        );
+        // A socket where nobody listens: the command fails, whatever server the developer runs.
+        let nobody = fakes.path().join("nobody-listens");
+        let out = list(nobody.to_str().unwrap());
+        assert_eq!(common::text(&out.stdout), "[|]\n");
+        // tmux names the socket it could not reach.
+        assert!(
+            common::text(&out.stderr).contains("nobody-listens"),
+            "{}",
+            common::text(&out.stderr)
+        );
     }
 }

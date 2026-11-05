@@ -398,16 +398,23 @@ fn python(args: &[&str]) -> String {
     text(&out.stdout)
 }
 
+/// Make `command` a run outside tmux whose `tmux`, were it to run one, finds no server: the one in `bin`
+/// asks a socket nobody listens on.
+fn no_tmux(command: &mut Command, bin: &Path) {
+    std::fs::create_dir_all(bin).unwrap();
+    let nobody = bin.join("no-server");
+    common::outside_tmux(command, bin, nobody.to_str().unwrap());
+}
+
 /// The binary with a home of its own, outside tmux, and no terminal.
 fn plain(home: &Path) -> Command {
     let mut command = Command::new(EXE);
     command
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
         .env("HOME", home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    no_tmux(&mut command, &home.join(".outside-bin"));
     command
 }
 
@@ -487,11 +494,10 @@ impl Fakes {
         let mut command = Command::new(EXE);
         command
             .arg("help")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
             .env("HOME", home)
             .env("PATH", self.dir.path())
             .env("PICK", pick);
+        no_tmux(&mut command, self.dir.path());
         command
     }
 }

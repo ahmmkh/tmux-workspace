@@ -50,6 +50,30 @@ fn inherited_to_remove(keys: impl IntoIterator<Item = OsString>) -> Vec<OsString
     remove
 }
 
+/// Write a runnable script (mode 0755) that is a file of its own. Whatever is at `path` is unlinked
+/// first, a link included, and the new file is created exclusively, so a write can never follow a link
+/// to a real program (a Homebrew `tmux` or a developer's `fzf`). Only a missing file is no error.
+pub fn write_script(path: &Path, body: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("unlink {}: {e}", path.display()),
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .open(path)
+        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+    file.write_all(body.as_bytes())
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    // The creation mode is cut by the umask.
+    file.set_permissions(std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+}
+
 /// A directory that is removed, with everything in it, when this is dropped.
 pub struct TempDir {
     path: PathBuf,
@@ -222,17 +246,13 @@ pub struct ScriptedTmux {
 impl ScriptedTmux {
     /// A tmux that prints `stdout` and exits with `status`, whatever it is asked.
     pub fn new(stdout: &str, status: i32) -> ScriptedTmux {
-        use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new();
         std::fs::write(dir.path().join("stdout"), stdout).expect("write the answer");
         let script = format!(
             "#!/bin/sh\ndir=\"${{0%/*}}\"\nfor a in \"$@\"; do printf '%s\\037' \"$a\"; done >> \"$dir/calls\"\n\
              printf '\\n' >> \"$dir/calls\"\n/bin/cat \"$dir/stdout\"\nexit {status}\n"
         );
-        let path = dir.path().join("tmux");
-        std::fs::write(&path, script).expect("write the script");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("make the script runnable");
+        write_script(&dir.path().join("tmux"), &script);
         ScriptedTmux { dir }
     }
 
@@ -453,6 +473,31 @@ mod tests {
         std::fs::write(path.join("file"), "x").unwrap();
         drop(dir);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn write_script_replaces_a_link_and_never_writes_through_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let real = dir.path().join("real-tool");
+        std::fs::write(&real, "the real tool").unwrap();
+        let link = dir.path().join("tmux");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_script(&link, "#!/bin/sh\nexit 0\n");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "the real tool");
+        assert!(!link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&link).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        assert_eq!(link.metadata().unwrap().permissions().mode() & 0o777, 0o755);
+        // A link to nowhere is replaced as well, and a script that is there is rewritten.
+        let dangling = dir.path().join("fzf");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+        write_script(&dangling, "one");
+        write_script(&dangling, "two");
+        assert_eq!(std::fs::read_to_string(&dangling).unwrap(), "two");
+        assert!(!dir.path().join("nowhere").exists());
     }
 
     #[test]

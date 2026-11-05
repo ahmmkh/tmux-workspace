@@ -953,6 +953,8 @@ struct ControlClient {
 
 impl ControlClient {
     fn attach(scratch: &ScratchTmux, session: &str) -> ControlClient {
+        // `-S` names the scratch socket, so this tmux reaches no other server; `TMUX` goes because a
+        // client that has it set refuses to attach.
         let child = scratch
             .bin("tmux")
             .env_remove("TMUX")

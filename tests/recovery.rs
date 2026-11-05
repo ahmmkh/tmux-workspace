@@ -5,6 +5,8 @@
 //! `codex`, `omp` and `nvim` programs record how they were started, so no test ever execs a real
 //! login shell.
 
+mod common;
+
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -32,8 +34,7 @@ impl Fakes {
     }
 
     fn write(path: &Path, body: &str) {
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tmux_workspace::testing::write_script(path, &format!("#!/bin/sh\n{body}\n"));
     }
 
     /// A shell named `name` that appends `<program>|<arguments>|<$SHELL>` to the shell log and exits.
@@ -313,12 +314,13 @@ fn exec_shell_starts_the_shell_with_the_login_flag() {
 #[test]
 fn exec_shell_outside_tmux_still_finds_a_shell() {
     let world = World::new();
-    let out = world
-        .command(&["exec-shell"])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .unwrap();
+    let mut command = world.command(&["exec-shell"]);
+    common::outside_tmux(
+        &mut command,
+        &world.fakes.dir.path().join("bin"),
+        world.scratch.socket(),
+    );
+    let out = command.output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(world.fakes.shell_log().len(), 1);
 }
@@ -1372,15 +1374,13 @@ fn tick_and_init_schedule_the_next_tick_in_five_minutes() {
 fn tmux_without_capture(dir: &Path) -> String {
     let real = tmux_workspace::process::which("tmux").expect("tmux on PATH");
     let wrapper = dir.join("tmux");
-    std::fs::write(
+    tmux_workspace::testing::write_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = capture-pane ] && exit 1; done\nexec '{}' \"$@\"\n",
             real.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     format!(
         "{}:{}",
         dir.display(),

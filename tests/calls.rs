@@ -67,10 +67,8 @@ fn the_counter_matches_by_program_name() {
 /// A shell that does nothing and exits, so that `pane-start` ends at once and never starts the
 /// developer's own shell.
 fn quiet_shell(dir: &Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join("quiet-shell");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    tmux_workspace::testing::write_script(&path, "#!/bin/sh\nexit 0\n");
     path
 }
 

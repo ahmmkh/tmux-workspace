@@ -7,7 +7,7 @@ mod common;
 use common::{EXE, Fakes, text};
 use serde_json::{Value, json};
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tmux_workspace::integrations::{Target, install_on};
@@ -59,15 +59,12 @@ impl Machine {
 
     /// A tmux that reports `version` and has no server.
     fn tmux(&self, version: &str) {
-        self.fakes.add(
-            "tmux",
-            &format!(
-                r#"case "$1" in
+        self.fakes.stand_in_tmux(&format!(
+            r#"case "$1" in
   -V) echo '{version}';;
   *) echo 'no server running on /tmp/tmux-501/default' >&2; exit 1;;
 esac"#
-            ),
-        );
+        ));
     }
 
     /// `tw-clip which` and `tw-sound which` in the share folder name these tools.
@@ -76,8 +73,7 @@ esac"#
         fs::create_dir_all(&bin).unwrap();
         for (name, answer) in [("tw-clip", clip), ("tw-sound", sound)] {
             let path = bin.join(name);
-            fs::write(&path, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            tmux_workspace::testing::write_script(&path, &format!("#!/bin/sh\necho '{answer}'\n"));
         }
     }
 
