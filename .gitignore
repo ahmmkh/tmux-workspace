@@ -4,3 +4,7 @@ __pycache__/
 .env.*
 .DS_Store
 config.json
+/target
+/dist
+# The built (or downloaded) binary; install.sh puts it here once Task 11 moves the Python script out.
+/bin/tmux-workspace

@@ -1,0 +1,36 @@
+[package]
+name = "tmux-workspace"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Personal tmux controls and private, allowlisted workspace recovery"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tmux-workspace"
+path = "src/main.rs"
+
+[features]
+# Test support (ScratchTmux and friends) for the integration tests in tests/.
+testing = []
+
+[dependencies]
+libc = "0.2"
+# Codex identity reads Codex's state_*.sqlite (Task 5); declared now so Cargo.lock is settled.
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[[test]]
+name = "cli"
+required-features = ["testing"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"

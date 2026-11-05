@@ -28,6 +28,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tmux fzf shellcheck
       - run: tmux -V
+      - run: rustup component add clippy rustfmt
       - run: make lint test
 
   python39:

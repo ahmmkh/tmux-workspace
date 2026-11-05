@@ -5,12 +5,15 @@ SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh tests/install
 .PHONY: test lint test-install screenshots
 
 test:
+	cargo test --features testing
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
 lint:
 	shellcheck $(SHELL_SCRIPTS)
 	bash -n install.sh
 	for f in $(RUNTIME); do $(PYTHON) -m py_compile "$$f" || exit 1; done
+	cargo clippy --all-targets --features testing -- -D warnings
+	cargo fmt --check
 
 # Fresh Linux containers; pick some with: make test-install IMAGES="debian:12 alpine:3.20"
 test-install:
