@@ -10,6 +10,7 @@ pub mod process;
 pub mod tmuxcmd;
 
 use crate::error::Result;
+use crate::errorlog;
 use crate::host::{Host, RealHost};
 use crate::pyjson::{Style, dumps};
 use crate::text::now_ms;
@@ -134,7 +135,9 @@ fn publish(started: i64, args: &[String]) -> Option<String> {
     }
     let env = HookEnv::from_env()?;
     let payload = read_payload()?;
+    // The one thing a failure does: a line in errors.log, which only a failure pays for.
     run_at(started, mode, &payload, &env, &RealHost)
+        .inspect_err(|error| errorlog::record("agent-hook", error))
         .ok()
         .flatten()
 }

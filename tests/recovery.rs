@@ -1525,7 +1525,7 @@ fn history_opens_the_saved_text_of_the_pane_in_less() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: No saved history yet; use prefix Ctrl+s first\n"
+        "Workspace error: No saved history yet; use prefix Ctrl+s first\nReport it: work bug\n"
     );
     saved.controller(&["save"]);
     let (path, data) = saved.latest();
@@ -1546,7 +1546,7 @@ fn history_opens_the_saved_text_of_the_pane_in_less() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: This pane is not in the latest snapshot\n"
+        "Workspace error: This pane is not in the latest snapshot\nReport it: work bug\n"
     );
     assert_eq!(fakes.lines("less.log").len(), 1);
 }

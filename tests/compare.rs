@@ -1353,9 +1353,11 @@ fn same_failure(
     prepare: impl Fn(Side, &ScratchTmux, &Parking) -> Vec<String>,
 ) -> Outcome {
     let mut done = Vec::new();
+    let mut command_name = String::new();
     for side in BOTH {
         let (scratch, panes) = park_world();
         let args = prepare(side, &scratch, &panes);
+        command_name = args.first().cloned().unwrap_or_default();
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut command = cli(side, &scratch, &args);
         let wrapper = TempDir::new();
@@ -1364,12 +1366,25 @@ fn same_failure(
         }
         done.push((side, finish(command, typed)));
     }
-    let (python, rust) = (done.remove(0).1, done.remove(0).1);
+    let (python, mut rust) = (done.remove(0).1, done.remove(0).1);
     assert_eq!(python.stderr, expected, "python");
     assert_eq!(python.code, Some(1), "python");
+    // The Rust side ends with the offer of a report, which the Python never made, except for a command
+    // that nobody watches (the one in a pane's start); but for that line the two say the same.
+    let offered = command_name != "pane-start";
+    if offered {
+        rust.stderr = rust
+            .stderr
+            .strip_suffix(REPORT_IT)
+            .unwrap_or_else(|| panic!("no offer of a report: {:?}", rust.stderr))
+            .to_string();
+    }
     assert_eq!(python, rust);
     python
 }
+
+/// What a failing command of the Rust side adds to its error.
+const REPORT_IT: &str = "Report it: work bug\n";
 
 #[test]
 fn every_cli_error_text_matches() {

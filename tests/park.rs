@@ -112,7 +112,7 @@ impl World {
         let out = self.run_with(args, input);
         assert_eq!(
             text(&out.stderr),
-            format!("Workspace error: {message}\n"),
+            format!("Workspace error: {message}\nReport it: work bug\n"),
             "{args:?}"
         );
         assert_eq!(out.status.code(), Some(1), "{args:?}");
@@ -202,7 +202,7 @@ fn park_refuses_the_only_pane() {
     let out = scratch.bin(EXE).args(["park", &only]).output().unwrap();
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: This is the only pane. Create a split first, or switch windows.\n"
+        "Workspace error: This is the only pane. Create a split first, or switch windows.\nReport it: work bug\n"
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -379,7 +379,10 @@ fn choose_park_needs_a_parked_pane_before_it_asks() {
     let world = World::new();
     let out = world.run_with(&["choose-park", &world.first], "1\n");
     assert_eq!(text(&out.stdout), "");
-    assert_eq!(text(&out.stderr), "Workspace error: No parked panes\n");
+    assert_eq!(
+        text(&out.stderr),
+        "Workspace error: No parked panes\nReport it: work bug\n"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

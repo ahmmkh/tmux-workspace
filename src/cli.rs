@@ -2,6 +2,7 @@
 
 use crate::doctor;
 use crate::error::{Error, Result, fail};
+use crate::errorlog;
 use crate::help;
 use crate::hook;
 use crate::host::RealHost;
@@ -33,7 +34,7 @@ pub fn main() -> i32 {
         // SAFETY: `umask` only sets this process's file-creation mask; it cannot fail.
         unsafe { libc::umask(0o077) };
     }
-    exit_code(run(&args))
+    exit_code(command(&args), run(&args))
 }
 
 /// Whether a command runs with umask 077, so that what it creates, and what its children create,
@@ -265,14 +266,41 @@ fn pane_or_current(tmux: &Tmux, pane: Option<&String>) -> Result<String> {
     }
 }
 
+/// Commands that nobody watches, because tmux or an agent starts them: a failure is logged, and said
+/// on stderr, but never with the offer of a report. `bug` and `idea` are here as well: a report
+/// of their failure would be the report that failed.
+const UNWATCHED: [&str; 10] = [
+    "agent-hook",
+    "init",
+    "tick",
+    "save",
+    "pane-start",
+    "exec-shell",
+    "window-preview",
+    "help-topic",
+    "bug",
+    "idea",
+];
+
+/// What a failed command writes to stderr: the error, and the offer of a report for a command that
+/// somebody runs.
+fn failure_text(command: &str, error: &Error) -> String {
+    let mut text = format!("Workspace error: {error}\n");
+    if !UNWATCHED.contains(&command) {
+        text.push_str("Report it: work bug\n");
+    }
+    text
+}
+
 /// The error contract: a command's own status is passed on, end of input is not a failure, and any
-/// other error is reported and exits 1.
-fn exit_code(result: Result<i32>) -> i32 {
+/// other error is logged (see `errorlog`), reported and exits 1.
+fn exit_code(command: &str, result: Result<i32>) -> i32 {
     match result {
         Ok(status) => status,
         Err(Error::Eof) => 0,
         Err(error) => {
-            let _ = writeln!(std::io::stderr(), "Workspace error: {error}");
+            errorlog::record(command, &error);
+            let _ = write!(std::io::stderr(), "{}", failure_text(command, &error));
             message(&format!("Workspace: {error}"));
             1
         }
@@ -296,8 +324,8 @@ mod tests {
 
     #[test]
     fn eof_and_success_exit_zero_without_output() {
-        assert_eq!(exit_code(Ok(0)), 0);
-        assert_eq!(exit_code(Err(Error::Eof)), 0);
+        assert_eq!(exit_code("open", Ok(0)), 0);
+        assert_eq!(exit_code("open", Err(Error::Eof)), 0);
     }
 
     #[test]
@@ -310,8 +338,27 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_offers_a_report_unless_nobody_watches_the_command() {
+        let error = Error::Msg("boom".into());
+        assert_eq!(
+            failure_text("open", &error),
+            "Workspace error: boom\nReport it: work bug\n"
+        );
+        for command in UNWATCHED {
+            assert_eq!(
+                failure_text(command, &error),
+                "Workspace error: boom\n",
+                "{command}"
+            );
+        }
+        for command in ["setup", "doctor", "integrations", "update", "park", "nope"] {
+            assert!(failure_text(command, &error).ends_with("Report it: work bug\n"));
+        }
+    }
+
+    #[test]
     fn a_commands_own_status_is_the_exit_status() {
-        assert_eq!(exit_code(Ok(2)), 2);
+        assert_eq!(exit_code("open", Ok(2)), 2);
     }
 
     #[test]

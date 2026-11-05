@@ -421,7 +421,7 @@ fn without_fzf_sesh_or_a_terminal_the_error_says_what_to_install() {
     let out = world.run(&["open"]);
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: Install fzf to pick a workspace, or run: work NAME\n"
+        "Workspace error: Install fzf to pick a workspace, or run: work NAME\nReport it: work bug\n"
     );
     assert_eq!(out.status.code(), Some(1));
     // Without an argument, `open` is what runs.
@@ -430,7 +430,7 @@ fn without_fzf_sesh_or_a_terminal_the_error_says_what_to_install() {
     let out = quietly(command);
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: Install fzf to pick a workspace, or run: work NAME\n"
+        "Workspace error: Install fzf to pick a workspace, or run: work NAME\nReport it: work bug\n"
     );
 }
 
