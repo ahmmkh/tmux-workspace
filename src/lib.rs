@@ -2,12 +2,16 @@
 
 pub mod cli;
 pub mod error;
+pub mod help;
+mod help_topics;
 pub mod hook;
 pub mod host;
 pub mod model;
 pub mod onboarding;
 pub mod pane;
+pub mod park;
 pub mod paths;
+pub mod pick;
 pub mod process;
 pub mod pyjson;
 pub mod sha256;

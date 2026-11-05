@@ -278,3 +278,29 @@ fn a_tick_soon_after_a_save_makes_two_tmux_calls_and_no_ps() {
     );
     assert_eq!(started(&trace, "ps"), 0);
 }
+
+#[test]
+fn help_without_a_terminal_starts_no_process() {
+    let scratch = ScratchTmux::new();
+    let dir = TempDir::new();
+    let trace = dir.path().join("trace");
+    // The scratch home has no guide, and a pipe is not a terminal: help prints every topic.
+    let out = scratch
+        .bin(EXE)
+        .arg("help")
+        .env("TMUX_WORKSPACE_TRACE", &trace)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("=== Dashboard ===\n\n"));
+    assert_eq!(started(&trace, "tmux"), 0);
+    assert_eq!(started(&trace, "ps"), 0);
+    let text = std::fs::read_to_string(&trace).unwrap_or_default();
+    assert_eq!(text, "", "no child process of any kind");
+}

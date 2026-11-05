@@ -1,10 +1,12 @@
 //! The command line: which command runs, and what a failure looks like.
 
 use crate::error::{Error, Result, fail};
+use crate::help;
 use crate::hook;
 use crate::host::RealHost;
 use crate::onboarding;
 use crate::pane;
+use crate::park;
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
@@ -88,13 +90,35 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         }
         "history" => {
             let tmux = Tmux::new();
-            let pane = match args.first() {
-                Some(pane) => pane.clone(),
-                None => tmux.run(&["display-message", "-p", "#{pane_id}"])?,
-            };
+            let pane = pane_or_current(&tmux, args.first())?;
             snapshot::history(&tmux, &pane).map(|()| 0)
         }
+        "park" => {
+            let tmux = Tmux::new();
+            let pane = pane_or_current(&tmux, args.first())?;
+            park::park(&tmux, &pane).map(|()| 0)
+        }
+        "unpark" | "choose-park" => {
+            let tmux = Tmux::new();
+            let (target, direction) = park::unpark_args(args);
+            let target = pane_or_current(&tmux, target.as_ref())?;
+            park::unpark(&tmux, &target, &direction, command == "choose-park").map(|()| 0)
+        }
+        // Reads no pane and asks tmux nothing: fzf shows this program's own topics.
+        "help" => help::help_interactive().map(|()| 0),
+        "help-topic" => {
+            help::print_topic(args.first().map_or("", String::as_str));
+            Ok(0)
+        }
         _ => fail(format!("Unknown workspace command: {command}")),
+    }
+}
+
+/// The pane named, or else the one the command runs in.
+fn pane_or_current(tmux: &Tmux, pane: Option<&String>) -> Result<String> {
+    match pane {
+        Some(pane) => Ok(pane.clone()),
+        None => tmux.run(&["display-message", "-p", "#{pane_id}"]),
     }
 }
 

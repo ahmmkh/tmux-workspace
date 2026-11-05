@@ -41,6 +41,10 @@ required-features = ["testing"]
 name = "recovery"
 required-features = ["testing"]
 
+[[test]]
+name = "park"
+required-features = ["testing"]
+
 [profile.release]
 opt-level = 3
 lto = "thin"
