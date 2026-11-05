@@ -802,6 +802,32 @@ class Installer(unittest.TestCase):
         again = self.tool('update', **self.clone_env())
         self.assertIn(f'already up to date (2.0.1 {head[:7]})', again.stdout)
 
+    def test_update_of_a_clone_builds_the_new_version_before_the_pull(self):
+        clone = self.work / 'checkout'
+        upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
+        self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, **self.clone_env())
+        before = self.git(clone, 'rev-parse', 'HEAD')
+        head = self.commit(upstream, self.v2('2.0.1'), 'second')
+        log = self.work / 'cargo.log'
+        # A cargo that writes down where it builds, into which target folder, the clone's commit at that
+        # moment and the version it builds, then "builds" the binary.
+        self.stub('cargo', f'echo "$PWD|$CARGO_TARGET_DIR|$(git -C "{clone}" rev-parse HEAD)|'
+                           f'$(sed -n "s/^version = //p" Cargo.toml | head -n 1)|$*" >> "{log}"\n'
+                           'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+                           f'cp "{BINARY}" "$CARGO_TARGET_DIR/release/tmux-workspace"')
+        out = self.tool('update', TMUX_WORKSPACE_BINARY=None, **self.clone_env())
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        builds = log.read_text().splitlines()
+        self.assertEqual(len(builds), 1, 'the installer after the pull builds nothing again')
+        where, target, head_then, version, args = builds[0].split('|')
+        self.assertNotEqual(Path(where), clone, 'built from git archive, outside the clone')
+        self.assertEqual(target, str(clone / 'target'))
+        self.assertEqual(head_then, before, 'built before the pull')
+        self.assertEqual(version, '"2.0.1"', 'the new version is what is built')
+        self.assertEqual(args, 'build --release --locked')
+        self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), head)
+        self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+
     def test_update_refuses_a_clone_with_changes_or_on_another_branch(self):
         clone = self.work / 'checkout'
         upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
