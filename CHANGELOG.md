@@ -95,7 +95,7 @@ with 5 panes:
 ### Known issues
 
 - On tmux 3.4, a label, session or window name that contains `$` gains a backslash each time it is
-  restored, because tmux 3.4 prints `$` as `\$`. 1.x does the same; the fix is planned for 2.0.1.
+  restored, because tmux 3.4 prints `$` as `\$`. 1.x does the same; a later release fixes it.
 - On tmux 3.3, the tmux server needs a UTF-8 locale (for example `LANG=C.UTF-8`). Without one, save,
   park and the pickers fail with `A workspace name or directory contains unsupported control
   characters`. 1.x does the same; see Troubleshooting in the README.
