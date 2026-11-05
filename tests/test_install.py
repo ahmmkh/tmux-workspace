@@ -1,7 +1,10 @@
 """install.sh on a temporary HOME. PATH holds stubs and core utilities only, never the machine's tools.
 
 Nothing here downloads from GitHub: releases come from TMUX_WORKSPACE_DIST, a folder that scripts/package.sh
-fills with the binary `make build` made."""
+fills with the debug build `make build` made.
+
+Nothing here writes the checkout's bin/tmux-workspace either: in a clone that is also the live install, tmux
+runs it in every new pane. The installer runs from a copy of the checkout (checkout())."""
 import hashlib
 import io
 import json
@@ -24,7 +27,9 @@ CORE = ['uname', 'id', 'dirname', 'basename', 'readlink', 'mkdir', 'ln', 'mv', '
         'sed', 'tr', 'date', 'find', 'sort', 'mktemp', 'cat', 'rm', 'env', 'bash', 'sh', 'ls', 'head', 'base64',
         'tar', 'gzip', 'sha256sum', 'shasum', 'cmp']
 BLOCK = '# >>> tmux-workspace >>>'
-BINARY = ROOT / 'bin' / 'tmux-workspace'
+# The debug build in Cargo's target folder, or the binary that TMUX_WORKSPACE_BINARY names.
+BINARY = Path(os.environ.get('TMUX_WORKSPACE_BINARY')
+              or Path(os.environ.get('CARGO_TARGET_DIR') or ROOT / 'target') / 'debug' / 'tmux-workspace').resolve()
 VERSION = re.search(r'^version = "([^"]+)"', (ROOT / 'Cargo.toml').read_text(), re.M).group(1)
 TARGETS = {('Darwin', 'arm64'): 'aarch64-apple-darwin', ('Darwin', 'x86_64'): 'x86_64-apple-darwin',
            ('Linux', 'x86_64'): 'x86_64-unknown-linux-musl', ('Linux', 'aarch64'): 'aarch64-unknown-linux-musl',
@@ -34,7 +39,7 @@ ARCHIVE = f'tmux-workspace-{TARGET}.tar.gz'
 
 
 def package(outdir):
-    """scripts/package.sh for this machine's target, with the binary `make build` made instead of a release build."""
+    """scripts/package.sh for this machine's target, with the debug build instead of a release build."""
     env = {key: value for key, value in os.environ.items() if not key.startswith('TMUX')}
     env['TMUX_WORKSPACE_BINARY'] = str(BINARY)
     return subprocess.run(['sh', str(ROOT / 'scripts' / 'package.sh'), TARGET, str(outdir)], env=env,
@@ -48,7 +53,7 @@ def release_dist():
     """The release folder scripts/package.sh makes: the archive, SHA256SUMS and VERSION. Made once."""
     if not _DIST:
         if not BINARY.is_file():
-            raise unittest.SkipTest('bin/tmux-workspace is not built: run make build (make test does)')
+            raise unittest.SkipTest(f'{BINARY} is not built: run make build (make test does)')
         tmp = Path(tempfile.mkdtemp()).resolve()
         unittest.addModuleCleanup(shutil.rmtree, tmp, True)
         result = package(tmp / 'dist')
@@ -148,11 +153,27 @@ def copy_tree(dest):
     return dest
 
 
+_CHECKOUT = []
+
+
+def checkout():
+    """A copy of the checkout with the debug build in its bin/, made once: what the installer tests install
+    from. Never the checkout itself, whose bin/tmux-workspace may be the one a live install runs."""
+    if not _CHECKOUT:
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+        tree = copy_tree(tmp / 'tmux-workspace')
+        shutil.copy2(BINARY, tree / 'bin' / 'tmux-workspace')
+        _CHECKOUT.append(tree)
+    return _CHECKOUT[0]
+
+
 class Installer(unittest.TestCase):
     def setUp(self):
-        # install.sh links the binary that make build copies here, and runs it for the agent integrations.
+        # install.sh copies the debug build into bin/ of the checkout it runs from, links it, and runs it for
+        # the agent integrations.
         if not BINARY.is_file():
-            self.fail('bin/tmux-workspace is not built: run make build (make test does)')
+            self.fail(f'{BINARY} is not built: run make build (make test does)')
         self.home = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.home, True)
         self.bin = Path(tempfile.mkdtemp()).resolve()
@@ -198,7 +219,7 @@ class Installer(unittest.TestCase):
         return result
 
     def install(self, *flags, check=True, **extra):
-        return self.run_script(['/bin/bash', str(ROOT / 'install.sh'), *flags], check, **extra)
+        return self.run_script(['/bin/bash', str(checkout() / 'install.sh'), *flags], check, **extra)
 
     def piped(self, *flags, check=True, **extra):
         """install.sh the way `curl … | bash` runs it: the script on standard input, no clone around it."""
@@ -232,10 +253,11 @@ class Installer(unittest.TestCase):
 
     def test_fresh_install_links_everything(self):
         out = self.install('--yes').stdout
-        self.assertEqual((self.home / '.tmux.conf').resolve(), ROOT / 'tmux.conf')
-        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), ROOT / 'bin/tmux-workspace')
-        self.assertEqual((self.home / '.local/bin/tw-clip').resolve(), ROOT / 'bin/tw-clip')
-        self.assertEqual((self.home / '.config/tmux-workspace/agent-status.conf').resolve(), ROOT / 'agent-status.conf')
+        self.assertEqual((self.home / '.tmux.conf').resolve(), checkout() / 'tmux.conf')
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), checkout() / 'bin/tmux-workspace')
+        self.assertEqual((self.home / '.local/bin/tw-clip').resolve(), checkout() / 'bin/tw-clip')
+        self.assertEqual((self.home / '.config/tmux-workspace/agent-status.conf').resolve(),
+                         checkout() / 'agent-status.conf')
         config = self.home / '.config/tmux-workspace/config.json'
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
         self.assertIn(BLOCK, (self.home / '.zshrc').read_text())
@@ -253,7 +275,7 @@ class Installer(unittest.TestCase):
         original = b'set -g prefix C-b\n# mine\n'
         (self.home / '.tmux.conf').write_bytes(original)
         self.install('--yes')
-        self.assertEqual((self.home / '.tmux.conf').resolve(), ROOT / 'tmux.conf')
+        self.assertEqual((self.home / '.tmux.conf').resolve(), checkout() / 'tmux.conf')
         self.assertEqual(len(self.backups()), 1)
         self.install('--uninstall')
         self.assertFalse((self.home / '.tmux.conf').is_symlink())
@@ -266,7 +288,7 @@ class Installer(unittest.TestCase):
         self.assertIn('rerun with --yes', out)
 
     def test_link_into_same_clone_is_not_backed_up(self):
-        (self.home / '.tmux.conf').symlink_to(ROOT / 'tmux.conf')
+        (self.home / '.tmux.conf').symlink_to(checkout() / 'tmux.conf')
         self.install('--yes')
         self.assertFalse(self.backups())
 
@@ -276,7 +298,7 @@ class Installer(unittest.TestCase):
         other.write_text('other\n')
         (self.home / '.tmux.conf').symlink_to(other)
         self.install('--yes')
-        self.assertEqual((self.home / '.tmux.conf').resolve(), ROOT / 'tmux.conf')
+        self.assertEqual((self.home / '.tmux.conf').resolve(), checkout() / 'tmux.conf')
         self.assertIn('\tlink', self.backups()[0].read_text())
         self.install('--uninstall')
         self.assertEqual(os.readlink(self.home / '.tmux.conf'), str(other))
@@ -402,7 +424,7 @@ class Installer(unittest.TestCase):
         self.assertFalse(mine.is_symlink())
         self.assertIn('sesh.toml exists', out)
         self.install('--yes')
-        self.assertEqual(mine.resolve(), ROOT / 'sesh.toml')
+        self.assertEqual(mine.resolve(), checkout() / 'sesh.toml')
         self.install('--uninstall')
         self.assertEqual(mine.read_text(), 'mine\n')
 
@@ -423,7 +445,7 @@ class Installer(unittest.TestCase):
         def controlling_terminal():  # the pty becomes /dev/tty for install.sh
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-        proc = subprocess.Popen(['/bin/bash', str(ROOT / 'install.sh')], stdin=slave, stdout=slave, stderr=slave,
+        proc = subprocess.Popen(['/bin/bash', str(checkout() / 'install.sh')], stdin=slave, stdout=slave, stderr=slave,
                                 env=self.env(), preexec_fn=controlling_terminal)
         os.close(slave)
         output = b''

@@ -57,8 +57,8 @@ with 5 panes:
 - Hooks registered by 1.x call `agent-hook.py`; they keep working through a small shim until
   `install.sh --agents` (or a later `work update`) rewrites them to `tmux-workspace agent-hook`.
   Review the Codex entries with `/hooks` afterwards, and restart running agents.
-- Using a clone and updating it with `git pull`: run `./install.sh` (or `make build`) right after
-  pulling 2.0. `bin/tmux-workspace` is a build product now, and tmux starts it in every new pane.
+- Using a clone and updating it with `git pull`: run `./install.sh` right after pulling 2.0.
+  `bin/tmux-workspace` is a build product now, and tmux starts it in every new pane.
 
 ### Differences from 1.0.0
 

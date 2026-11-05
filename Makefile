@@ -6,17 +6,19 @@ TARGET ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p' | sed 's/-gnu$$/
 
 .PHONY: build test lint dist test-install screenshots stats bench
 
-# bin/tmux-workspace is the debug build, copied there (it is gitignored): install.sh links it, and the
-# Python tests and the demo run it from that path. The old file goes first: macOS can kill a signed
-# binary that was overwritten in place.
+# The debug build, in Cargo's target folder, which the tests run. Nothing here installs it: in a clone,
+# ./install.sh builds the release binary into bin/tmux-workspace (gitignored) and swaps it in at once.
 build:
 	cargo build
-	rm -f bin/tmux-workspace
-	install -m 755 target/debug/tmux-workspace bin/tmux-workspace
 
+# make test never writes bin/tmux-workspace: in a clone that is also the live install, tmux runs it in
+# every new pane. Its checksum from before the run (empty when it is absent) is checked at the end.
+test: LIVE_BINARY := $(shell cksum bin/tmux-workspace 2>/dev/null)
 test: build
 	cargo test --features testing
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+	@[ "$$(cksum bin/tmux-workspace 2>/dev/null)" = "$(LIVE_BINARY)" ] || \
+		{ echo 'make test: bin/tmux-workspace changed during the run' >&2; exit 1; }
 
 lint:
 	shellcheck $(SHELL_SCRIPTS)
@@ -33,7 +35,8 @@ dist:
 test-install:
 	tests/install/matrix.sh $(IMAGES)
 
-screenshots: build
+# Runs ./install.sh of this checkout in a sandbox HOME, which builds the release binary into bin/.
+screenshots:
 	$(PYTHON) scripts/demo.py
 
 # The five paths this program made fast, timed against the Python they replaced (needs hyperfine).

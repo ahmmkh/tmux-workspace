@@ -6,7 +6,7 @@ __pycache__/
 config.json
 /target
 /dist
-# The built (or downloaded) binary: make build and install.sh put it here.
+# The built (or downloaded) binary: install.sh puts it here.
 /bin/tmux-workspace
 # The release a downloaded binary came from: install.sh downloads it again when Cargo.toml moves on.
 /bin/tmux-workspace.version

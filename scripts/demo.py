@@ -191,7 +191,7 @@ class Demo:
 
     def onboarding(self):
         clone = self.home / 'tmux-workspace'
-        # The binary is not tracked: it is the build in bin/, which the clone needs to install from.
+        # The binary is not tracked: it is the build install() put in bin/, which the clone needs to install from.
         names = self.run('git', '-C', str(REPO), 'ls-files').split('\n') + ['bin/tmux-workspace']
         for name in names:
             if name and (REPO / name).is_file() and not name.startswith('docs/images/'):
@@ -247,8 +247,9 @@ class Demo:
 def main():
     if not shutil.which('tmux') or not shutil.which('fzf'):
         sys.exit('make screenshots needs tmux and fzf')
-    if not (REPO / 'bin' / 'tmux-workspace').is_file():
-        sys.exit('make screenshots needs the built binary: run make build')
+    # install() runs this checkout's install.sh, which builds the release binary into bin/ with it.
+    if not shutil.which('cargo'):
+        sys.exit('make screenshots needs cargo')
     demo = Demo()
     try:
         demo.install()
