@@ -514,15 +514,29 @@ fn prints_dollar_escaped(version: &str) -> bool {
         .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_lowercase()))
 }
 
-/// Poll `read` until it gives `expected`, for up to 20 s, then assert that it does. It returns as soon
-/// as `read` matches; the long limit is for a loaded machine, where a new pane can take seconds to
-/// start `sleep`.
+/// Poll `read` until it gives `expected` on `SETTLED_READS` polls in a row, for up to 20 s, then assert
+/// that the last read is `expected`. It returns as soon as that holds; the long limit is for a loaded
+/// machine, where a new pane can take seconds to start `sleep`.
+///
+/// One match is not enough. A new pane that is started with `exec sleep 300` is seen on Linux as `sleep`
+/// for a millisecond (tmux names the program from the command the pane was given while it cannot read
+/// `/proc/<pgrp>/cmdline`), then as the shell that has yet to run the `exec`, and then as `sleep` for
+/// good. A first match can be that first moment.
 pub fn wait_for(read: impl Fn() -> String, expected: &str) {
+    const SETTLED_READS: u32 = 3;
     let deadline = Instant::now() + Duration::from_secs(20);
-    while read() != expected && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(50));
+    let mut last = read();
+    let mut matches = 0;
+    loop {
+        matches = if last == expected { matches + 1 } else { 0 };
+        if matches >= SETTLED_READS || Instant::now() >= deadline {
+            break;
+        }
+        // A value that matched is read again soon; one that did not is waited for.
+        thread::sleep(Duration::from_millis(if matches > 0 { 20 } else { 50 }));
+        last = read();
     }
-    assert_eq!(read(), expected);
+    assert_eq!(last, expected);
 }
 
 #[cfg(test)]
