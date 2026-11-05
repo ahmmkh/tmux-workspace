@@ -51,27 +51,45 @@ fn inherited_to_remove(keys: impl IntoIterator<Item = OsString>) -> Vec<OsString
 }
 
 /// Write a runnable script (mode 0755) that is a file of its own. Whatever is at `path` is unlinked
-/// first, a link included, and the new file is created exclusively, so a write can never follow a link
-/// to a real program (a Homebrew `tmux` or a developer's `fzf`). Only a missing file is no error.
+/// first, a link included, and the new file is created exclusively (`set -C`), so a write can never
+/// follow a link to a real program (a Homebrew `tmux` or a developer's `fzf`). Only a missing file is
+/// no error.
+///
+/// A `/bin/sh` of its own writes the file, never this process: a child that another test thread forks
+/// takes every descriptor of this process along until it execs, and a script that is open for writing
+/// anywhere fails to run with "Text file busy".
 pub fn write_script(path: &Path, body: &str) {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::process::Stdio;
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => panic!("unlink {}: {e}", path.display()),
     }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o755)
-        .open(path)
-        .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
-    file.write_all(body.as_bytes())
-        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    // The creation mode is cut by the umask.
-    file.set_permissions(std::fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| panic!("chmod {}: {e}", path.display()));
+    let mut writer = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"set -C && umask 077 && cat >"$1" && chmod 755 "$1""#,
+            "sh",
+        ])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("start the writer of {}: {e}", path.display()));
+    let stdin = writer.stdin.take().expect("the writer's input");
+    // A writer that failed has closed its input; its own message says why.
+    let _ = { stdin }.write_all(body.as_bytes());
+    let out = writer
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("wait for the writer of {}: {e}", path.display()));
+    assert!(
+        out.status.success(),
+        "write {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
 }
 
 /// A directory that is removed, with everything in it, when this is dropped.
@@ -496,9 +514,11 @@ fn prints_dollar_escaped(version: &str) -> bool {
         .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_lowercase()))
 }
 
-/// Poll `read` until it gives `expected`, for up to 5 s, then assert that it does.
+/// Poll `read` until it gives `expected`, for up to 20 s, then assert that it does. It returns as soon
+/// as `read` matches; the long limit is for a loaded machine, where a new pane can take seconds to
+/// start `sleep`.
 pub fn wait_for(read: impl Fn() -> String, expected: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while read() != expected && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
@@ -567,6 +587,64 @@ mod tests {
         write_script(&dangling, "two");
         assert_eq!(std::fs::read_to_string(&dangling).unwrap(), "two");
         assert!(!dir.path().join("nowhere").exists());
+    }
+
+    /// Whether this process holds `path` open for writing right now.
+    #[allow(clippy::unnecessary_cast)] // dev_t and ino_t differ between macOS and Linux
+    fn open_for_writing(path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(target) = std::fs::metadata(path) else {
+            return false;
+        };
+        let Ok(entries) = std::fs::read_dir("/dev/fd") else {
+            return false;
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+            .any(|fd| {
+                // SAFETY: fstat and fcntl only read the state of a descriptor; one closed by now fails.
+                unsafe {
+                    let mut stat: libc::stat = std::mem::zeroed();
+                    libc::fstat(fd, &mut stat) == 0
+                        && stat.st_dev as u64 == target.dev()
+                        && stat.st_ino as u64 == target.ino()
+                        && libc::fcntl(fd, libc::F_GETFL) & libc::O_ACCMODE != libc::O_RDONLY
+                }
+            })
+    }
+
+    #[test]
+    fn a_fake_is_never_open_for_writing_in_the_test_process() {
+        // A child that another test thread forks holds every descriptor of this process until it
+        // execs, and a fake that is open for writing anywhere fails to run with "Text file busy".
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let dir = TempDir::new();
+        let path = dir.path().join("fake");
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let (path, done) = (path.clone(), Arc::clone(&done));
+            thread::spawn(move || {
+                let mut seen = false;
+                while !done.load(Ordering::Relaxed) {
+                    seen |= open_for_writing(&path);
+                }
+                seen
+            })
+        };
+        let body = format!("#!/bin/sh\n: '{}'\nexit 7\n", "x".repeat(16 << 20));
+        for _ in 0..3 {
+            write_script(&path, &body);
+        }
+        done.store(true, Ordering::Relaxed);
+        assert!(
+            !watcher.join().unwrap(),
+            "the test process held the fake open for writing"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), body.as_bytes());
+        let ran = Command::new(&path).status().unwrap();
+        assert_eq!(ran.code(), Some(7));
     }
 
     #[test]
