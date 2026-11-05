@@ -29,9 +29,11 @@ fn unique() -> String {
 }
 
 /// Which of the caller's variables a scratch command must not see: the tmux server and pane it may be
-/// running in, and every workspace setting. `TMUX` and `TMUX_PANE` are always on the list.
+/// running in, the config folder that would escape its temporary `HOME`, and every workspace setting.
+/// `TMUX`, `TMUX_PANE` and `XDG_CONFIG_HOME` are always on the list.
 fn inherited_to_remove(keys: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
-    let mut remove: Vec<OsString> = vec!["TMUX".into(), "TMUX_PANE".into()];
+    let mut remove: Vec<OsString> =
+        vec!["TMUX".into(), "TMUX_PANE".into(), "XDG_CONFIG_HOME".into()];
     remove.extend(
         keys.into_iter()
             .filter(|key| key.to_string_lossy().starts_with("TMUX_WORKSPACE_")),
@@ -319,6 +321,7 @@ mod tests {
             [
                 "TMUX",
                 "TMUX_PANE",
+                "XDG_CONFIG_HOME",
                 "TMUX_WORKSPACE_PROJECTS",
                 "TMUX_WORKSPACE_TRACE"
             ]

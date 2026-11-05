@@ -3,6 +3,9 @@
 pub mod cli;
 pub mod error;
 pub mod host;
+pub mod model;
+pub mod onboarding;
+pub mod paths;
 pub mod process;
 pub mod pyjson;
 pub mod sha256;

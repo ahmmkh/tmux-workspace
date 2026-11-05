@@ -1,6 +1,7 @@
 //! The command line: which command runs, and what a failure looks like.
 
 use crate::error::{Error, Result, fail};
+use crate::onboarding;
 use crate::tmux::Tmux;
 use std::io::Write;
 
@@ -27,19 +28,25 @@ fn command(args: &[String]) -> &str {
     args.first().map_or("open", String::as_str)
 }
 
-fn run(args: &[String]) -> Result<()> {
+fn run(args: &[String]) -> Result<i32> {
     dispatch(command(args), args.get(1..).unwrap_or_default())
 }
 
-fn dispatch(command: &str, _args: &[String]) -> Result<()> {
+/// Run one command and give its exit status.
+fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     // Each command is one arm here, added as it is ported.
-    fail(format!("Unknown workspace command: {command}"))
+    match command {
+        "setup" => onboarding::setup(args),
+        _ => fail(format!("Unknown workspace command: {command}")),
+    }
 }
 
-/// The error contract: end of input is not a failure; any other error is reported and exits 1.
-fn exit_code(result: Result<()>) -> i32 {
+/// The error contract: a command's own status is passed on, end of input is not a failure, and any
+/// other error is reported and exits 1.
+fn exit_code(result: Result<i32>) -> i32 {
     match result {
-        Ok(()) | Err(Error::Eof) => 0,
+        Ok(status) => status,
+        Err(Error::Eof) => 0,
         Err(error) => {
             let _ = writeln!(std::io::stderr(), "Workspace error: {error}");
             message(&format!("Workspace: {error}"));
@@ -65,8 +72,13 @@ mod tests {
 
     #[test]
     fn eof_and_success_exit_zero_without_output() {
-        assert_eq!(exit_code(Ok(())), 0);
+        assert_eq!(exit_code(Ok(0)), 0);
         assert_eq!(exit_code(Err(Error::Eof)), 0);
+    }
+
+    #[test]
+    fn a_commands_own_status_is_the_exit_status() {
+        assert_eq!(exit_code(Ok(2)), 2);
     }
 
     #[test]
