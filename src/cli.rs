@@ -154,18 +154,26 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     }
 }
 
-/// What `work update` says when it reaches `open`: the shell that ran it was opened before 2.0.
-const OLD_SHELL: &str = "No workspace named update is open, so this looks like work update from a terminal opened before tmux-workspace 2.0.
-Run exec $SHELL (or open a new terminal), then work update again.
-To make a workspace named update, run: work ./update";
+/// The names that a shell opened before the command existed sends to `open` as a workspace name, and the
+/// release in which the command came: `work update` since 2.0, `work bug` and `work idea` since 2.1.
+const COMMAND_NAMES: [(&str, &str); 3] = [("update", "2.0"), ("bug", "2.1"), ("idea", "2.1")];
+
+/// What `work NAME` says when it reaches `open` from a shell that was opened before NAME was a command.
+fn old_shell(name: &str, release: &str) -> String {
+    format!(
+        "No workspace named {name} is open, so this looks like work {name} from a terminal opened before tmux-workspace {release}.
+Run exec $SHELL (or open a new terminal), then work {name} again.
+To make a workspace named {name}, run: work ./{name}"
+    )
+}
 
 /// `open [--] [NAME]`: open the workspace NAME, or pick one.
 ///
 /// A shell opened before 2.0 still has the `work` function of 1.x, which sends everything but
 /// `work rm` here: `work update` is `open update` and `work --update` is `open --update`. Neither is
 /// meant as a workspace, so `open` refuses (status 2, nothing made) a name that starts with `-`, and
-/// `update` unless a workspace has that name. After `--` the name is taken as it is: `work ./update`
-/// is `open -- update`. The checks come before everything `open` does: no first-run questions, no
+/// `update` unless a workspace has that name. The same holds for `bug` and `idea`, which became commands
+/// in 2.1. After `--` the name is taken as it is: `work ./update` is `open -- update`. The checks come before everything `open` does: no first-run questions, no
 /// server started, no saved workspaces restored.
 fn open(tmux: &Tmux, args: &[String], errors: &mut dyn Write) -> Result<i32> {
     let (literal, name) = match args {
@@ -181,12 +189,12 @@ fn open(tmux: &Tmux, args: &[String], errors: &mut dyn Write) -> Result<i32> {
             )?;
             return Ok(2);
         }
-        if name == "update"
+        if let Some((_, release)) = COMMAND_NAMES.iter().find(|(command, _)| *command == name)
             && !pick::session_names(tmux)
                 .iter()
                 .any(|session| session == name)
         {
-            writeln!(errors, "{OLD_SHELL}")?;
+            writeln!(errors, "{}", old_shell(name, release))?;
             return Ok(2);
         }
     }
