@@ -109,9 +109,18 @@ mod setup {
 
         /// Run `setup` with these arguments and this text piped to its input.
         fn setup(&self, args: &[&str], piped: &str) -> Output {
-            let mut child = self
-                .scratch
-                .bin(EXE)
+            self.run(self.scratch.bin(EXE), args, piped)
+        }
+
+        /// Run `setup` as a caller whose umask is 022, which is what most shells start with.
+        fn setup_under_umask_022(&self, args: &[&str], piped: &str) -> Output {
+            let mut command = self.scratch.bin("/bin/sh");
+            command.args(["-c", "umask 022; exec \"$0\" \"$@\"", EXE]);
+            self.run(command, args, piped)
+        }
+
+        fn run(&self, mut command: std::process::Command, args: &[&str], piped: &str) -> Output {
+            let mut child = command
                 .arg("setup")
                 .args(args)
                 .env("TMUX_WORKSPACE_SHARE", self.share.path())
@@ -160,6 +169,29 @@ mod setup {
         let mode = std::fs::metadata(w.config()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(!w.trace.exists(), "setup starts no child process");
+    }
+
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn what_setup_creates_is_private_whatever_the_callers_umask() {
+        let w = World::new();
+        let home = w.scratch.home();
+        let out = w.setup_under_umask_022(&["--projects", "new/projects"], "");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Python runs with umask 077: the new folder and its new parent, the config's folders and file.
+        assert_eq!(mode(&home.join("new/projects")), 0o700);
+        assert_eq!(mode(&home.join("new")), 0o700);
+        assert_eq!(mode(&home.join(".config")), 0o700);
+        assert_eq!(mode(&home.join(".config/tmux-workspace")), 0o700);
+        assert_eq!(mode(&w.config()), 0o600);
     }
 
     #[test]

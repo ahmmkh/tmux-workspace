@@ -11,7 +11,18 @@ pub fn main() -> i32 {
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    if makes_private_files(command(&args)) {
+        // SAFETY: `umask` only sets this process's file-creation mask; it cannot fail.
+        unsafe { libc::umask(0o077) };
+    }
     exit_code(run(&args))
+}
+
+/// Whether a command runs with umask 077, so that what it creates, and what its children create,
+/// is private: the state, the config and the folders `setup` makes. The agent hook is the exception.
+/// It was always a separate program that set no umask, and it writes no files.
+fn makes_private_files(command: &str) -> bool {
+    command != "agent-hook"
 }
 
 /// Tell the user something: on the tmux status line inside tmux, else on stdout.
@@ -74,6 +85,14 @@ mod tests {
     fn eof_and_success_exit_zero_without_output() {
         assert_eq!(exit_code(Ok(0)), 0);
         assert_eq!(exit_code(Err(Error::Eof)), 0);
+    }
+
+    #[test]
+    fn every_command_but_the_hook_runs_with_a_private_umask() {
+        for command in ["open", "setup", "save", "pane-start", "exec-shell", "nope"] {
+            assert!(makes_private_files(command), "{command}");
+        }
+        assert!(!makes_private_files("agent-hook"));
     }
 
     #[test]
