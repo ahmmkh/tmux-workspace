@@ -391,3 +391,71 @@ exit 7"#,
         }
     }
 }
+
+/// `integrations/agent-hook.py` is a shim now: v1 hook entries still run
+/// `python3 ~/.local/lib/tmux-workspace/agent-hook.py <kind>`, a link to it, until
+/// `install.sh --agents` replaces them.
+mod agent_hook_shim {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
+
+    fn shim() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations/agent-hook.py")
+    }
+
+    /// Run the shim the way a v1 hook entry does, under this `HOME`, with this input.
+    fn run(home: &Path, args: &[&str], input: &[u8]) -> Output {
+        let mut child = Command::new("python3")
+            .arg(shim())
+            .args(args)
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn it_hands_its_arguments_and_input_to_the_installed_binary() {
+        let home = TempDir::new();
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("tmux-workspace");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}/argv'\n/bin/cat > '{0}/stdin'\necho out\necho err >&2\nexit 3\n",
+                home.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Not text: the bytes pass through untouched.
+        let input = b"{\"session_id\": \"s\"}\xff\x00 and no newline";
+        let out = run(home.path(), &["claude"], input);
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("argv")).unwrap(),
+            "agent-hook\nclaude\n"
+        );
+        assert_eq!(std::fs::read(home.path().join("stdin")).unwrap(), input);
+        // Output and status are the binary's own: the shim replaced itself with it.
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+        assert_eq!(out.status.code(), Some(3));
+    }
+
+    #[test]
+    fn without_the_binary_it_exits_0_and_says_nothing() {
+        let home = TempDir::new();
+        let out = run(home.path(), &["claude"], b"{}");
+        assert_eq!(out.stdout, b"");
+        assert_eq!(out.stderr, b"");
+        assert_eq!(out.status.code(), Some(0));
+    }
+}

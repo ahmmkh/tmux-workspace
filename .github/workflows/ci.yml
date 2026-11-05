@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Runtime code compiles on Python 3.9
-        run: for f in legacy/bin/tmux-workspace legacy/lib/*.py legacy/integrations/agent-hook.py scripts/*.py; do python -m py_compile "$f"; done
+        run: for f in legacy/bin/tmux-workspace legacy/lib/*.py legacy/integrations/agent-hook.py integrations/agent-hook.py scripts/*.py; do python -m py_compile "$f"; done
       - run: python -m unittest tests.test_workspace_model tests.test_dashboard
 
   install-linux:

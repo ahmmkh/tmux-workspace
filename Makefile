@@ -1,5 +1,5 @@
 PYTHON ?= python3
-RUNTIME := legacy/bin/tmux-workspace $(wildcard legacy/lib/*.py) legacy/integrations/agent-hook.py $(wildcard scripts/*.py)
+RUNTIME := legacy/bin/tmux-workspace $(wildcard legacy/lib/*.py) legacy/integrations/agent-hook.py integrations/agent-hook.py $(wildcard scripts/*.py)
 SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh tests/install/smoke.sh tests/install/matrix.sh
 
 .PHONY: build test lint test-install screenshots
