@@ -41,12 +41,48 @@ struct Machine {
 struct Report<'a> {
     out: &'a mut dyn Write,
     warnings: Vec<String>,
+    /// The `WARN` line of each warning, as a bug report tells it.
+    lines: Vec<String>,
+    /// How many panes the report listed.
+    panes: usize,
 }
 
-impl Report<'_> {
+/// What the doctor found, for a bug report.
+#[derive(Clone, Debug, Default)]
+pub struct Findings {
+    pub panes: usize,
+    /// One `WARN  ...` line for each warning.
+    pub warnings: Vec<String>,
+    /// What stopped the report, when something did.
+    pub errors: Vec<String>,
+}
+
+impl<'a> Report<'a> {
+    fn new(out: &'a mut dyn Write) -> Report<'a> {
+        Report {
+            out,
+            warnings: Vec::new(),
+            lines: Vec::new(),
+            panes: 0,
+        }
+    }
+
     /// `print(text)`.
     fn say(&mut self, text: &str) {
         let _ = writeln!(self.out, "{text}");
+    }
+
+    /// List a pane: its row, and a warning when it is a Codex pane without a status.
+    fn pane(&mut self, row: &Fields, now: f64) {
+        let (lines, warning) = pane_lines(row, now);
+        self.say(&lines);
+        self.panes += 1;
+        if let Some(location) = warning {
+            self.lines.push(format!(
+                "WARN  {location} codex: No Codex status. Review /hooks"
+            ));
+            self.warnings.push(location);
+        }
     }
 
     fn check(&mut self, label: &str, ok: bool, detail: &str) {
@@ -55,28 +91,63 @@ impl Report<'_> {
             if ok { "OK" } else { "WARN" }
         ));
         if !ok {
+            self.lines.push(format!("WARN  {label}: {detail}"));
             self.warnings.push(label.to_string());
         }
     }
 }
 
+impl Machine {
+    /// This machine.
+    fn current() -> Machine {
+        let home = home();
+        Machine {
+            codex: codex_dir(&home),
+            share: share_root(),
+            state: state_dir(),
+            home,
+        }
+    }
+}
+
+/// What the report offers when it has warned: a bug report that carries these results.
+const BUG_HINT: &str = "If this looks like a bug: work bug (it includes these results, anonymized)";
+
 /// Print the diagnostics. The status is 1 when anything is wrong, else 0.
 pub fn doctor(tmux: &Tmux) -> Result<i32> {
-    let home = home();
-    let machine = Machine {
-        codex: codex_dir(&home),
-        share: share_root(),
-        state: state_dir(),
-        home,
-    };
-    report(&mut std::io::stdout().lock(), tmux, &machine)
+    report(&mut std::io::stdout().lock(), tmux, &Machine::current())
+}
+
+/// What the doctor finds, without printing it: for `bug`, which tells it with the names anonymized.
+pub fn findings(tmux: &Tmux) -> Findings {
+    findings_on(tmux, &Machine::current())
+}
+
+fn findings_on(tmux: &Tmux, machine: &Machine) -> Findings {
+    let mut sink = std::io::sink();
+    let mut report = Report::new(&mut sink);
+    let outcome = run(&mut report, tmux, machine);
+    Findings {
+        panes: report.panes,
+        warnings: report.lines,
+        errors: outcome
+            .err()
+            .map(|error| format!("ERROR  doctor: {}", crate::errorlog::describe(&error)))
+            .into_iter()
+            .collect(),
+    }
 }
 
 fn report(out: &mut dyn Write, tmux: &Tmux, machine: &Machine) -> Result<i32> {
-    let mut report = Report {
-        out,
-        warnings: Vec::new(),
-    };
+    let mut report = Report::new(out);
+    let status = run(&mut report, tmux, machine)?;
+    if !report.warnings.is_empty() {
+        report.say(&format!("\n{BUG_HINT}"));
+    }
+    Ok(status)
+}
+
+fn run(report: &mut Report, tmux: &Tmux, machine: &Machine) -> Result<i32> {
     report.say("Tmux workspace diagnostics\n");
     for name in ["tmux", "fzf", "sesh", "zoxide"] {
         let found = which(name);
@@ -110,10 +181,10 @@ fn report(out: &mut dyn Write, tmux: &Tmux, machine: &Machine) -> Result<i32> {
         "      python3: {} (dash, ai and cleanup)",
         python3_version()
     ));
-    links(&mut report, machine);
-    binary_on_path(&mut report);
-    agent_integrations(&mut report, machine);
-    codex_hooks(&mut report, machine);
+    links(report, machine);
+    binary_on_path(report);
+    agent_integrations(report, machine);
+    codex_hooks(report, machine);
 
     let probe = spawn(&Spawn {
         argv: tmux.argv(&["-N", "display-message", "-p", "#{socket_path}"]),
@@ -198,9 +269,7 @@ fn report(out: &mut dyn Write, tmux: &Tmux, machine: &Machine) -> Result<i32> {
         "@workspace_codex",
     ];
     for row in tmux.fields("list-panes", &names, &["-a"])? {
-        let (lines, warning) = pane_lines(&row, now());
-        report.say(&lines);
-        report.warnings.extend(warning);
+        report.pane(&row, now());
     }
     let count = report.warnings.len();
     report.say(&format!(
@@ -692,6 +761,60 @@ mod tests {
     }
 
     #[test]
+    fn what_the_doctor_found_is_kept_as_lines_for_a_bug_report() {
+        let dir = TempDir::new();
+        let machine = Machine {
+            home: dir.path().join("home"),
+            share: dir.path().join("share"),
+            codex: dir.path().join("home/.codex"),
+            state: dir.path().join("state"),
+        };
+        let tmux = Tmux::new().program("/nonexistent/tmux");
+        let found = findings_on(&tmux, &machine);
+        assert_eq!(found.panes, 0);
+        assert!(found.errors.is_empty());
+        assert!(
+            found
+                .warnings
+                .iter()
+                .any(|line| line.starts_with("WARN  tmux server: ")),
+            "{:?}",
+            found.warnings
+        );
+        let missing = format!(
+            "WARN  {}: missing; run install.sh",
+            dir.path().join("home/.tmux.conf").display()
+        );
+        assert!(found.warnings.contains(&missing), "{:?}", found.warnings);
+        assert!(
+            found
+                .warnings
+                .iter()
+                .all(|line| line.starts_with("WARN  ") && !line.contains('\n'))
+        );
+    }
+
+    #[test]
+    fn a_codex_pane_without_a_status_is_a_warning_line_with_its_place() {
+        let mut sink = Vec::new();
+        let mut report = Report::new(&mut sink);
+        let silent = row(&[
+            ("session_name", "alpha"),
+            ("window_index", "0"),
+            ("pane_index", "2"),
+            ("pane_id", "%4"),
+            ("pane_current_command", "codex"),
+        ]);
+        report.pane(&silent, 100.0);
+        assert_eq!(report.panes, 1);
+        assert_eq!(
+            report.lines,
+            ["WARN  alpha:0.2 codex: No Codex status. Review /hooks"]
+        );
+        assert_eq!(report.warnings, ["alpha:0.2"]);
+    }
+
+    #[test]
     fn the_report_names_what_it_found_without_a_server() {
         let dir = TempDir::new();
         let machine = Machine {
@@ -713,7 +836,11 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("\nStart or attach with work, then run tmux-workspace doctor again.\n")
+            text.ends_with(
+                "\nStart or attach with work, then run tmux-workspace doctor again.\n\n\
+                 If this looks like a bug: work bug (it includes these results, anonymized)\n"
+            ),
+            "{text}"
         );
     }
 }

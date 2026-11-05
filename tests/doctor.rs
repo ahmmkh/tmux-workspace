@@ -13,6 +13,9 @@ use std::process::Command;
 use tmux_workspace::integrations::{Target, install_on};
 use tmux_workspace::testing::{ScratchTmux, TempDir};
 
+/// What a doctor report that has warnings ends with.
+const BUG_HINT: &str = "If this looks like a bug: work bug (it includes these results, anonymized)";
+
 /// The checkout, whose `integrations/` the fake share folder borrows.
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -120,7 +123,9 @@ fn missing_server_reports_warning_without_starting_a_server() {
         "{out}"
     );
     assert!(
-        out.ends_with("\nStart or attach with work, then run tmux-workspace doctor again.\n"),
+        out.ends_with(&format!(
+            "\nStart or attach with work, then run tmux-workspace doctor again.\n\n{BUG_HINT}\n"
+        )),
         "{out}"
     );
     let calls = machine.fakes.all_args("tmux");
@@ -650,4 +655,81 @@ fn doctor_lists_the_panes_without_reading_them() {
         out.contains("\nNo attached clients\n"),
         "the scratch server has no client: {out}"
     );
+}
+
+#[test]
+fn a_report_with_warnings_ends_with_the_offer_of_a_bug_report() {
+    let scratch = ScratchTmux::new();
+    let (code, out) = live(&scratch);
+    assert_eq!(code, 1);
+    assert!(out.contains("WARN  "), "{out}");
+    assert!(out.ends_with(&format!("\n\n{BUG_HINT}\n")), "{out}");
+    assert_eq!(out.matches(BUG_HINT).count(), 1);
+}
+
+/// A machine on which every check of the doctor is satisfied: the links lead into a share folder, this
+/// binary is first on `PATH`, the tools are there, the settings are right and a snapshot is fresh.
+fn a_machine_that_is_well() -> (ScratchTmux, Fakes, TempDir) {
+    let scratch = ScratchTmux::new();
+    let fakes = Fakes::new();
+    fakes.real_tmux();
+    for tool in ["fzf", "sesh", "zoxide"] {
+        fakes.add(tool, "exit 0");
+    }
+    symlink(EXE, fakes.path().join("tmux-workspace")).unwrap();
+    let share = TempDir::new();
+    fs::create_dir_all(share.path().join("bin")).unwrap();
+    symlink(EXE, share.path().join("bin/tmux-workspace")).unwrap();
+    for file in ["agent-status.conf", "tmux.conf"] {
+        fs::write(share.path().join(file), "").unwrap();
+    }
+    let home = scratch.home().to_path_buf();
+    fs::create_dir_all(home.join(".local/bin")).unwrap();
+    fs::create_dir_all(home.join(".config/tmux-workspace")).unwrap();
+    symlink(
+        share.path().join("bin/tmux-workspace"),
+        home.join(".local/bin/tmux-workspace"),
+    )
+    .unwrap();
+    symlink(
+        share.path().join("agent-status.conf"),
+        home.join(".config/tmux-workspace/agent-status.conf"),
+    )
+    .unwrap();
+    symlink(share.path().join("tmux.conf"), home.join(".tmux.conf")).unwrap();
+    for (name, value) in [
+        ("mouse", "on"),
+        ("focus-events", "on"),
+        ("set-clipboard", "external"),
+        ("default-terminal", "tmux-256color"),
+    ] {
+        scratch.tmux(&["set-option", "-g", name, value]);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    fs::write(
+        scratch.state_dir().join("latest.json"),
+        json!({"saved_at": now}).to_string(),
+    )
+    .unwrap();
+    (scratch, fakes, share)
+}
+
+#[test]
+fn a_report_without_a_warning_offers_no_bug_report() {
+    let (scratch, fakes, share) = a_machine_that_is_well();
+    let mut command = scratch.bin(EXE);
+    command
+        .arg("doctor")
+        .env("PATH", fakes.path())
+        .env("TMUX_WORKSPACE_SHARE", share.path());
+    let out = common::quietly(command);
+    let shown = text(&out.stdout);
+    assert_eq!(text(&out.stderr), "");
+    assert!(!shown.contains("WARN"), "{shown}");
+    assert!(shown.contains("\n0 warning(s)."), "{shown}");
+    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert!(!shown.contains("work bug"), "{shown}");
 }
