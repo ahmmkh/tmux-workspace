@@ -57,6 +57,10 @@ required-features = ["testing"]
 name = "doctor"
 required-features = ["testing"]
 
+[[test]]
+name = "compare"
+required-features = ["testing"]
+
 [profile.release]
 opt-level = 3
 lto = "thin"
