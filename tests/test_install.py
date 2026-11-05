@@ -329,6 +329,10 @@ class Installer(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn('tmux 3.2 is older than 3.3', result.stdout + result.stderr)
 
+    def test_rust_floor_matches_cargo_toml(self):
+        floor = re.search(r'^rust-version = "([^"]+)"', (ROOT / 'Cargo.toml').read_text(), re.M).group(1)
+        self.assertIn(f'RUST_MIN={floor}\n', (ROOT / 'install.sh').read_text())
+
     def test_floor_matches_python(self):
         self.assertIn('TMUX_MIN=%d.%d\n' % paths.TMUX_MIN, (ROOT / 'install.sh').read_text())
 
@@ -486,6 +490,66 @@ class Installer(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.share.iterdir()), ['2.0.2', '2.0.3', 'current'])
         self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / '2.0.3/bin/tmux-workspace')
 
+    def test_reinstalling_the_current_version_keeps_the_one_before(self):
+        self.release('2.0.0')
+        self.release('2.0.1')
+        self.release('2.0.1')
+        self.assertEqual(sorted(path.name for path in self.share.iterdir()), ['2.0.0', '2.0.1', 'current'])
+        self.assertEqual(os.readlink(self.share / 'current'), '2.0.1')
+
+    def test_pruning_spares_what_is_not_an_unpacked_release(self):
+        # TMUX_WORKSPACE_HOME may name a folder that holds other things too.
+        share = self.home / '.local/share'
+        mine = {'other-app': 'not ours', '9.9.9': '9.9.9', '1.2.3': '4.5.6'}
+        for name, version in mine.items():
+            (share / name).mkdir(parents=True)
+            (share / name / 'VERSION').write_text(version + '\n')
+        # A folder named like a version, with a VERSION to match, but not a release of ours.
+        # And one that is a release but under another name, and a link to a release elsewhere.
+        shutil.copytree(self.unpacked('2.0.0'), share / '1.2.3', dirs_exist_ok=True)
+        (share / '1.2.3' / 'VERSION').write_text('4.5.6\n')
+        (share / '1.0.0').symlink_to(self.unpacked('2.0.0'))
+        for version in ('2.0.1', '2.0.2', '2.0.3'):
+            self.release(version, TMUX_WORKSPACE_HOME=str(share))
+        self.assertEqual(sorted(path.name for path in share.iterdir()),
+                         ['1.0.0', '1.2.3', '2.0.2', '2.0.3', '9.9.9', 'current', 'other-app'])
+        for name, version in mine.items():
+            self.assertEqual((share / name / 'VERSION').read_text(), version + '\n')
+        self.assertTrue((share / '1.2.3' / 'bin/tmux-workspace').exists())
+        self.assertTrue((self.unpacked('2.0.0') / 'bin/tmux-workspace').exists(), 'the link was not followed')
+
+    def test_a_copy_left_by_an_interrupted_install_is_cleaned_up(self):
+        self.release('2.0.0')
+        leftover = self.share / '.incoming-99999999'  # no such process
+        shutil.copytree(self.share / '2.0.0', leftover)
+        running = self.share / f'.incoming-{os.getpid()}'  # a process that runs: it may still be copying
+        shutil.copytree(self.share / '2.0.0', running)
+        self.release('2.0.1')
+        self.assertFalse(leftover.exists())
+        self.assertTrue(running.exists())
+
+    def unpacked(self, version):
+        """A release of version VERSION unpacked outside HOME."""
+        folder = self.work / f'unpacked-{version}'
+        if not folder.exists():
+            folder.mkdir()
+            with tarfile.open(self.newer(version) / ARCHIVE) as tar:
+                tar.extractall(folder, filter='tar')
+        return folder / f'tmux-workspace-{version}'
+
+    def test_unpacking_restores_no_owners(self):
+        log = self.work / 'tar.log'
+        real = shutil.which('tar')
+        self.stub('tar', f'printf "%s\\n" "$*" >> "{log}"\nexec "{real}" "$@"')
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()))
+        unpack = [line for line in log.read_text().splitlines() if ' -x' in f' {line}']
+        self.assertTrue(unpack, log.read_text())
+        self.assertTrue(all('--no-same-owner' in line for line in unpack), unpack)
+        # Nor does the copy into the install home (cp -p would keep the owners of the download).
+        script = (ROOT / 'install.sh').read_text()
+        self.assertIn('cp -R "$REPO"', script)
+        self.assertNotIn('cp -pR', script)
+
     def test_checksum_mismatch_writes_nothing(self):
         result = self.piped('--yes', check=False, TMUX_WORKSPACE_DIST=str(self.corrupt_dist()))
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
@@ -496,10 +560,13 @@ class Installer(unittest.TestCase):
     def test_unsupported_platform_without_cargo_exits_3(self):
         self.stub('uname', 'case "$1" in -m) echo sparc ;; *) echo SunOS ;; esac')
         message = 'no prebuilt binary for SunOS/sparc; install Rust (https://rustup.rs) and rerun'
-        for result in (self.piped('--yes', check=False), self.install('--yes', check=False, TMUX_WORKSPACE_BINARY=None)):
+        clone = self.clone()
+        checkout = self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], False, TMUX_WORKSPACE_BINARY=None)
+        for result in (self.piped('--yes', check=False), checkout):
             self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
             self.assertIn(message, result.stderr)
             self.assertEqual(self.tree(), {})
+        self.assertFalse((clone / 'bin/tmux-workspace').exists())
 
     def test_missing_downloader_exits_3(self):
         self.assertIsNone(shutil.which('curl', path=str(self.bin)))
@@ -626,12 +693,12 @@ class Installer(unittest.TestCase):
 
     # -- Updates: `tmux-workspace update` runs install.sh --update next to the binary. ----------------------
 
-    def release(self, version, *flags):
+    def release(self, version, *flags, **extra):
         """A piped install of release VERSION."""
         dist = self.work / version
         if not dist.exists():
             renumbered_dist(version, dist)
-        return self.piped('--yes', *flags, TMUX_WORKSPACE_DIST=str(dist))
+        return self.piped('--yes', *flags, TMUX_WORKSPACE_DIST=str(dist), **extra)
 
     def update(self, *args, check=True, dist=None, **extra):
         """`tmux-workspace update ARGS`, with the releases of DIST."""
@@ -836,6 +903,26 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), head)
         self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
 
+    def test_update_check_of_a_clone_reports_and_names_what_an_update_would_refuse(self):
+        clone = self.work / 'checkout'
+        upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
+        self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, **self.clone_env())
+        head = self.commit(upstream, self.v2('2.0.1'), 'second')
+        before = self.git(clone, 'rev-parse', 'HEAD')
+        (clone / 'tmux.conf').write_text('changed\n')
+        result = self.tool('update', '--check', **self.clone_env())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'update available: 2.0.0 {before[:7]} → 2.0.1 {head[:7]}', result.stdout)
+        self.assertIn('has uncommitted changes, which an update refuses', result.stdout)
+        self.assertEqual((clone / 'tmux.conf').read_text(), 'changed\n')
+        self.git(clone, 'checkout', '-q', '--', 'tmux.conf')
+        self.git(clone, 'checkout', '-q', '-b', 'mine')
+        result = self.tool('update', '--check', **self.clone_env())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'update available: 2.0.0 {before[:7]} → 2.0.1 {head[:7]}', result.stdout)
+        self.assertIn('is on mine, not main; an update needs main', result.stdout)
+        self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), before)
+
     def test_update_refuses_a_clone_with_changes_or_on_another_branch(self):
         clone = self.work / 'checkout'
         upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
@@ -912,6 +999,60 @@ class Installer(unittest.TestCase):
         # The link still leads to the v1 program, which is still there.
         self.assertTrue((self.home / '.local/bin/tmux-workspace').resolve().is_file())
 
+    def test_a_v1_upgrade_takes_the_release_over_a_cargo_that_cannot_build(self):
+        upstream, _ = self.v1_install()
+        head = self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        log = self.failing_cargo()
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env())
+        self.assertFalse(log.exists(), 'a release fits, so cargo does not run')
+        self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), head)
+        self.assertEqual((self.share / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        # A later piped run neither builds nor downloads again.
+        out = self.piped('--yes', TMUX_WORKSPACE_DIST=str(self.work / 'nowhere'), **self.clone_env()).stdout
+        self.assertFalse(log.exists())
+        self.assertIn('already installed', out)
+
+    def test_a_v1_upgrade_without_a_release_or_a_working_cargo_changes_nothing(self):
+        upstream, v1 = self.v1_install()
+        self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        log = self.failing_cargo()
+        self.stub('uname', 'case "$1" in -m) echo sparc ;; *) echo SunOS ;; esac')
+        result = self.piped('--yes', check=False, **self.clone_env())
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertTrue(log.exists(), 'without a release, cargo is tried')
+        self.assertIn('no prebuilt binary for SunOS/sparc, and cargo could not build it', result.stderr)
+        self.assertIn('https://rustup.rs', result.stderr)
+        self.assertIn(f'{self.share} is unchanged', result.stderr)
+        self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), v1)
+        self.assertEqual(self.git(self.share, 'status', '--porcelain'), '')
+
+    def test_the_new_binary_is_in_bin_before_the_pull(self):
+        # So that after the pull, which removes the v1 program, only a rename is left to do.
+        upstream, _ = self.v1_install()
+        self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        seen = self.work / 'at-merge'
+        hook = self.share / '.git/hooks/post-merge'
+        hook.write_text(f'#!/bin/sh\nls bin > "{seen}"\n')
+        hook.chmod(0o755)
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env())
+        staged = [name for name in seen.read_text().split() if name.startswith('tmux-workspace.new.')]
+        self.assertEqual(len(staged), 1, seen.read_text())
+        self.assertEqual(sorted(path.name for path in (self.share / 'bin').iterdir()),
+                         ['tmux-workspace', 'tmux-workspace.version', 'tw-clip', 'tw-sound'])
+
+    def test_a_pull_that_fails_leaves_the_old_program_and_no_new_binary(self):
+        upstream, v1 = self.v1_install()
+        self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        (self.share / 'Cargo.toml').write_text('mine\n')  # untracked, and in the way of the pull
+        result = self.piped('--yes', check=False, TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('could not fast-forward', result.stderr)
+        self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), v1)
+        self.assertEqual(sorted(path.name for path in (self.share / 'bin').iterdir()),
+                         ['install-integrations', 'tmux-workspace', 'tw-clip', 'tw-sound'])
+        self.assertTrue((self.home / '.local/bin/tmux-workspace').resolve().is_file())
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
     def test_a_v1_clone_with_changes_is_left_alone(self):
         upstream, v1 = self.v1_install()
         self.commit(upstream, self.v2(VERSION), 'the Rust port')
@@ -921,6 +1062,35 @@ class Installer(unittest.TestCase):
         self.assertIn(f'{self.share} has uncommitted changes', result.stderr)
         self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), v1)
         self.assertEqual((self.share / 'tmux.conf').read_text(), 'mine\n')
+
+    def failing_cargo(self):
+        """A cargo too old for this crate: it writes down that it ran, and fails as Debian 12's 1.63 does."""
+        log = self.work / 'cargo.log'
+        self.stub('cargo', f'echo "$PWD $*" >> "{log}"\n'
+                           'echo "error: failed to parse lock file at: Cargo.lock" >&2\nexit 101')
+        return log
+
+    def test_checkout_installs_the_release_when_cargo_cannot_build(self):
+        clone = self.clone()
+        log = self.failing_cargo()
+        out = self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, TMUX_WORKSPACE_BINARY=None,
+                              TMUX_WORKSPACE_DIST=str(release_dist())).stdout
+        self.assertEqual(log.read_text(), f'{clone} build --release --locked\n', 'cargo comes first in a checkout')
+        self.assertIn('cargo could not build it', out)
+        self.assertIn(f'bin/tmux-workspace (release {VERSION})\n', out)
+        self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        self.assertEqual((clone / 'bin/tmux-workspace.version').read_text(), VERSION + '\n')
+
+    def test_checkout_without_a_release_or_a_working_cargo_says_what_to_do(self):
+        clone = self.clone()
+        self.failing_cargo()
+        self.stub('uname', 'case "$1" in -m) echo sparc ;; *) echo SunOS ;; esac')
+        result = self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], False, TMUX_WORKSPACE_BINARY=None)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('no prebuilt binary for SunOS/sparc, and cargo could not build it', result.stderr)
+        self.assertIn('https://rustup.rs', result.stderr)
+        self.assertFalse((clone / 'bin/tmux-workspace').exists())
+        self.assertEqual(self.tree(), {})
 
     def test_script_is_valid_bash_32_syntax(self):
         subprocess.run(['/bin/bash', '-n', str(ROOT / 'install.sh')], check=True)

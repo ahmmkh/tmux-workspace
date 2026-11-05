@@ -13,6 +13,9 @@ set -euo pipefail
 
 TMUX_MIN=3.3
 PYTHON_MIN=3.9
+# rust-version in Cargo.toml: what building from source takes.
+RUST_MIN=1.89
+VERSION_RE='[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?'
 REPO_URL=https://github.com/ahmmkh/tmux-workspace
 RELEASES=$REPO_URL/releases
 BLOCK_START='# >>> tmux-workspace >>>'
@@ -77,7 +80,7 @@ fi
 UPDATE_FROM=${TMUX_WORKSPACE_UPDATE_FROM:-}
 unset TMUX_WORKSPACE_UPDATE_FROM
 if [ -n "$WANTED" ]; then
-    if printf '%s\n' "$WANTED" | grep -Eq '^v?[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+    if printf '%s\n' "$WANTED" | grep -Eq "^v?$VERSION_RE\$"; then
         WANTED=v${WANTED#v}
     else
         printf 'error    --version needs a release like v2.0.0, not %s\n' "$WANTED" >&2
@@ -101,6 +104,8 @@ HOME_SHARE=''   # for a release: the folder of the unpacked versions and the `cu
 OWN=''          # links that lead under this folder belong to the installation
 STAGE=''        # a temporary folder with a download; removed on exit
 STAGED=''       # the release unpacked in it
+PENDING=''      # a new binary next to the one it replaces after a pull; removed on exit unless moved
+REASON='' REASON_KIND=''  # why try_fetch or try_stage_archive failed; missing: no release fits
 UPDATED_FROM='' # what git_update updated from: nothing when the clone was up to date
 NEW_BINARY='' NEW_STAMP=''  # the binary git_update had for the new version, and its release
 
@@ -178,23 +183,32 @@ version_lt() {  # version_lt 2.0.0 2.0.1: the first X.Y.Z is older
     }'
 }
 
+ref_version() {  # ref_version ROOT REF: the package version in Cargo.toml at REF of the clone at ROOT
+    { git -C "$1" show "$2:Cargo.toml" 2>/dev/null || true; } | awk -F'"' '/^version = "/ { print $2; exit }'
+}
+
 # clone_label ROOT REF: the version of the clone at REF and its commit, as in "2.0.1 1a2b3c4". Before
 # the Rust port there was no Cargo.toml: the newest CHANGELOG heading names the version then.
 clone_label() {
     local version
-    version=$({ git -C "$1" show "$2:Cargo.toml" 2>/dev/null || true; } | awk -F'"' '/^version = "/ { print $2; exit }')
+    version=$(ref_version "$1" "$2")
     if [ -z "$version" ]; then
         version=$({ git -C "$1" show "$2:CHANGELOG.md" 2>/dev/null || true; } | awk '/^## [0-9]/ { print $2; exit }')
     fi
     printf '%s %s\n' "${version:-unknown}" "$(git -C "$1" rev-parse --short "$2")"
 }
 
-# Remove the temporary folder of a download. Every exit runs it.
+# Remove the temporary folder of a download.
 remove_stage() {
     if [ -n "$STAGE" ] && [ -d "$STAGE" ]; then rm -rf "${STAGE:?}"; fi
     STAGE=''
 }
-trap remove_stage EXIT
+
+on_exit() {  # every exit: no download and no half-placed binary stays behind
+    remove_stage
+    if [ -n "$PENDING" ]; then rm -f "${PENDING:?}"; fi
+}
+trap on_exit EXIT
 
 # ---------------------------------------------------------------------------------------------
 # Where the code lives: this clone or unpacked release, or a release downloaded when the script
@@ -280,21 +294,33 @@ dist_base() {  # dist_base TAG: where the files of release TAG (vX.Y.Z or latest
     fi
 }
 
-fetch() {  # fetch URL DEST: download with curl or wget. A URL without a scheme is a local file.
+# try_fetch URL DEST: download with curl or wget; a URL without a scheme is a local file. When that
+# fails it returns 1, with the reason in REASON.
+try_fetch() {
     local url=$1 dest=$2
+    REASON_KIND=failed
     case $url in
         *://*) ;;
-        *) cp "$url" "$dest" 2>/dev/null || die "could not read $url" 3; return 0 ;;
+        *)
+            cp "$url" "$dest" 2>/dev/null && return 0
+            REASON="could not read $url"
+            return 1
+            ;;
     esac
     if ! has curl && ! has wget && [ "$DEPS" = 1 ] && [ "$DRY" = 0 ]; then install_packages curl; fi
     if has curl; then
-        curl -fsSL --retry 2 -o "$dest" "$url" || die "could not download $url" 3
+        curl -fsSL --retry 2 -o "$dest" "$url" && return 0
     elif has wget; then
-        wget -q -O "$dest" "$url" || die "could not download $url" 3
+        wget -q -O "$dest" "$url" && return 0
     else
-        die "need curl or wget to download tmux-workspace" 3
+        REASON="need curl or wget to download tmux-workspace"
+        return 1
     fi
+    REASON="could not download $url"
+    return 1
 }
+
+fetch() { try_fetch "$1" "$2" || die "$REASON" 3; }  # fetch URL DEST, or die saying why
 
 verify() {  # verify FILE SUMS: FILE has the SHA-256 that SUMS (sha256sum format) lists for its name
     local file=$1 name=${1##*/} want got
@@ -309,35 +335,54 @@ verify() {  # verify FILE SUMS: FILE has the SHA-256 that SUMS (sha256sum format
     if [ -z "$want" ] || [ "$want" != "$got" ]; then die "checksum mismatch for $name; nothing was installed" 3; fi
 }
 
-# stage_archive TAG: download this machine's archive of release TAG (vX.Y.Z or latest) and the
-# release's SHA256SUMS to a temporary folder, check the one against the other, and unpack it. Sets
-# STAGE, the folder (removed on exit), and STAGED, the release in it. Writes nothing else.
-stage_archive() {
+# try_stage_archive TAG: download this machine's archive of release TAG (vX.Y.Z or latest) and the
+# release's SHA256SUMS to a temporary folder, check the one against the other, and unpack it, owned
+# by whoever runs this. Sets STAGE, the folder (removed on exit), and STAGED, the release in it;
+# writes nothing else. When no release fits this machine (REASON_KIND missing) or the download fails,
+# it returns 1 with the reason in REASON. A checksum that does not match dies: that is no reason to
+# try another way.
+try_stage_archive() {
     local target name dir base
+    REASON='' REASON_KIND=failed
     target=$(detect_target)
     if [ -z "$target" ]; then
-        if has cargo; then
-            die "no prebuilt binary for $(uname -s)/$(uname -m); clone $REPO_URL and run its install.sh, which builds one with cargo" 3
-        fi
-        die "no prebuilt binary for $(uname -s)/$(uname -m); install Rust (https://rustup.rs) and rerun" 3
+        REASON="no prebuilt binary for $(uname -s)/$(uname -m)"
+        REASON_KIND=missing
+        return 1
     fi
-    has tar || die "need tar to unpack tmux-workspace" 3
+    if ! has tar; then
+        REASON="need tar to unpack tmux-workspace"
+        return 1
+    fi
     base=$(dist_base "$1")
     name=tmux-workspace-$target.tar.gz
     remove_stage
-    STAGE=$(mktemp -d)
+    STAGE=$(mktemp -d) || { REASON='could not make a temporary folder'; return 1; }
     say download "$base/$name"
-    fetch "$base/$name" "$STAGE/$name"
-    fetch "$base/SHA256SUMS" "$STAGE/SHA256SUMS"
+    if ! try_fetch "$base/$name" "$STAGE/$name" || ! try_fetch "$base/SHA256SUMS" "$STAGE/SHA256SUMS"; then
+        remove_stage
+        return 1
+    fi
     verify "$STAGE/$name" "$STAGE/SHA256SUMS"
     mkdir "$STAGE/release"
-    tar -xzf "$STAGE/$name" -C "$STAGE/release" || die "could not unpack $name" 3
+    tar --no-same-owner -xzf "$STAGE/$name" -C "$STAGE/release" || die "could not unpack $name" 3
     rm -f "${STAGE:?}/${name:?}"
     STAGED=''
     for dir in "$STAGE"/release/tmux-workspace-*; do
         if [ -f "$dir/VERSION" ] && [ -f "$dir/install.sh" ] && [ -x "$dir/bin/tmux-workspace" ]; then STAGED=$dir; fi
     done
     [ -n "$STAGED" ] || die "$name holds no tmux-workspace release" 3
+}
+
+stage_archive() {  # stage_archive TAG: try_stage_archive, or die saying why and what to do
+    try_stage_archive "$1" && return 0
+    if [ "$REASON_KIND" = missing ]; then
+        if has cargo; then
+            die "$REASON; clone $REPO_URL and run its install.sh, which builds one with cargo" 3
+        fi
+        die "$REASON; install Rust (https://rustup.rs) and rerun" 3
+    fi
+    die "$REASON" 3
 }
 
 # run_staged: hand over to the installer of the release just downloaded, with the same options. It
@@ -364,9 +409,26 @@ clone_install() {
         if [ -n "$UPDATED_FROM" ]; then
             TMUX_WORKSPACE_UPDATE_FROM=$UPDATED_FROM
             export TMUX_WORKSPACE_UPDATE_FROM
+        elif [ -f "$root/Cargo.toml" ] && [ "$DRY" = 0 ]; then
+            clone_release_binary "$root"
         fi
     fi
     exec bash "$root/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+}
+
+# clone_release_binary ROOT: a piped run over a clone that is up to date. Unless bin/ has the release
+# binary of the clone's version already, get it (cargo only when no release fits), and have the
+# clone's installer take it rather than build one.
+clone_release_binary() {
+    local root=$1 dest=$1/bin/tmux-workspace stamp=$1/bin/tmux-workspace.version
+    if [ ! -x "$dest" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$(tree_version "$root")" ]; then
+        obtain_binary "$root" '' "release cargo"
+        place_binary "$NEW_BINARY" "$dest" "$stamp" "$NEW_STAMP"
+        remove_stage
+        say binary "$dest ($(binary_origin))"
+    fi
+    TMUX_WORKSPACE_BINARY=$dest
+    export TMUX_WORKSPACE_BINARY
 }
 
 # Piped (`curl … | bash`): no clone or release is around this script. Download the release, and its
@@ -449,7 +511,7 @@ place_release() {
     mkdir -p "$home"
     if [ ! -f "$dest/VERSION" ] || [ ! -x "$dest/bin/tmux-workspace" ]; then
         rm -rf "${home:?}/.incoming-$$" "${home:?}/.outgoing-$$"
-        cp -pR "$REPO" "$home/.incoming-$$"
+        cp -R "$REPO" "$home/.incoming-$$"  # owned by whoever runs this, not by the download
         if [ -e "$dest" ] || [ -L "$dest" ]; then mv "$dest" "$home/.outgoing-$$"; fi
         mv "$home/.incoming-$$" "$dest"
         rm -rf "${home:?}/.outgoing-$$"
@@ -461,20 +523,36 @@ place_release() {
         ln -sfn "$own" "$home/current"
         CHANGED=1
         say link "$home/current -> $own"
+        prune_releases "$home" "$own" "$previous"  # the new current and the one before it stay
     fi
-    prune_releases "$home" "$own" "$previous"
     REPO=$home/current
 }
 
-prune_releases() {  # prune_releases HOME KEEP...: remove the other unpacked versions
-    local home=$1 dir name
+# is_release DIR NAME: DIR is an unpacked release of version NAME, and no link: all that pruning removes.
+is_release() {
+    [ ! -L "$1" ] && [ -d "$1" ] && [ ! -L "$1/bin" ] && [ -f "$1/bin/tmux-workspace" ] && [ -f "$1/install.sh" ] &&
+        [ -f "$1/VERSION" ] && [ "$(release_version "$1")" = "$2" ]
+}
+
+# prune_releases HOME KEEP...: remove the other unpacked versions in HOME, and the copies that an
+# interrupted run left behind. Nothing else: HOME may hold other things.
+prune_releases() {
+    local home=$1 dir name pid
     shift
-    for dir in "$home"/*; do
+    for dir in "$home"/[0-9]*.[0-9]*.[0-9]*; do
         name=${dir##*/}
-        if [ -L "$dir" ] || [ ! -f "$dir/VERSION" ]; then continue; fi
+        printf '%s\n' "$name" | grep -Eq "^$VERSION_RE\$" || continue
+        is_release "$dir" "$name" || continue
         case " $* " in *" $name "*) continue ;; esac
         rm -rf "${dir:?}"
         say remove "$dir"
+    done
+    for dir in "$home"/.incoming-* "$home"/.outgoing-*; do
+        pid=${dir##*-}
+        case $pid in '' | *[!0-9]*) continue ;; esac
+        if [ ! -f "$dir/VERSION" ] || ! is_release "$dir" "$(release_version "$dir")"; then continue; fi
+        if kill -0 "$pid" 2>/dev/null; then continue; fi  # still copying
+        rm -rf "${dir:?}"
     done
 }
 
@@ -545,29 +623,38 @@ update_clone() {
 # ~/.local/bin/tmux-workspace never leads to a missing file. Sets UPDATED_FROM to the version it
 # updated from, or to nothing when the clone was up to date. --check only says.
 git_update() {
-    local root=$1 branch default from to
+    local root=$1 branch default from to upstream dirty=0 elsewhere=0
     UPDATED_FROM=''
     has git || die "git is needed to update the clone in $root" 3
-    if [ -n "$(git -C "$root" status --porcelain --untracked-files=no)" ]; then
-        die "$root has uncommitted changes; commit or stash them, then update again" 1
-    fi
+    [ -z "$(git -C "$root" status --porcelain --untracked-files=no)" ] || dirty=1
     branch=$(git -C "$root" symbolic-ref --quiet --short HEAD || true)
     default=$(git -C "$root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
     default=${default#origin/}
     default=${default:-main}
-    if [ "$branch" != "$default" ]; then
-        die "$root is on ${branch:-a detached HEAD}, not $default; switch to $default to update it" 1
+    [ "$branch" = "$default" ] || elsewhere=1
+    if [ "$CHECK" = 0 ]; then
+        [ "$dirty" = 0 ] || die "$root has uncommitted changes; commit or stash them, then update again" 1
+        if [ "$elsewhere" = 1 ]; then
+            die "$root is on ${branch:-a detached HEAD}, not $default; switch to $default to update it" 1
+        fi
     fi
     git -C "$root" fetch --quiet || die "could not fetch the updates of $root" 3
-    if ! git -C "$root" rev-parse --verify --quiet '@{upstream}' >/dev/null; then
+    upstream='@{upstream}'
+    [ "$elsewhere" = 0 ] || upstream=origin/$default  # --check only: what an update on $default would get
+    if ! git -C "$root" rev-parse --verify --quiet "$upstream" >/dev/null; then
         die "$default in $root follows no remote branch; there is nothing to update from" 1
     fi
-    from=$(clone_label "$root" HEAD)
-    [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse '@{upstream}')" ] || return 0
-    if ! git -C "$root" merge-base --is-ancestor HEAD '@{upstream}'; then
-        die "$root has commits that are not upstream; push or drop them, then update again" 1
+    if [ "$CHECK" = 1 ]; then
+        [ "$dirty" = 0 ] || say note "$root has uncommitted changes, which an update refuses"
+        [ "$elsewhere" = 0 ] || say note "$root is on ${branch:-a detached HEAD}, not $default; an update needs $default"
     fi
-    to=$(clone_label "$root" '@{upstream}')
+    from=$(clone_label "$root" HEAD)
+    [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse "$upstream")" ] || return 0
+    if ! git -C "$root" merge-base --is-ancestor HEAD "$upstream"; then
+        [ "$CHECK" = 1 ] || die "$root has commits that are not upstream; push or drop them, then update again" 1
+        say note "$root has commits that are not upstream, which an update refuses"
+    fi
+    to=$(clone_label "$root" "$upstream")
     if [ "$CHECK" = 1 ]; then
         say update "update available: $from → $to"
         exit 0
@@ -577,42 +664,87 @@ git_update() {
         say would "update $root from $from to $to"
         return 0
     fi
-    upstream_binary "$root"
-    git -C "$root" merge --ff-only --quiet '@{upstream}' || die "could not fast-forward $root" 1
-    place_binary "$NEW_BINARY" "$root/bin/tmux-workspace" "$root/bin/tmux-workspace.version" "$NEW_STAMP"
+    # The new binary goes next to the old one before the pull, so after it only a rename is left.
+    obtain_binary "$root" "$upstream" "release cargo"
+    mkdir -p "$root/bin"
+    PENDING=$root/bin/tmux-workspace.new.$$
+    { cp "$NEW_BINARY" "$PENDING" && chmod 755 "$PENDING"; } || die "could not write $PENDING; $root is unchanged" 3
     remove_stage
+    git -C "$root" merge --ff-only --quiet "$upstream" || die "could not fast-forward $root" 1
+    mv -f "$PENDING" "$root/bin/tmux-workspace"
+    PENDING=''
+    if [ -n "$NEW_STAMP" ]; then
+        printf '%s\n' "$NEW_STAMP" >"$root/bin/tmux-workspace.version"
+    else
+        rm -f "${root:?}/bin/tmux-workspace.version"
+    fi
     say update "$root from $from to $to"
     TMUX_WORKSPACE_BINARY=$root/bin/tmux-workspace
     export TMUX_WORKSPACE_BINARY
 }
 
-# upstream_binary ROOT: the binary of the upstream version of the clone at ROOT, had without touching
-# the clone's files: TMUX_WORKSPACE_BINARY, else built with cargo from `git archive`, else that
-# version's release. Sets NEW_BINARY, and NEW_STAMP to the release it came from.
-upstream_binary() {
-    local root=$1 version target_dir
-    NEW_STAMP=''
+# obtain_binary ROOT REF ORDER: the binary of the clone at ROOT, for its working tree (REF empty) or
+# for REF before it is pulled, had without changing the clone. TMUX_WORKSPACE_BINARY when it is set;
+# else the ways in ORDER ("cargo release" or "release cargo"), each tried when the one before fails:
+# the release of that version (downloaded and checked) or a build with cargo. Sets NEW_BINARY, and
+# NEW_STAMP to the release it came from. When no way works it dies, saying what to do.
+obtain_binary() {
+    local root=$1 ref=$2 order=$3 version way release_reason='' release_kind='' cargo=''
+    NEW_BINARY='' NEW_STAMP=''
     if [ -n "${TMUX_WORKSPACE_BINARY:-}" ]; then
         [ -f "$TMUX_WORKSPACE_BINARY" ] || die "TMUX_WORKSPACE_BINARY is not a file: $TMUX_WORKSPACE_BINARY" 3
         NEW_BINARY=$TMUX_WORKSPACE_BINARY
-    elif has cargo; then
-        remove_stage
-        STAGE=$(mktemp -d)
-        mkdir "$STAGE/src"
-        git -C "$root" archive '@{upstream}' | tar -x -C "$STAGE/src" || die "could not read the new version of $root" 3
-        target_dir=${CARGO_TARGET_DIR:-$root/target}
-        say build "cargo build --release --locked, for the new version"
-        (cd "$STAGE/src" && CARGO_TARGET_DIR=$target_dir cargo build --release --locked) ||
-            die "cargo build failed; $root is unchanged" 3
-        cp "$target_dir/release/tmux-workspace" "$STAGE/tmux-workspace"
-        NEW_BINARY=$STAGE/tmux-workspace
-    else
-        version=$({ git -C "$root" show '@{upstream}:Cargo.toml' 2>/dev/null || true; } | awk -F'"' '/^version = "/ { print $2; exit }')
-        [ -n "$version" ] || die "the new version of $root has no Cargo.toml to name its release" 3
-        stage_archive "v$version"
-        NEW_BINARY=$STAGED/bin/tmux-workspace
-        NEW_STAMP=$version
+        return 0
     fi
+    if [ -z "$ref" ]; then version=$(tree_version "$root"); else version=$(ref_version "$root" "$ref"); fi
+    for way in $order; do
+        if [ "$way" = release ]; then
+            if [ -z "$version" ]; then
+                release_reason="no version in Cargo.toml to name its release" release_kind=missing
+            elif try_stage_archive "v$version"; then
+                NEW_BINARY=$STAGED/bin/tmux-workspace
+                NEW_STAMP=$version
+                if [ "$cargo" = failed ]; then say note "cargo could not build it; this is the release of $version"; fi
+                return 0
+            else
+                release_reason=$REASON release_kind=$REASON_KIND
+            fi
+        elif ! has cargo; then
+            cargo=missing
+        elif cargo_build "$root" "$ref"; then
+            return 0
+        else
+            cargo=failed
+        fi
+    done
+    if [ "$cargo" = failed ]; then
+        die "$release_reason, and cargo could not build it (that takes Rust $RUST_MIN or newer from https://rustup.rs and a C compiler); $root is unchanged" 3
+    elif [ "$release_kind" = missing ]; then
+        die "$release_reason; install Rust (https://rustup.rs) and rerun" 3
+    fi
+    die "$release_reason; check the connection and rerun, or install Rust (https://rustup.rs) to build it" 3
+}
+
+# cargo_build ROOT REF: build the clone at ROOT with cargo, into ROOT/target: its working tree in
+# place (REF empty), or REF exported with git archive to a temporary folder. Sets NEW_BINARY to a
+# copy of the result; returns 1 when cargo fails.
+cargo_build() {
+    local root=$1 ref=$2 src=$1 target_dir
+    target_dir=${CARGO_TARGET_DIR:-$1/target}
+    remove_stage
+    STAGE=$(mktemp -d) || return 1
+    if [ -n "$ref" ]; then
+        src=$STAGE/src
+        mkdir "$src"
+        git -C "$root" archive "$ref" | tar -x -C "$src" || die "could not read the new version of $root" 3
+        say build "cargo build --release --locked, for the new version"
+    else
+        say build "cargo build --release --locked"
+    fi
+    (cd "$src" && CARGO_TARGET_DIR=$target_dir cargo build --release --locked) || return 1
+    [ -f "$target_dir/release/tmux-workspace" ] || return 1
+    cp "$target_dir/release/tmux-workspace" "$STAGE/tmux-workspace" || return 1
+    NEW_BINARY=$STAGE/tmux-workspace
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -629,33 +761,34 @@ place_binary() {
     if [ -n "$4" ]; then printf '%s\n' "$4" >"$3"; else rm -f "${3:?}"; fi
 }
 
+binary_origin() { if [ -n "$NEW_STAMP" ]; then echo "release $NEW_STAMP"; else echo built; fi; }
+
+# install_binary: the binary of this clone into bin/. TMUX_WORKSPACE_BINARY, else built with cargo,
+# else (or when cargo cannot build it) the release of the clone's version, which a later run without
+# cargo does not download again.
 install_binary() {
-    local dest=$REPO/bin/tmux-workspace stamp=$REPO/bin/tmux-workspace.version
-    local given=${TMUX_WORKSPACE_BINARY:-} version built
+    local dest=$REPO/bin/tmux-workspace stamp=$REPO/bin/tmux-workspace.version given=${TMUX_WORKSPACE_BINARY:-}
     if [ -n "$given" ]; then
         [ -f "$given" ] || die "TMUX_WORKSPACE_BINARY is not a file: $given" 3
         if [ "$(resolve "$given")" = "$(resolve "$dest")" ] || cmp -s "$given" "$dest" 2>/dev/null; then return 0; fi
         act binary "$dest (from $given)" place_binary "$given" "$dest" "$stamp" ''
-    elif has cargo; then
-        if [ "$DRY" = 1 ]; then say would "build $dest with cargo"; return 0; fi
-        say build "cargo build --release --locked"
-        (cd "$REPO" && cargo build --release --locked) || die "cargo build failed" 3
-        built=${CARGO_TARGET_DIR:-$REPO/target}/release/tmux-workspace
-        [ -f "$built" ] || die "cargo build made no $built" 3
-        if cmp -s "$built" "$dest" 2>/dev/null; then
-            rm -f "${stamp:?}"
-            return 0
-        fi
-        act binary "$dest (built)" place_binary "$built" "$dest" "$stamp" ''
-    else
-        version=$(tree_version "$REPO")
-        [ -n "$version" ] || die "no version in $REPO/Cargo.toml" 3
-        if [ -x "$dest" ] && [ "$(cat "$stamp" 2>/dev/null || true)" = "$version" ]; then return 0; fi
-        if [ "$DRY" = 1 ]; then say would "download tmux-workspace $version to $dest"; return 0; fi
-        stage_archive "v$version"
-        act binary "$dest (release $version)" place_binary "$STAGED/bin/tmux-workspace" "$dest" "$stamp" "$version"
-        remove_stage
+        return 0
     fi
+    if ! has cargo && [ -x "$dest" ] && [ "$(cat "$stamp" 2>/dev/null || true)" = "$(tree_version "$REPO")" ]; then
+        return 0
+    fi
+    if [ "$DRY" = 1 ]; then
+        say would "build $dest with cargo, or download the release of $(tree_version "$REPO")"
+        return 0
+    fi
+    obtain_binary "$REPO" '' "cargo release"
+    if cmp -s "$NEW_BINARY" "$dest" 2>/dev/null && [ "$(cat "$stamp" 2>/dev/null || true)" = "$NEW_STAMP" ]; then
+        remove_stage
+        return 0
+    fi
+    act binary "$dest ($(binary_origin))" \
+        place_binary "$NEW_BINARY" "$dest" "$stamp" "$NEW_STAMP"
+    remove_stage
 }
 
 # ---------------------------------------------------------------------------------------------
