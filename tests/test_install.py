@@ -457,7 +457,9 @@ class Installer(unittest.TestCase):
         self.stub('zoxide')
         self.stub('ps', 'exit 1')  # BusyBox's: no -p, -t, lstart or tpgid, which agent status and save use
         out = self.install('--yes').stdout
-        self.assertIn('procps: agent status and snapshots need its ps (sudo apk add procps)', out)
+        # install.sh puts sudo in front of the package manager, unless it runs as root (a container does).
+        sudo = '' if os.geteuid() == 0 else 'sudo '
+        self.assertIn(f'procps: agent status and snapshots need its ps ({sudo}apk add procps)', out)
         self.install('--deps', '--yes')
         self.assertEqual(apk.read_text(), 'add -q procps\n')
         apk.unlink()
