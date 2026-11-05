@@ -13,12 +13,16 @@ build:
 
 # make test never writes bin/tmux-workspace: in a clone that is also the live install, tmux runs it in
 # every new pane. Its checksum from before the run (empty when it is absent) is checked at the end.
+# Every suite runs, whatever an earlier one did (cargo test stops at the first test binary that fails,
+# unless it is given --no-fail-fast), so that one run reports every failure.
 test: LIVE_BINARY := $(shell cksum bin/tmux-workspace 2>/dev/null)
 test: build
-	cargo test --features testing
-	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
-	@[ "$$(cksum bin/tmux-workspace 2>/dev/null)" = "$(LIVE_BINARY)" ] || \
-		{ echo 'make test: bin/tmux-workspace changed during the run' >&2; exit 1; }
+	status=0; \
+	cargo test --features testing --no-fail-fast || status=1; \
+	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' || status=1; \
+	[ "$$(cksum bin/tmux-workspace 2>/dev/null)" = "$(LIVE_BINARY)" ] || \
+		{ echo 'make test: bin/tmux-workspace changed during the run' >&2; status=1; }; \
+	exit $$status
 
 lint:
 	shellcheck $(SHELL_SCRIPTS)
