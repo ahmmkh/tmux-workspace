@@ -1909,22 +1909,33 @@ mod tests {
         }
     }
 
-    /// An executable named `codex` that sleeps. A symlink would show up as `sleep` in tmux on macOS, and a
-    /// plain copy of a system program is killed there, so the copy gets an ad-hoc signature.
+    /// An executable that tmux calls `codex` and that sleeps for its first argument (300 seconds without
+    /// one). tmux names a pane's program differently on the two systems:
+    ///
+    /// - macOS: by the executable. A symlink to `sleep` would show up as `sleep`, so the program is a
+    ///   copy of it, which macOS kills until the copy has an ad-hoc signature.
+    /// - Linux: by the first word of `/proc/<pgrp>/cmdline`, so a script that sets its own name (`$0` of
+    ///   Perl) will do. A copy, a link or `exec -a` of `sleep` would not: the coreutils of Ubuntu 26.04
+    ///   are one program (uutils) that picks the command from `argv[0]` and fails on `codex`.
     fn codex_program(dir: &Path) -> PathBuf {
         let program = dir.join("codex");
-        fs::copy(
-            crate::process::which("sleep").expect("sleep on PATH"),
-            &program,
-        )
-        .unwrap();
         if cfg!(target_os = "macos") {
+            fs::copy(
+                crate::process::which("sleep").expect("sleep on PATH"),
+                &program,
+            )
+            .unwrap();
             let signed = std::process::Command::new("codesign")
                 .args(["-s", "-", "-f"])
                 .arg(&program)
                 .output()
                 .expect("codesign");
             assert!(signed.status.success(), "{signed:?}");
+        } else {
+            crate::testing::write_script(
+                &program,
+                "#!/usr/bin/env perl\n$0 = 'codex';\nsleep(defined $ARGV[0] ? $ARGV[0] : 300);\n",
+            );
         }
         let runs = std::process::Command::new(&program)
             .arg("0")
@@ -1932,7 +1943,7 @@ mod tests {
             .unwrap();
         assert!(
             runs.success(),
-            "a copy of sleep named codex does not run: {runs}"
+            "the program named codex does not run: {runs}"
         );
         program
     }
