@@ -200,6 +200,18 @@ impl ScratchTmux {
         self.tmux(&["display-message", "-t", target, "-p", format])
     }
 
+    /// `value` as this server's tmux prints it with `-p`, `show-options -v` or `display-message`: byte for
+    /// byte on every version but 3.4, which prints each `$` as `\$`. That is a known issue: the product
+    /// reads a stored `a$b` as `a\$b` there. A test of what is stored compares with this, so it is exact on
+    /// every version and fails on one that corrupts the value.
+    pub fn as_printed(&self, value: &str) -> String {
+        if prints_dollar_escaped(&self.expand("alpha:one", "#{version}")) {
+            value.replace('$', "\\$")
+        } else {
+            value.to_string()
+        }
+    }
+
     /// The state directory the binary under test gets as `TMUX_WORKSPACE_STATE_DIR`.
     pub fn state_dir(&self) -> &Path {
         self.state.path()
@@ -452,6 +464,13 @@ impl Host for FakeHost {
     }
 }
 
+/// Whether a tmux of this `#{version}` (3.3a, 3.4, 3.8, next-3.5) prints `$` as `\$`: 3.4, and only 3.4.
+fn prints_dollar_escaped(version: &str) -> bool {
+    version
+        .strip_prefix("3.4")
+        .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_lowercase()))
+}
+
 /// Poll `read` until it gives `expected`, for up to 5 s, then assert that it does.
 pub fn wait_for(read: impl Fn() -> String, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -464,6 +483,31 @@ pub fn wait_for(read: impl Fn() -> String, expected: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_tmux_3_4_prints_a_dollar_escaped() {
+        for version in ["3.4", "3.4a"] {
+            assert!(prints_dollar_escaped(version), "{version}");
+        }
+        for version in [
+            "3.3", "3.3a", "3.5", "3.8", "3.40", "3.4.1", "next-3.4", "next-3.5", "",
+        ] {
+            assert!(!prints_dollar_escaped(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn a_dollar_prints_as_the_version_of_this_server_prints_it() {
+        let scratch = ScratchTmux::new();
+        scratch.tmux(&["set-option", "-g", "@probe", "a$b"]);
+        let printed = scratch.tmux(&["show-options", "-gqv", "@probe"]);
+        assert_eq!(printed, scratch.as_printed("a$b"));
+        assert_ne!(
+            printed,
+            scratch.as_printed("a\\$b"),
+            "a corrupted value is told apart"
+        );
+    }
 
     #[test]
     fn temp_dir_exists_until_dropped() {

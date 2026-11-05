@@ -862,10 +862,10 @@ fn a_label_reads_back_unchanged() {
         let out = world.run(&["pane-start"]);
         assert!(out.status.success());
         assert_eq!(text(&out.stdout), "", "{label}: asked for a label");
-        // tmux 3.4 prints a $ of its output as \$ (3.3a and 3.8 do not); the stored label is what was set.
+        // Exactly what was set, as this tmux prints it (3.4 escapes the $: see ScratchTmux::as_printed).
         assert_eq!(
-            world.pane_option("@workspace_label").replace("\\$", "$"),
-            label
+            world.pane_option("@workspace_label"),
+            world.scratch.as_printed(label)
         );
     }
 }
