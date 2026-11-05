@@ -511,8 +511,14 @@ fn zoxide_match(setting: &Setting, query: &str) -> Option<PathBuf> {
     if query == "." {
         return None;
     }
+    // A name like `--list` is a name here, as it is for tmux, and not one of zoxide's options.
+    let mut argv = strings(&["zoxide", "query"]);
+    if query.starts_with('-') {
+        argv.push("--".to_string());
+    }
+    argv.push(query.to_string());
     let answer = spawn(&Spawn {
-        argv: strings(&["zoxide", "query", query]),
+        argv,
         ..Spawn::default()
     })
     .ok()?;
