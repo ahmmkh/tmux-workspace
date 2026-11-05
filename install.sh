@@ -376,10 +376,12 @@ remote_install() {
     home=$(share_home)
     detect_platform
     if [ -e "$home/.git" ]; then clone_install "$home"; fi
-    if [ "$UNINSTALL" = 1 ]; then
+    # Removing or updating is the business of the installed release's own installer.
+    if [ "$UNINSTALL" = 1 ] || [ "$UPDATE" = 1 ]; then
         if [ -f "$home/current/install.sh" ]; then
             exec bash "$home/current/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
         fi
+        [ "$UPDATE" = 0 ] || die "no tmux-workspace in $home, so nothing to update; install it without --update" 1
         say "done" "nothing to remove"
         exit 0
     fi

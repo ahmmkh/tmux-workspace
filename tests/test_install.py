@@ -714,6 +714,21 @@ class Installer(unittest.TestCase):
         self.update(dist=self.newer('2.0.1'))
         self.assertNotIn('source-file', self.tmux_log.read_text())
 
+    def test_a_piped_update_is_the_update_of_the_installed_release(self):
+        self.release('2.0.0')
+        before = self.tree()
+        out = self.piped('--update', '--check', TMUX_WORKSPACE_DIST=str(self.newer('2.0.1'))).stdout
+        self.assertIn('update available: 2.0.0 → 2.0.1', out)
+        self.assertEqual(self.tree(), before)
+        out = self.piped('--update', TMUX_WORKSPACE_DIST=str(self.newer('2.0.1'))).stdout
+        self.assertIn('updated 2.0.0 → 2.0.1', out)
+
+    def test_a_piped_update_without_an_install_says_so(self):
+        result = self.piped('--update', check=False, TMUX_WORKSPACE_DIST=str(release_dist()))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('nothing to update', result.stderr)
+        self.assertEqual(self.tree(), {})
+
     def test_update_flags_are_checked(self):
         self.assertEqual(self.install('--check', check=False).returncode, 2)
         self.assertEqual(self.install('--update', '--uninstall', check=False).returncode, 2)
