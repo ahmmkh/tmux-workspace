@@ -55,6 +55,9 @@
 <rect x="100.0" y="558.0" width="50.4" height="18.0" fill="#7aa2f7"/>
 <text x="100.0" y="571.5" fill="#16161e" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" font-weight="bold">1:code</text>
 <rect x="150.4" y="558.0" width="8.4" height="18.0" fill="#16161e"/>
-<rect x="158.8" y="558.0" width="957.6" height="18.0" fill="#16161e"/>
-<text x="158.8" y="571.5" fill="#a9b1d6" textLength="957.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  2:server                                                                   save 02:28 | C-a D health | Thu 02:28</text>
+<rect x="158.8" y="558.0" width="84.0" height="18.0" fill="#16161e"/>
+<text x="158.8" y="571.5" fill="#a9b1d6" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  2:server</text>
+<rect x="242.8" y="558.0" width="562.8" height="18.0" fill="#16161e"/>
+<rect x="805.6" y="558.0" width="310.8" height="18.0" fill="#16161e"/>
+<text x="805.6" y="571.5" fill="#a9b1d6" textLength="310.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve">save 03:02 | C-a D health | Thu 03:02</text>
 </svg>

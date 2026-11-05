@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from ansi2svg import CELL, PAD, convert  # noqa: E402
+from ansi2svg import CELL, PAD, animate, convert  # noqa: E402
 
 
 class Convert(unittest.TestCase):
@@ -45,6 +45,32 @@ class Convert(unittest.TestCase):
     def test_output_is_well_formed_xml(self):
         import xml.dom.minidom
         xml.dom.minidom.parseString(convert('\x1b[1;31m● blocked\x1b[0m │ <ok>\n日本', title='t & t'))
+
+
+class Animate(unittest.TestCase):
+    def setUp(self):
+        self.svg = animate([('$ ', 1.0), ('$ ./install.sh', 2.0), ('\x1b[32mdone\x1b[0m', 1.0)], title='first run')
+
+    def test_one_group_per_frame(self):
+        for i in range(3):
+            self.assertIn(f'class="frame f{i}"', self.svg)
+
+    def test_frames_share_one_loop(self):
+        self.assertIn('animation: k0 4.0s step-end infinite', self.svg)
+        self.assertIn('@keyframes k1 { 0% { opacity: 0 } 25.000% { opacity: 1 } 75.000% { opacity: 0 } }', self.svg)
+
+    def test_reduced_motion_shows_the_last_frame(self):
+        self.assertIn('prefers-reduced-motion', self.svg)
+        # Same specificity, later rule wins: g.frame would outrank .f2 and hide every frame.
+        self.assertIn('.frame { opacity: 0 } .f2 { opacity: 1 }', self.svg)
+        self.assertNotIn('g.frame { opacity', self.svg)
+
+    def test_frames_of_different_sizes_share_the_largest_canvas(self):
+        self.assertIn('width="%.0f"' % (2 * PAD + len('$ ./install.sh') * CELL), self.svg)
+
+    def test_animation_is_well_formed_xml(self):
+        import xml.dom.minidom
+        xml.dom.minidom.parseString(self.svg)
 
 
 if __name__ == '__main__':

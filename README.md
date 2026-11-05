@@ -43,6 +43,8 @@ you, and brings everything back after a reboot.
 curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.sh | bash
 ```
 
+<img src="docs/images/onboarding.svg" alt="Animation of a first run: install.sh links its files, asks where projects live (answered ~/code), then a new terminal runs work api, names the first pane, and opens the dashboard with Ctrl+a A" width="100%">
+
 The installer clones into `~/.local/share/tmux-workspace`, checks for tmux 3.3+ and Python 3.9+,
 links its files into `~/.local/bin` and `~/.config`, adds the `work` command to your shell, and asks
 where you keep your projects. Every file it replaces is backed up, and running it again changes
@@ -179,7 +181,7 @@ Your snapshots and `~/.config/tmux-workspace` stay.
 ```sh
 make lint test        # shellcheck, Python 3.9 compatibility, unit and tmux tests
 make test-install     # install in Ubuntu, Debian, Fedora, Arch and Alpine containers (Docker)
-make screenshots      # rebuild docs/images from a demo server
+make screenshots      # rebuild docs/images, including the first-run animation, from a demo server
 ```
 
 Tests never touch your tmux server: each one runs on its own socket with a temporary state

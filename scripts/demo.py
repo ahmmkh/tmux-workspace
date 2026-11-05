@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build a demo workspace on a private tmux server and capture the README screenshots.
+"""Build demo workspaces on a private tmux server and capture the README screenshots, and record
+a first run (install, onboarding, work, the dashboard) as an animated SVG.
 
     python3 scripts/demo.py            (or: make screenshots)
 
@@ -17,7 +18,7 @@ import time
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ansi2svg import convert  # noqa: E402
+from ansi2svg import animate, convert  # noqa: E402
 
 WIDTH, HEIGHT = 132, 30
 IMAGES = REPO / 'docs' / 'images'
@@ -56,16 +57,17 @@ class Demo:
         self.root = Path(tempfile.mkdtemp(prefix='tw-demo-')).resolve()
         self.home = self.root / 'home'
         self.home.mkdir()
-        self.env = {k: v for k, v in os.environ.items() if k not in ('TMUX', 'TMUX_PANE')}
-        # Every place a tool may write is inside the sandbox; a real XDG_CONFIG_HOME once leaked through.
+        # An allowlist, not a copy of the caller's environment: nothing from the real machine (terminal,
+        # host name, config folders) may reach a frame or a tool. A real XDG_CONFIG_HOME once leaked through.
+        self.env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(self.home),
+                    'LANG': 'en_US.UTF-8', 'TERM': 'xterm-256color', 'SHELL': '/bin/bash',
+                    'BASH_SILENCE_DEPRECATION_WARNING': '1',
+                    'TMUX_TMPDIR': str(self.root / 'sockets'), 'TMUX_WORKSPACE_STATE_DIR': str(self.root / 'state')}
         for name, folder in (('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'),
                              ('XDG_STATE_HOME', '.local/state'), ('XDG_CACHE_HOME', '.cache')):
             self.env[name] = str(self.home / folder)
-        for name in ('ZDOTDIR', 'CODEX_HOME', '_ZO_DATA_DIR', 'TMUX_WORKSPACE_PROJECTS', 'TMUX_WORKSPACE_HOME'):
-            self.env.pop(name, None)
-        self.env.update(HOME=str(self.home), TMUX_TMPDIR=str(self.root / 'sockets'),
-                        TMUX_WORKSPACE_STATE_DIR=str(self.root / 'state'), TERM='xterm-256color',
-                        SHELL='/bin/sh', LANG=os.environ.get('LANG', 'en_US.UTF-8'))
+        self.outer_conf = self.root / 'outer.conf'
+        self.outer_conf.write_text('set -g default-terminal xterm-256color\nset -g status off\n')
         (self.root / 'sockets').mkdir(mode=0o700)
 
     def run(self, *args, **kwargs):
@@ -77,7 +79,11 @@ class Demo:
         return self.run('tmux', '-L', 'tw-demo', *args).rstrip('\n')
 
     def outer(self, *args):
-        return self.run('tmux', '-L', 'tw-outer', '-f', '/dev/null', *args).rstrip('\n')
+        return self.run('tmux', '-L', 'tw-outer', '-f', str(self.outer_conf), *args).rstrip('\n')
+
+    def private(self, text):
+        """Show the sandbox home as ~, as it is for the demo user."""
+        return text.replace(str(self.home), '~').replace(str(self.root), '~')
 
     def screen_command(self, text):
         path = self.root / f'screen-{len(list(self.root.glob("screen-*")))}.txt'
@@ -132,14 +138,12 @@ class Demo:
     def attach(self):
         """The demo client, inside a plain tmux pane that we can capture whole."""
         self.outer('new-session', '-d', '-s', 'view', '-x', str(WIDTH), '-y', str(HEIGHT),
-                   f'env -u TMUX tmux -L tw-demo attach -t api')
-        self.outer('set', '-g', 'default-terminal', 'xterm-256color')
-        self.outer('set', '-g', 'status', 'off')
+                   'env -u TMUX tmux -L tw-demo attach -t api')
         time.sleep(1.5)
 
-    def keys(self, *keys, wait=1.5):
+    def keys(self, *keys, wait=1.5, target='view'):
         for key in keys:
-            self.outer('send-keys', '-t', 'view', key)
+            self.outer('send-keys', '-t', target, key)
             time.sleep(0.2)
         time.sleep(wait)
 
@@ -161,8 +165,79 @@ class Demo:
         self.shot('window-picker', 'Ctrl+a w - tabs with a live preview')
         self.keys('Escape', wait=0.5)
 
+    # -----------------------------------------------------------------------------------------
+    # The first run, as a stranger sees it: install, onboarding, a workspace, the dashboard.
+
+    ONBOARDING_SIZE = (100, 26)
+
+    def screen(self, target='first'):
+        # -J joins lines the terminal wrapped, so a long path is whole when private() shortens it.
+        return self.private(self.outer('capture-pane', '-e', '-p', '-J', '-t', target))
+
+    def wait_for(self, needle, timeout=30, target='first'):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if needle in self.outer('capture-pane', '-p', '-t', target):
+                return
+            time.sleep(0.2)
+        raise RuntimeError(f'demo: {needle!r} never appeared:\n' + self.outer('capture-pane', '-p', '-t', target))
+
+    def type(self, frames, text, hold=0.12):
+        """Type like a person, one frame per couple of characters."""
+        for i in range(0, len(text), 2):
+            self.outer('send-keys', '-t', 'first', '-l', text[i:i + 2])
+            time.sleep(0.08)
+            frames.append((self.screen(), hold))
+
+    def onboarding(self):
+        clone = self.home / 'tmux-workspace'
+        for name in self.run('git', '-C', str(REPO), 'ls-files').split('\n'):
+            if name and (REPO / name).is_file() and not name.startswith('docs/images/'):
+                (clone / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPO / name, clone / name)
+        (self.home / '.bashrc').write_text("PS1='$ '\n")
+        (self.home / '.bash_profile').write_text('[ -f ~/.bashrc ] && . ~/.bashrc\n')
+        shell = 'env -u TMUX -u TMUX_PANE bash --noprofile --rcfile ~/.bashrc -i'
+        cols, rows = self.ONBOARDING_SIZE
+        self.outer('new-session', '-d', '-s', 'first', '-x', str(cols), '-y', str(rows), '-c', str(clone), shell)
+        frames = []
+        self.wait_for('$')
+        frames.append((self.screen(), 1.2))
+        self.type(frames, './install.sh')
+        self.outer('send-keys', '-t', 'first', 'Enter')
+        self.wait_for('Where do you keep your projects?')
+        time.sleep(0.3)
+        frames.append((self.screen(), 3.5))
+        self.type(frames, '~/code')
+        self.outer('send-keys', '-t', 'first', 'Enter')
+        self.wait_for('tmux-workspace installed')
+        time.sleep(0.3)
+        frames.append((self.screen(), 4.5))
+        # A new terminal: its shell now has the work command.
+        self.outer('respawn-pane', '-k', '-t', 'first', '-c', str(self.home), shell)
+        self.wait_for('$')
+        frames.append((self.screen(), 1.0))
+        self.type(frames, 'work api')
+        self.outer('send-keys', '-t', 'first', 'Enter')
+        self.wait_for('Pane label')
+        time.sleep(0.3)
+        frames.append((self.screen(), 1.5))
+        self.type(frames, 'server')
+        self.outer('send-keys', '-t', 'first', 'Enter')
+        time.sleep(1.5)
+        frames.append((self.screen(), 2.0))
+        self.keys('C-a', 'A', wait=0, target='first')
+        self.wait_for('WORKSPACE')
+        time.sleep(0.5)
+        frames.append((self.screen(), 4.5))
+        self.keys('q', wait=0.3, target='first')
+        IMAGES.mkdir(parents=True, exist_ok=True)
+        (IMAGES / 'onboarding.svg').write_text(animate(frames, 'first run: install, choose a folder, work, Ctrl+a A', cols=cols))
+        print('wrote', IMAGES / 'onboarding.svg', f'({len(frames)} frames)')
+
     def close(self):
-        for args in (('tmux', '-L', 'tw-outer', 'kill-server'), ('tmux', '-L', 'tw-demo', 'kill-server')):
+        for args in (('tmux', '-L', 'tw-outer', 'kill-server'), ('tmux', '-L', 'tw-demo', 'kill-server'),
+                     ('tmux', 'kill-server')):  # the onboarding's own server, on the sandbox's default socket
             subprocess.run(args, env=self.env, capture_output=True)
         shutil.rmtree(self.root, ignore_errors=True)
 
@@ -178,6 +253,11 @@ def main():
         demo.capture()
     finally:
         demo.close()
+    first = Demo()
+    try:
+        first.onboarding()
+    finally:
+        first.close()
 
 
 if __name__ == '__main__':

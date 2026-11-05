@@ -118,24 +118,15 @@ def runs(line, style):
     return out, column
 
 
-def convert(ansi, title='', cols=None):
+def body(ansi):
+    """The SVG elements of one screen, and its size in cells."""
     style = Style()
-    lines = []
-    widest = 0
+    lines, widest = [], 0
     for raw in ansi.rstrip('\n').split('\n'):
         parts, column = runs(raw, style)
         lines.append(parts)
         widest = max(widest, column)
-    cols = cols or widest
-    total_w = 2 * PAD + cols * CELL
-    total_h = TOP + PAD + len(lines) * LINE
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w:.0f}" height="{total_h:.0f}" '
-           f'viewBox="0 0 {total_w:.0f} {total_h:.0f}" font-family="{escape(FONTS)}" font-size="{FONT}">',
-           f'<rect width="100%" height="100%" rx="10" fill="{BACKGROUND}"/>']
-    for i, colour in enumerate(('#f7768e', '#e0af68', '#9ece6a')):
-        out.append(f'<circle cx="{PAD + 6 + i * 20:.0f}" cy="18" r="6" fill="{colour}"/>')
-    if title:
-        out.append(f'<text x="{total_w / 2:.1f}" y="23" text-anchor="middle" fill="#565f89">{escape(title)}</text>')
+    out = []
     for row, parts in enumerate(lines):
         top = TOP + row * LINE
         baseline = top + LINE * 0.75
@@ -158,8 +149,50 @@ def convert(ansi, title='', cols=None):
             if dim:
                 attrs.append('opacity="0.6"')
             out.append(f'<text {" ".join(attrs)}>{escape(text)}</text>')
-    out.append('</svg>')
-    return '\n'.join(out) + '\n'
+    return out, widest, len(lines)
+
+
+def document(cols, rows, title, content, style=''):
+    total_w = 2 * PAD + cols * CELL
+    total_h = TOP + PAD + rows * LINE
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w:.0f}" height="{total_h:.0f}" '
+           f'viewBox="0 0 {total_w:.0f} {total_h:.0f}" font-family="{escape(FONTS)}" font-size="{FONT}">']
+    if style:
+        out.append(f'<style>{style}</style>')
+    out.append(f'<rect width="100%" height="100%" rx="10" fill="{BACKGROUND}"/>')
+    for i, colour in enumerate(('#f7768e', '#e0af68', '#9ece6a')):
+        out.append(f'<circle cx="{PAD + 6 + i * 20:.0f}" cy="18" r="6" fill="{colour}"/>')
+    if title:
+        out.append(f'<text x="{total_w / 2:.1f}" y="23" text-anchor="middle" fill="#565f89">{escape(title)}</text>')
+    return '\n'.join(out + content + ['</svg>']) + '\n'
+
+
+def convert(ansi, title='', cols=None):
+    elements, widest, rows = body(ansi)
+    return document(cols or widest, rows, title, elements)
+
+
+def animate(frames, title='', cols=None):
+    """One looping SVG from (ansi, seconds) frames. CSS shows each frame for its share of the loop;
+    viewers who prefer reduced motion see the last frame only."""
+    bodies = [body(ansi) for ansi, _ in frames]
+    total = sum(seconds for _, seconds in frames)
+    cols = cols or max(widest for _, widest, _ in bodies)
+    rows = max(count for _, _, count in bodies)
+    last = len(frames) - 1
+    css = [f'.frame {{ opacity: 0 }} .f{last} {{ opacity: 1 }}']
+    groups, start = [], 0.0
+    for i, ((elements, _, _), (_, seconds)) in enumerate(zip(bodies, frames)):
+        begin, end = 100 * start / total, 100 * (start + seconds) / total
+        steps = ['0% { opacity: 1 }' if i == 0 else f'0% {{ opacity: 0 }} {begin:.3f}% {{ opacity: 1 }}']
+        if i < last:
+            steps.append(f'{end:.3f}% {{ opacity: 0 }}')
+        css.append(f'@keyframes k{i} {{ {" ".join(steps)} }}')
+        css.append(f'.f{i} {{ animation: k{i} {total:.1f}s step-end infinite }}')
+        groups.append(f'<g class="frame f{i}">' + ''.join(elements) + '</g>')
+        start += seconds
+    css.append('@media (prefers-reduced-motion: reduce) { g.frame { animation: none } }')
+    return document(cols, rows, title, groups, ' '.join(css))
 
 
 def main(argv):
