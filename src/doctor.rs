@@ -2,7 +2,7 @@
 //! output, and it never starts a tmux server.
 
 use crate::error::Result;
-use crate::integrations::{codex_dir, ours, render};
+use crate::integrations::{codex_dir, hook_commands, old_mark, ours, render};
 use crate::model::option_json;
 use crate::paths::{TMUX_MIN, cannot_read, home, resolve, share_root, state_dir};
 use crate::process::{Spawn, spawn, which};
@@ -345,31 +345,6 @@ fn binary_on_path(report: &mut Report) {
     }
 }
 
-/// Every hook command and the status line command in a Claude or Codex settings file. A file that
-/// cannot be read or understood has none.
-fn hook_commands(path: &Path) -> Vec<String> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(settings) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
-    };
-    let events = settings.get("hooks").and_then(Value::as_object);
-    let hooks = events
-        .into_iter()
-        .flat_map(|events| events.values())
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-        .flatten();
-    let line = settings.get("statusLine");
-    hooks
-        .chain(line)
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .map(String::from)
-        .collect()
-}
-
 /// Whether Claude and Codex run this program's hook: the hooks of the Python version still work with
 /// their helper, but the installer rewrites them.
 fn agent_integrations(report: &mut Report, machine: &Machine) {
@@ -381,7 +356,7 @@ fn agent_integrations(report: &mut Report, machine: &Machine) {
         ("Codex", machine.codex.join("hooks.json")),
     ] {
         let commands = hook_commands(&path);
-        old |= commands.iter().any(|c| c.contains("agent-hook.py"));
+        old |= commands.iter().any(|c| old_mark(c));
         if commands
             .iter()
             .any(|c| ours(c) && c.contains(" agent-hook "))
@@ -701,31 +676,6 @@ mod tests {
                 "{raw:?}"
             );
         }
-    }
-
-    #[test]
-    fn hook_commands_are_read_from_hooks_and_the_status_line() {
-        let dir = TempDir::new();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            json!({
-                "hooks": {"Stop": [{"hooks": [{"command": "a"}, {"type": "command"}]}, "x", {"hooks": 3}],
-                          "Other": "x"},
-                "statusLine": {"command": "line"}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert_eq!(hook_commands(&path), ["a", "line"]);
-        assert_eq!(
-            hook_commands(&dir.path().join("missing.json")),
-            Vec::<String>::new()
-        );
-        fs::write(&path, "{broken").unwrap();
-        assert_eq!(hook_commands(&path), Vec::<String>::new());
-        fs::write(&path, "[1]").unwrap();
-        assert_eq!(hook_commands(&path), Vec::<String>::new());
     }
 
     #[test]

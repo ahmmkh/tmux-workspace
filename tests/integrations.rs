@@ -194,7 +194,8 @@ fn templates_name_no_author_paths() {
 
 #[test]
 fn merge_replaces_old_agent_hook_entries_instead_of_duplicating() {
-    let python = json!({"type": "command", "command": "/usr/bin/python3 /old/agent-hook.py codex", "timeout": 3});
+    let python = json!({"type": "command",
+        "command": "/usr/bin/python3 /old/clone/tmux-workspace/integrations/agent-hook.py codex", "timeout": 3});
     let installed_python = json!({"type": "command",
         "command": "/usr/bin/python3 /h/.local/lib/tmux-workspace/agent-hook.py claude", "timeout": 3});
     let before = json!({"type": "command", "command": "/h/.local/bin/tmux-workspace agent-hook codex", "timeout": 3});
@@ -221,7 +222,11 @@ fn merge_replaces_old_agent_hook_entries_instead_of_duplicating() {
 #[test]
 fn ours_names_only_this_projects_commands() {
     for command in [
+        // Every form this project ever registered.
         "/usr/bin/python3 /h/.local/lib/tmux-workspace/agent-hook.py claude",
+        "/usr/bin/python3 /Users/u/.local/lib/tmux-workspace/agent-hook.py claude-status",
+        "/usr/bin/python3 /Users/u/Projects/tmux-workspace/integrations/agent-hook.py claude",
+        r#"[ -n "$TMUX_PANE" ] && /usr/bin/env python3 /h/.local/lib/tmux-workspace/agent-hook.py codex; true"#,
         "/h/.local/bin/tmux-workspace agent-hook claude",
         r#"[ -n "$TMUX_PANE" ] && '/t/a b/.local/bin/tmux-workspace' agent-hook codex; true"#,
     ] {
@@ -232,10 +237,40 @@ fn ours_names_only_this_projects_commands() {
         "my-agent-hook run",
         "tmux-workspace save",
         "other-tool agent-hook claude",
+        // A user's own hook that happens to be called agent-hook.py.
+        "python3 /home/u/bin/my-agent-hook.py stop",
+        "python3 /home/u/bin/agent-hook.py stop",
+        "/usr/bin/python3 /home/u/bin/agent-hook.py claude",
+        "agent-hook.py",
         "",
     ] {
         assert!(!ours(command), "{command}");
     }
+}
+
+#[test]
+fn a_users_own_agent_hook_py_survives_install_and_uninstall() {
+    let mine = json!({"type": "command", "command": "python3 /home/u/bin/my-agent-hook.py stop"});
+    let theirs =
+        json!({"type": "command", "command": "/usr/bin/python3 /home/u/bin/agent-hook.py claude"});
+    let (world, data, _) = claude_install(Some(json!({"hooks": {"Stop": [
+        {"hooks": [mine, theirs]}]}})));
+    assert_eq!(
+        commands(&data, "Stop"),
+        [
+            "python3 /home/u/bin/my-agent-hook.py stop",
+            "/usr/bin/python3 /home/u/bin/agent-hook.py claude"
+        ]
+    );
+    world.uninstall();
+    let after = world.read_json(".claude/settings.json");
+    assert_eq!(
+        commands(&after, "Stop"),
+        [
+            "python3 /home/u/bin/my-agent-hook.py stop",
+            "/usr/bin/python3 /home/u/bin/agent-hook.py claude"
+        ]
+    );
 }
 
 fn claude_install(settings: Option<Value>) -> (World, Value, Vec<String>) {
@@ -449,6 +484,151 @@ fn install_keeps_a_hook_link_that_is_not_the_old_one() {
     assert!(fs::symlink_metadata(&link).is_ok());
     assert!(file.exists());
     assert_eq!(actions, Vec::<String>::new());
+}
+
+/// A link of the Python version, whose clone is gone.
+fn old_link(world: &World) -> PathBuf {
+    world.mkdir(".local/lib/tmux-workspace");
+    let link = world.path(".local/lib/tmux-workspace/agent-hook.py");
+    symlink("/old/clone/integrations/agent-hook.py", &link).unwrap();
+    link
+}
+
+/// Settings of the Python version: a hook and a status line that run the helper through that link.
+fn old_settings(world: &World) -> Value {
+    let helper = world.path(".local/lib/tmux-workspace/agent-hook.py");
+    json!({"statusLine": {"type": "command", "refreshInterval": 1,
+            "command": format!("/usr/bin/python3 {} claude-status", helper.display())},
+        "model": "opus",
+        "hooks": {"SessionStart": [{"hooks": [{"type": "command", "timeout": 3,
+            "command": format!("/usr/bin/python3 {} claude", helper.display())}]}]}})
+}
+
+#[test]
+fn a_failing_codex_step_keeps_the_old_hook_link() {
+    let world = World::new();
+    let link = old_link(&world);
+    world.mkdir(".codex");
+    fs::write(world.path(".codex/hooks.json"), "not json").unwrap();
+    world.mkdir(".claude");
+    let old = old_settings(&world);
+    world.write_json(".claude/settings.json", &old);
+
+    let error = install_on(&world.target("Linux")).unwrap_err();
+
+    assert!(error.to_string().contains("hooks.json"), "{error}");
+    assert!(
+        fs::symlink_metadata(&link).is_ok(),
+        "the Claude hooks still run the helper through this link"
+    );
+    assert_eq!(world.read_json(".claude/settings.json"), old);
+}
+
+#[test]
+fn a_failing_claude_step_keeps_the_old_hook_link() {
+    let world = World::new();
+    let link = old_link(&world);
+    world.mkdir(".claude");
+    let mut broken = old_settings(&world);
+    broken["hooks"]["Stop"] = json!("not a list");
+    world.write_json(".claude/settings.json", &broken);
+
+    assert!(install_on(&world.target("Linux")).is_err());
+
+    assert!(fs::symlink_metadata(&link).is_ok());
+}
+
+#[test]
+fn a_clean_run_replaces_the_old_entries_and_then_removes_the_old_hook_link() {
+    let world = World::new();
+    let link = old_link(&world);
+    world.mkdir(".claude");
+    let old = old_settings(&world);
+    world.write_json(".claude/settings.json", &old);
+
+    let actions = world.install("Linux");
+
+    assert!(fs::symlink_metadata(&link).is_err(), "{actions:?}");
+    let settings = world.read_json(".claude/settings.json");
+    assert!(!settings.to_string().contains("agent-hook.py"));
+    // The link goes once nothing runs through it, so it is told after the hooks.
+    let hooks = actions
+        .iter()
+        .position(|a| a.starts_with("Claude hooks installed"))
+        .unwrap();
+    let removed = actions
+        .iter()
+        .position(|a| a == &format!("link {} removed", link.display()))
+        .unwrap();
+    assert!(hooks < removed, "{actions:?}");
+}
+
+#[test]
+fn old_entries_that_install_did_not_reach_keep_the_old_hook_link() {
+    // Codex is looked for in CODEX_HOME, but the old entries are in ~/.codex.
+    let world = World::new();
+    let link = old_link(&world);
+    world.mkdir("custom-codex");
+    world.mkdir(".codex");
+    let helper = world.path(".local/lib/tmux-workspace/agent-hook.py");
+    world.write_json(
+        ".codex/hooks.json",
+        &json!({"hooks": {"Stop": [{"hooks": [{"type": "command",
+            "command": format!("/usr/bin/python3 {} codex", helper.display())}]}]}}),
+    );
+    let mut target = world.target("Linux");
+    target.codex_home = Some(world.path("custom-codex"));
+
+    let actions = install_on(&target).unwrap();
+
+    assert!(fs::symlink_metadata(&link).is_ok());
+    let kept = actions
+        .iter()
+        .find(|a| a.starts_with(&format!("link {} kept", link.display())))
+        .unwrap();
+    assert!(
+        kept.contains(&world.path(".codex/hooks.json").display().to_string()),
+        "{kept}"
+    );
+    // The next run, once the entries are gone, removes it.
+    fs::remove_file(world.path(".codex/hooks.json")).unwrap();
+    let actions = install_on(&target).unwrap();
+    assert!(
+        actions.contains(&format!("link {} removed", link.display())),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn uninstall_keeps_the_key_order_of_the_settings() {
+    let world = World::new();
+    world.mkdir(".claude");
+    // The status line comes first, so removing it must not move the last key into its place.
+    world.write_json(
+        ".claude/settings.json",
+        &json!({"statusLine": {"type": "command",
+                "command": format!("{} agent-hook claude-status", world.binary())},
+            "model": "opus", "env": {"A": "1"}, "theme": "dark", "hooks": {}, "effort": "high"}),
+    );
+
+    let actions = world.uninstall();
+
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        fs::read_to_string(world.path(".claude/settings.json")).unwrap(),
+        "{\n  \"model\": \"opus\",\n  \"env\": {\n    \"A\": \"1\"\n  },\n  \"theme\": \"dark\",\n  \"hooks\": {},\n  \"effort\": \"high\"\n}\n"
+    );
+}
+
+#[test]
+fn install_keeps_the_key_order_of_the_settings() {
+    let (world, _, _) = claude_install(Some(json!({
+        "statusLine": {"type": "command", "command": "/h/.local/lib/tmux-workspace/agent-hook.py claude-status"},
+        "model": "opus", "hooks": {}, "effort": "high"
+    })));
+    let settings = world.read_json(".claude/settings.json");
+    let keys: Vec<&String> = settings.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["statusLine", "model", "hooks", "effort"]);
 }
 
 #[test]

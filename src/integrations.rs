@@ -31,12 +31,43 @@ pub fn codex_dir(home: &Path) -> PathBuf {
         .map_or_else(|| home.join(".codex"), PathBuf::from)
 }
 
+/// Whether a hook command is the form this project registered before the Rust rewrite: the Python
+/// helper, `.../tmux-workspace/agent-hook.py`, in the share folder of a clone or in `~/.local/lib`. A
+/// user's own `agent-hook.py` is not, so the project's name has to be in the path as well.
+pub fn old_mark(command: &str) -> bool {
+    command.contains("/agent-hook.py") && command.contains("tmux-workspace")
+}
+
 /// Whether a hook command is one this project registered: the current form runs
-/// `<path>/tmux-workspace agent-hook <kind>`, and the form before the Rust rewrite named
-/// `agent-hook.py`. A user's own hook is neither.
+/// `<path>/tmux-workspace agent-hook <kind>`, and the form before the Rust rewrite ran the Python helper
+/// (see [`old_mark`]). A user's own hook is neither.
 pub fn ours(command: &str) -> bool {
-    command.contains("agent-hook.py")
-        || (command.contains("tmux-workspace") && command.contains(" agent-hook "))
+    old_mark(command) || (command.contains("tmux-workspace") && command.contains(" agent-hook "))
+}
+
+/// Every hook command and the status line command in a Claude or Codex settings file. A file that
+/// cannot be read or understood has none.
+pub fn hook_commands(path: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let events = settings.get("hooks").and_then(Value::as_object);
+    let hooks = events
+        .into_iter()
+        .flat_map(|events| events.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten();
+    let line = settings.get("statusLine");
+    hooks
+        .chain(line)
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .map(String::from)
+        .collect()
 }
 
 /// An `integrations/*-hooks.json` template with `{{BIN}}` filled in: the installed binary of this
@@ -393,20 +424,38 @@ impl<'a> Installer<'a> {
         Ok(changed)
     }
 
-    /// Remove the link the Python version made for its hook.
+    /// Remove the link the Python version made for its hook, once no settings file runs the helper
+    /// through it: its hooks would fail in every session. Otherwise keep it and say why.
     fn drop_old_hook_link(&mut self) -> Result<()> {
-        let link = self.target.old_hook_link();
-        if old_hook_link(&link) {
-            fs::remove_file(&link).map_err(|e| cannot_write(&link, e))?;
-            self.actions
-                .push(format!("link {} removed", link.display()));
+        let target = self.target;
+        let link = target.old_hook_link();
+        if !old_hook_link(&link) {
+            return Ok(());
         }
+        let mut files = vec![target.codex_hooks(), target.claude_settings()];
+        let default_codex = target.home.join(".codex/hooks.json");
+        if !files.contains(&default_codex) {
+            files.push(default_codex);
+        }
+        if let Some(file) = files
+            .iter()
+            .find(|file| hook_commands(file).iter().any(|c| old_mark(c)))
+        {
+            self.actions.push(format!(
+                "link {} kept: {} still has old Python hook entries",
+                link.display(),
+                file.display()
+            ));
+            return Ok(());
+        }
+        fs::remove_file(&link).map_err(|e| cannot_write(&link, e))?;
+        self.actions
+            .push(format!("link {} removed", link.display()));
         Ok(())
     }
 
     fn run(mut self) -> Result<Vec<String>> {
         let target = self.target;
-        self.drop_old_hook_link()?;
         if target.codex().is_dir() {
             let template = target.source("codex-hooks.json");
             if self.hooks(&target.codex_hooks(), &template, "Codex")? {
@@ -443,6 +492,8 @@ impl<'a> Installer<'a> {
             self.actions
                 .push("iTerm2: select Profiles > tmux workspace for a new tab.".to_string());
         }
+        // Last: the hooks that ran through it are rewritten by now.
+        self.drop_old_hook_link()?;
         if self.backups.exists() {
             self.actions
                 .push(format!("backups in {}", self.backups.display()));
@@ -467,7 +518,8 @@ impl<'a> Installer<'a> {
                 .get("statusLine")
                 .is_some_and(|line| line.is_object() && command_of(line).is_some_and(ours));
             if line_is_ours && let Some(object) = data.as_object_mut() {
-                object.remove("statusLine");
+                // Not `remove`: with preserve_order that moves the last key into this one's place.
+                object.shift_remove("statusLine");
                 changed = true;
             }
             if changed {
@@ -711,7 +763,7 @@ mod tests {
             {"matcher": "Bash", "hooks": [
                 {"command": "/h/.local/bin/tmux-workspace agent-hook claude"},
                 {"command": "mine"}], "extra": 1},
-            {"hooks": [{"command": "x/agent-hook.py claude"}]},
+            {"hooks": [{"command": "x/tmux-workspace/integrations/agent-hook.py claude"}]},
         ], "Empty": []}, "model": "opus"});
 
         let (data, changed) = merge_hooks(&existing, &Map::new());
@@ -750,5 +802,51 @@ mod tests {
         assert!(!old_hook_link(
             &dir.path().join("integrations/agent-hook.py")
         ));
+    }
+
+    #[test]
+    fn hook_commands_are_read_from_hooks_and_the_status_line() {
+        let dir = TempDir::new();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            json!({
+                "hooks": {"Stop": [{"hooks": [{"command": "a"}, {"type": "command"}]}, "x", {"hooks": 3}],
+                          "Other": "x"},
+                "statusLine": {"command": "line"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(hook_commands(&path), ["a", "line"]);
+        assert_eq!(
+            hook_commands(&dir.path().join("missing.json")),
+            Vec::<String>::new()
+        );
+        fs::write(&path, "{broken").unwrap();
+        assert_eq!(hook_commands(&path), Vec::<String>::new());
+        fs::write(&path, "[1]").unwrap();
+        assert_eq!(hook_commands(&path), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_old_mark_needs_the_projects_name_in_the_path() {
+        for command in [
+            "/usr/bin/python3 /Users/u/.local/lib/tmux-workspace/agent-hook.py claude",
+            "/usr/bin/python3 /Users/u/Projects/tmux-workspace/integrations/agent-hook.py codex",
+        ] {
+            assert!(old_mark(command) && ours(command), "{command}");
+        }
+        for command in [
+            "python3 /home/u/bin/my-agent-hook.py stop",
+            "python3 /home/u/bin/agent-hook.py stop",
+            "agent-hook.py",
+            "tmux-workspace agent-hook.py",
+        ] {
+            assert!(!old_mark(command) && !ours(command), "{command}");
+        }
+        // The current form is ours, but is not the old one.
+        assert!(ours("/h/.local/bin/tmux-workspace agent-hook claude"));
+        assert!(!old_mark("/h/.local/bin/tmux-workspace agent-hook claude"));
     }
 }

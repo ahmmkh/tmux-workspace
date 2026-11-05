@@ -365,6 +365,44 @@ fn doctor_warns_about_old_python_hooks() {
 }
 
 #[test]
+fn a_users_own_agent_hook_py_is_not_an_old_python_hook() {
+    let machine = Machine::new();
+    write_settings(
+        &machine,
+        ".claude/settings.json",
+        &json!({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "python3 /home/u/bin/my-agent-hook.py stop"},
+            {"type": "command", "command": "/usr/bin/python3 /home/u/bin/agent-hook.py claude"}]}]}}),
+    );
+    let (_, out) = machine.doctor();
+    assert!(!out.contains("old Python hooks"), "{out}");
+    assert!(
+        out.contains("      agent integrations: not installed (install.sh --agents)\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn both_real_old_forms_are_old_python_hooks() {
+    for command in [
+        "/usr/bin/python3 /Users/u/.local/lib/tmux-workspace/agent-hook.py claude",
+        "/usr/bin/python3 /Users/u/Projects/tmux-workspace/integrations/agent-hook.py claude",
+    ] {
+        let machine = Machine::new();
+        write_settings(
+            &machine,
+            ".claude/settings.json",
+            &json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command}]}]}}),
+        );
+        let (_, out) = machine.doctor();
+        assert!(
+            out.contains("WARN  agent integrations: old Python hooks; run install.sh --agents\n"),
+            "{command}\n{out}"
+        );
+    }
+}
+
+#[test]
 fn old_python_hooks_win_over_new_ones() {
     let machine = Machine::new();
     fs::create_dir(machine.path(".codex")).unwrap();
