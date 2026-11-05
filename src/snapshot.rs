@@ -117,7 +117,7 @@ pub fn atomic(path: &Path, text: &str) -> Result<()> {
 }
 
 /// A new private file `.<name><8 random characters>` in `dir`, as `mkstemp` makes it.
-fn create_temporary(dir: &Path, name: &str) -> io::Result<(File, PathBuf)> {
+pub(crate) fn create_temporary(dir: &Path, name: &str) -> io::Result<(File, PathBuf)> {
     loop {
         let path = dir.join(format!(".{name}{}", &uuid4_hex()[..8]));
         match fs::OpenOptions::new()

@@ -16,7 +16,10 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT / 'lib'))
 from paths import render_hooks  # noqa: E402
 
-MARK = 'agent-hook.py'  # Every hook command this project registers names this file.
+
+def ours(command):
+    """Every hook command this project registers runs agent-hook.py or `tmux-workspace agent-hook`."""
+    return 'agent-hook.py' in command or ('tmux-workspace' in command and ' agent-hook ' in command)
 
 
 def hook_path(home):
@@ -33,7 +36,7 @@ def merge_hooks(existing, wanted):
     for event in list(hooks):
         groups = []
         for group in hooks[event]:
-            kept = [h for h in group.get('hooks', []) if MARK not in h.get('command', '')]
+            kept = [h for h in group.get('hooks', []) if not ours(h.get('command', ''))]
             if kept:
                 groups.append(dict(group, hooks=kept))
         hooks[event] = groups
@@ -93,7 +96,7 @@ class Installer:
         line = wanted.get('statusLine')
         if line:
             current = data.get('statusLine')
-            if not current or MARK in current.get('command', ''):
+            if not current or ours(current.get('command', '')):
                 changed = changed or current != line
                 data['statusLine'] = line
             else:
@@ -144,7 +147,7 @@ class Installer:
             original = path.read_bytes()
             data, changed = merge_hooks(json.loads(original), {})
             line = data.get('statusLine')
-            if isinstance(line, dict) and MARK in line.get('command', ''):
+            if isinstance(line, dict) and ours(line.get('command', '')):
                 del data['statusLine']
                 changed = True
             if changed:

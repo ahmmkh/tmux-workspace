@@ -195,7 +195,7 @@ class Installer(unittest.TestCase):
         (self.home / '.claude').mkdir()
         self.install('--yes', '--agents')
         settings = json.loads((self.home / '.claude/settings.json').read_text())
-        self.assertIn('agent-hook.py claude-status', settings['statusLine']['command'])
+        self.assertIn(' agent-hook claude-status', settings['statusLine']['command'])
 
     def logging_tmux(self, running=True):
         """A tmux stub that records its calls and, if running, has a server."""
@@ -219,6 +219,7 @@ class Installer(unittest.TestCase):
         self.install('--yes', '--agents')
         self.install('--uninstall')
         settings = json.loads((self.home / '.claude/settings.json').read_text())
+        self.assertNotIn(' agent-hook ', json.dumps(settings))
         self.assertNotIn('agent-hook.py', json.dumps(settings))
         self.assertEqual(settings['statusLine']['command'], 'mine')
         self.assertFalse((self.home / '.local/lib/tmux-workspace/agent-hook.py').exists())

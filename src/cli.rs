@@ -1,9 +1,11 @@
 //! The command line: which command runs, and what a failure looks like.
 
+use crate::doctor;
 use crate::error::{Error, Result, fail};
 use crate::help;
 use crate::hook;
 use crate::host::RealHost;
+use crate::integrations;
 use crate::onboarding;
 use crate::pane;
 use crate::park;
@@ -67,6 +69,8 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         // The hook never fails, and nothing else may write: it is not subject to the error contract.
         "agent-hook" => Ok(hook::main(args)),
         "setup" => onboarding::setup(args),
+        "integrations" => integrations::main(args),
+        "doctor" => doctor::doctor(&Tmux::new()),
         // Runs in every new pane before the user's shell, and ends by becoming that shell.
         "pane-start" => pane::pane_start(
             &Tmux::new(),

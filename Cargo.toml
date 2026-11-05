@@ -49,6 +49,14 @@ required-features = ["testing"]
 name = "pickers"
 required-features = ["testing"]
 
+[[test]]
+name = "integrations"
+required-features = ["testing"]
+
+[[test]]
+name = "doctor"
+required-features = ["testing"]
+
 [profile.release]
 opt-level = 3
 lto = "thin"

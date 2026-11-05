@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON}} {{AGENT_HOOK}} claude",
+            "command": "{{BIN}} agent-hook claude",
             "timeout": 3
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON}} {{AGENT_HOOK}} claude",
+            "command": "{{BIN}} agent-hook claude",
             "timeout": 3
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "{{PYTHON}} {{AGENT_HOOK}} claude",
+            "command": "{{BIN}} agent-hook claude",
             "timeout": 3
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$TMUX_PANE\" ] && {{PYTHON}} {{AGENT_HOOK}} claude; true",
+            "command": "[ -n \"$TMUX_PANE\" ] && {{BIN}} agent-hook claude; true",
             "timeout": 3
           }
         ]
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$TMUX_PANE\" ] && {{PYTHON}} {{AGENT_HOOK}} claude; true",
+            "command": "[ -n \"$TMUX_PANE\" ] && {{BIN}} agent-hook claude; true",
             "timeout": 3
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$TMUX_PANE\" ] && {{PYTHON}} {{AGENT_HOOK}} claude; true",
+            "command": "[ -n \"$TMUX_PANE\" ] && {{BIN}} agent-hook claude; true",
             "timeout": 3
           }
         ]
@@ -71,7 +71,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "{{PYTHON}} {{AGENT_HOOK}} claude-status",
+    "command": "{{BIN}} agent-hook claude-status",
     "refreshInterval": 1
   }
 }

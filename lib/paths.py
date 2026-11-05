@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 
 # tmux 3.2 lacks display-popup -B/-e/-T, popup-border-* and the client-focus-in hook.
 # 3.3 and 3.4 work; tmux.conf sets their missing cosmetic options with -q.
@@ -81,8 +82,11 @@ def agent_hook_path():
 
 
 def render_hooks(template, home):
-    """An integrations/*-hooks.json template with {{PYTHON}} and {{AGENT_HOOK}} filled for this machine."""
+    """An integrations/*-hooks.json template with {{BIN}} (and the older {{PYTHON}} and {{AGENT_HOOK}}) filled in."""
     python = '/usr/bin/python3' if Path('/usr/bin/python3').exists() else '/usr/bin/env python3'
     hook = Path(home) / '.local/lib/tmux-workspace/agent-hook.py'
-    text = Path(template).read_text().replace('{{PYTHON}}', python).replace('{{AGENT_HOOK}}', str(hook))
+    # Quoted for the shell, then escaped to sit inside a JSON string.
+    binary = json.dumps(shlex.quote(str(Path(home) / '.local/bin/tmux-workspace')))[1:-1]
+    text = Path(template).read_text().replace('{{BIN}}', binary)
+    text = text.replace('{{PYTHON}}', python).replace('{{AGENT_HOOK}}', str(hook))
     return json.loads(text)
