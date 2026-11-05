@@ -48,7 +48,7 @@ pip or third-party Python dependencies.
 │ ▸ api            1:code      1:claude    claude  ● blocked    │
 │   api            2:servers   1:logs      —       —            │
 │   frontend       1:code      2:codex     codex   ● done       │
-│   nvim-plugin    1:main      1:omp       omp     ● working    │
+│   infra          1:main      1:omp       omp     ● working    │
 │   ⇣ parked       api         3:tests     —       —            │
 ├───────────────────────────────────────────────────────────────┤
 │ preview of selected pane …                                    │
