@@ -1,5 +1,6 @@
 //! The command line: which command runs, and what a failure looks like.
 
+use crate::bug;
 use crate::doctor;
 use crate::error::{Error, Result, fail};
 use crate::errorlog;
@@ -13,6 +14,7 @@ use crate::park;
 use crate::paths::share_root;
 use crate::pick;
 use crate::process::{self, Spawn};
+use crate::report::Kind;
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
@@ -82,6 +84,8 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "setup" => onboarding::setup(args),
         "integrations" => integrations::main(args),
         "doctor" => doctor::doctor(&Tmux::new()),
+        "bug" => bug::main(Kind::Bug, args),
+        "idea" => bug::main(Kind::Idea, args),
         "update" => Err(update(args)),
         // Runs in every new pane before the user's shell, and ends by becoming that shell.
         "pane-start" => pane::pane_start(

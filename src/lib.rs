@@ -1,6 +1,7 @@
 //! tmux-workspace: personal tmux controls and private, allowlisted workspace recovery.
 
 pub mod anonymize;
+pub mod bug;
 pub mod cli;
 pub mod doctor;
 pub mod error;

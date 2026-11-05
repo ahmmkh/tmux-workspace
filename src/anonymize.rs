@@ -2,8 +2,11 @@
 //! says. Everything a report or a link holds has passed through [`Anonymizer::apply`], and the type of
 //! its result, [`Clean`], cannot be made any other way.
 
+use crate::paths::{account_name, home};
+use crate::text::is_printable;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::Path;
 
 /// Text that has been through the anonymizer, or a literal of this program that no user data can be in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +38,59 @@ pub struct Identity {
     pub users: Vec<String>,
     /// The host name, short and full.
     pub hosts: Vec<String>,
+}
+
+impl Identity {
+    /// This machine: `HOME` and where it leads, the login name as `USER`, `LOGNAME` and the account
+    /// database have it, and the host name.
+    pub fn current() -> Identity {
+        let variable = |name: &str| std::env::var(name).ok();
+        Identity::from_parts(
+            &home(),
+            [variable("USER"), variable("LOGNAME"), Some(account_name())],
+            &host_name(),
+        )
+    }
+
+    /// The identity of a home folder, login names (the empty ones do not count) and a host name, whose
+    /// short form is what comes before its first dot.
+    pub fn from_parts(
+        home: &Path,
+        users: impl IntoIterator<Item = Option<String>>,
+        host: &str,
+    ) -> Identity {
+        let mut identity = Identity::default();
+        let push = |list: &mut Vec<String>, name: String| {
+            if !name.is_empty() && !list.contains(&name) {
+                list.push(name);
+            }
+        };
+        push(&mut identity.homes, home.to_string_lossy().into_owned());
+        if let Ok(real) = home.canonicalize() {
+            push(&mut identity.homes, real.to_string_lossy().into_owned());
+        }
+        for user in users.into_iter().flatten() {
+            push(&mut identity.users, user);
+        }
+        push(&mut identity.hosts, host.to_string());
+        push(
+            &mut identity.hosts,
+            host.split('.').next().unwrap_or_default().to_string(),
+        );
+        identity
+    }
+}
+
+/// The name of this machine, as `hostname` says it; empty when it cannot be read.
+fn host_name() -> String {
+    let mut buffer = [0u8; 256];
+    // SAFETY: writes at most `buffer.len()` bytes into `buffer`.
+    let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if status != 0 {
+        return String::new();
+    }
+    let end = buffer.iter().position(|b| *b == 0).unwrap_or(buffer.len());
+    String::from_utf8_lossy(&buffer[..end]).into_owned()
 }
 
 /// The names of the tmux server, in the order it lists them.
@@ -192,7 +248,13 @@ impl Anonymizer {
 
     /// `text` without anything that identifies. Applying it again changes nothing.
     pub fn apply(&mut self, text: &str) -> Clean {
-        let text = strip_url_credentials(text);
+        // Nothing but printable characters and line ends: what a terminal or a form could be made to do
+        // with the rest is not for a report to say.
+        let text: String = text
+            .chars()
+            .filter(|c| *c == '\n' || is_printable(*c))
+            .collect();
+        let text = strip_url_credentials(&text);
         let text = hide_emails(&text);
         let text = replace_homes(&text, &self.homes);
         let text = replace_words(&text, &self.words);
@@ -1045,6 +1107,51 @@ mod tests {
             let once = clean(&mut anon, &text[..cut]);
             assert_eq!(clean(&mut anon, &once), once, "{:?}", &text[..cut]);
         }
+    }
+
+    #[test]
+    fn control_characters_are_dropped_and_lines_are_kept() {
+        let mut anon = plain();
+        assert_eq!(
+            clean(&mut anon, "a\u{1b}[31mred\u{7}\u{0}\ttab\r\nnext\nline"),
+            "a[31mredtab\nnext\nline"
+        );
+    }
+
+    #[test]
+    fn an_identity_has_the_home_where_it_leads_the_names_once_and_the_short_host() {
+        use crate::testing::TempDir;
+        let dir = TempDir::new();
+        let real = dir.path().join("real-home");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("home-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let identity = Identity::from_parts(
+            &link,
+            [
+                Some("kh".into()),
+                Some(String::new()),
+                None,
+                Some("kh".into()),
+                Some("root".into()),
+            ],
+            "kh-mbp.local",
+        );
+        assert_eq!(identity.homes[0], link.to_string_lossy());
+        assert_eq!(
+            identity.homes[1],
+            real.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(identity.homes.len(), 2);
+        assert_eq!(identity.users, ["kh", "root"]);
+        assert_eq!(identity.hosts, ["kh-mbp.local", "kh-mbp"]);
+        let plain = Identity::from_parts(Path::new("/nonexistent/home"), [], "box");
+        assert_eq!((plain.homes.len(), plain.hosts.len()), (1, 1));
+        assert!(
+            Identity::from_parts(Path::new("/x"), [], "")
+                .hosts
+                .is_empty()
+        );
     }
 
     #[test]

@@ -74,10 +74,9 @@ pub fn hook_commands(path: &Path) -> Vec<String> {
 /// (omp, Neovim, iTerm2) is in place: what `install.sh --update` asks before it registers the
 /// integrations again, so that an update keeps that choice.
 pub fn installed_on(target: &Target) -> bool {
-    let hooks = [target.claude_settings(), target.codex_hooks()]
-        .iter()
-        .any(|path| hook_commands(path).iter().any(|command| ours(command)));
-    hooks || target.links().iter().any(|link| target.made(link))
+    let each = target.each();
+    // The iTerm2 profile counts as well, but is no integration of a report.
+    each.iter().any(|(_, there)| *there) || target.made(&target.iterm_profile())
 }
 
 /// An `integrations/*-hooks.json` template with `{{BIN}}` filled in: the installed binary of this
@@ -309,6 +308,18 @@ impl Target {
             codex_home: Some(codex_dir(home)),
             system: system.to_string(),
         }
+    }
+
+    /// What `integrations status` adds up, one by one: whether Claude Code's settings and Codex's hooks
+    /// run this project's hook, and whether the omp extension and the Neovim helper are linked in.
+    pub fn each(&self) -> [(&'static str, bool); 4] {
+        let hooked = |path: PathBuf| hook_commands(&path).iter().any(|command| ours(command));
+        [
+            ("claude", hooked(self.claude_settings())),
+            ("codex", hooked(self.codex_hooks())),
+            ("omp", self.made(&self.omp_extension())),
+            ("nvim", self.made(&self.neovim_helper())),
+        ]
     }
 
     fn codex(&self) -> PathBuf {
@@ -732,6 +743,67 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn each_integration_says_whether_it_is_in_place() {
+        let dir = TempDir::new();
+        let target = target(&dir);
+        let all = |claude, codex, omp, nvim| {
+            [
+                ("claude", claude),
+                ("codex", codex),
+                ("omp", omp),
+                ("nvim", nvim),
+            ]
+        };
+        assert_eq!(target.each(), all(false, false, false, false));
+        assert!(!installed_on(&target));
+
+        let hook = |binary: &str| {
+            json!({"hooks": {"Stop": [{"hooks": [{"type": "command",
+                "command": format!("'{binary}' agent-hook codex")}]}]}})
+            .to_string()
+        };
+        fs::create_dir_all(target.home.join(".claude")).unwrap();
+        fs::write(
+            target.home.join(".claude/settings.json"),
+            hook("/h/.local/bin/tmux-workspace"),
+        )
+        .unwrap();
+        assert_eq!(target.each(), all(true, false, false, false));
+
+        // A hook that is somebody else's is not ours.
+        fs::create_dir_all(target.home.join(".codex")).unwrap();
+        fs::write(target.home.join(".codex/hooks.json"), hook("/h/bin/other")).unwrap();
+        assert_eq!(target.each(), all(true, false, false, false));
+        fs::write(
+            target.home.join(".codex/hooks.json"),
+            hook("/h/.local/bin/tmux-workspace"),
+        )
+        .unwrap();
+        assert_eq!(target.each(), all(true, true, false, false));
+
+        // The links count when they lead into the share folder, and not when they lead elsewhere.
+        let source = dir.path().join("share/integrations/tmux-workspace.ts");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "").unwrap();
+        let link = target.home.join(".omp/agent/extensions/tmux-workspace.ts");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&source, &link).unwrap();
+        assert_eq!(target.each(), all(true, true, true, false));
+        let elsewhere = target.home.join("mine.lua");
+        fs::write(&elsewhere, "").unwrap();
+        let lua = target
+            .home
+            .join(".config/nvim/lua/custom/tmux_workspace.lua");
+        fs::create_dir_all(lua.parent().unwrap()).unwrap();
+        symlink(&elsewhere, &lua).unwrap();
+        assert_eq!(target.each(), all(true, true, true, false));
+        fs::remove_file(&lua).unwrap();
+        symlink(&source, &lua).unwrap();
+        assert_eq!(target.each(), all(true, true, true, true));
+        assert!(installed_on(&target));
     }
 
     #[test]

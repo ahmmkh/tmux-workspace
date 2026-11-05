@@ -332,7 +332,7 @@ fn helper(share: &Path, name: &str) -> String {
 }
 
 /// The version of the `python3` on `PATH`, which `dash`, `ai` and `cleanup` still run on.
-fn python3_version() -> String {
+pub fn python3_version() -> String {
     const NOT_FOUND: &str = "not found";
     let Some(python) = which("python3") else {
         return NOT_FOUND.into();

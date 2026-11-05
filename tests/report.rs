@@ -4,12 +4,13 @@
 
 mod common;
 
-use common::{EXE, text};
+use common::{EXE, Fakes, on_a_terminal, quietly, text};
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::symlink;
 use std::path::Path;
-use std::process::Stdio;
-use tmux_workspace::testing::ScratchTmux;
+use std::process::{Command, Stdio};
+use tmux_workspace::testing::{ScratchTmux, TempDir, wait_for};
 
 /// The lines of errors.log in a state folder.
 fn log_lines(state: &Path) -> Vec<String> {
@@ -164,5 +165,859 @@ fn a_failure_of_bug_itself_offers_no_report() {
         !text(&out.stderr).contains("Report it"),
         "{}",
         text(&out.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The report: what `bug` and `idea` say
+
+/// The program that opens a URL on the machine the tests run on.
+const OPENER: &str = if cfg!(target_os = "macos") {
+    "open"
+} else {
+    "xdg-open"
+};
+
+/// What the question is.
+const QUESTION: &str = "Open a GitHub issue with this? [Y/n]";
+
+/// A scratch tmux server, a home, and fake programs on a `PATH` of their own: the real tmux, an opener, and
+/// a `tw-clip` where the binary looks for it, `~/.local/bin`. Every one records how it was called.
+struct World {
+    scratch: ScratchTmux,
+    fakes: Fakes,
+    /// The shipped files: a release, as far as the binary can tell.
+    share: TempDir,
+}
+
+impl World {
+    fn new() -> World {
+        let fakes = Fakes::new();
+        fakes.real_tmux();
+        fakes.add(OPENER, "exit 0");
+        fakes.add("tw-clip", "exit 0");
+        let scratch = ScratchTmux::new();
+        // ~/.local/bin is the folder of the fakes, so that the recording of tw-clip lands with theirs.
+        fs::create_dir_all(scratch.home().join(".local")).unwrap();
+        symlink(fakes.path(), scratch.home().join(".local/bin")).unwrap();
+        let share = TempDir::new();
+        fs::write(share.path().join("VERSION"), "9.9.9\n").unwrap();
+        World {
+            scratch,
+            fakes,
+            share,
+        }
+    }
+
+    /// The binary inside tmux, with only the fakes on `PATH`, and none of the caller's surroundings.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = self.scratch.bin(EXE);
+        command
+            .args(args)
+            .env("PATH", self.fakes.path())
+            .env("TMUX_WORKSPACE_SHARE", self.share.path())
+            .env("TERM_PROGRAM", "ghostty")
+            .env("USER", "plantedusername")
+            .env("LOGNAME", "plantedusername")
+            .env_remove("SSH_CONNECTION")
+            .env_remove("SSH_TTY")
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY");
+        command
+    }
+
+    /// `command`, on a machine that has a screen: a Linux needs `DISPLAY` for its opener.
+    fn on_a_desktop(&self, args: &[&str]) -> Command {
+        let mut command = self.command(args);
+        command.env("DISPLAY", ":0");
+        command
+    }
+
+    /// `command`, in an SSH session.
+    fn over_ssh(&self, args: &[&str]) -> Command {
+        let mut command = self.on_a_desktop(args);
+        command.env("SSH_CONNECTION", "198.51.100.7 51234 192.0.2.10 22");
+        command
+    }
+
+    /// Lines for errors.log.
+    fn log(&self, lines: &[&str]) {
+        fs::write(
+            self.scratch.state_dir().join("errors.log"),
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+    }
+
+    /// The URL the opener was given, when it was called once.
+    fn opened(&self) -> String {
+        assert_eq!(self.fakes.calls(OPENER), 1, "the opener's calls");
+        let args = self.fakes.args(OPENER, 1);
+        assert_eq!(args.len(), 1, "{args:?}");
+        args[0].clone()
+    }
+
+    /// What `tw-clip copy` was given on its input, when it was called once.
+    fn copied(&self) -> String {
+        assert_eq!(self.fakes.calls("tw-clip"), 1, "tw-clip's calls");
+        assert_eq!(self.fakes.args("tw-clip", 1), ["copy"]);
+        self.fakes
+            .input("tw-clip", 1)
+            .expect("tw-clip read nothing")
+    }
+}
+
+fn percent_decode(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            out.push(u8::from_str_radix(&encoded[at + 1..at + 3], 16).unwrap());
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// A query parameter of a link, decoded.
+fn param(url: &str, name: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+        .map(percent_decode)
+}
+
+/// Whether `word` is in `text` as a whole word.
+fn has_word(text: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(word).any(|(at, _)| {
+        !text[..at].chars().next_back().is_some_and(is_word)
+            && !text[at + word.len()..].chars().next().is_some_and(is_word)
+    })
+}
+
+fn command_output(program: &str, args: &[&str]) -> String {
+    let out = Command::new(program).args(args).output().unwrap();
+    text(&out.stdout).trim().to_string()
+}
+
+/// A pane that runs a program called `codex`: a copy of this program, which waits for the input of a hook
+/// that never comes. (A link to `sleep` would be named `sleep` by tmux, and a copy of `sleep` is killed by
+/// macOS.) The folder with the copy has to outlast the pane: macOS kills a program whose file is gone.
+fn codex_pane(world: &World, session: &str) -> (String, TempDir) {
+    let bin = TempDir::new();
+    let program = bin.path().join("codex");
+    fs::copy(EXE, &program).unwrap();
+    let pane = world.scratch.tmux(&[
+        "new-session",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-s",
+        session,
+        &format!("exec {} agent-hook claude", program.display()),
+    ]);
+    wait_for(
+        || world.scratch.expand(&pane, "#{pane_current_command}"),
+        "codex",
+    );
+    (pane, bin)
+}
+
+#[test]
+fn print_shows_the_environment_the_doctor_and_the_last_errors_and_nothing_else() {
+    let world = World::new();
+    world.fakes.add("fzf", "exit 0");
+    world.fakes.add("zoxide", "exit 0");
+    world.fakes.add("lazygit", "exit 0");
+    world.fakes.add("python3", "echo 'Python 3.15.2'");
+    world.fakes.add(
+        "zsh",
+        "case \"$1\" in --version) echo 'zsh 5.9 (arm-apple-darwin25.0)';; esac",
+    );
+    world.log(&[
+        "2026-11-06 01:12 open: cannot write ~/Projects/folder-2",
+        "2026-11-06 01:13 save: tmux list-panes exited with status 1",
+    ]);
+    let mut command = world.command(&["bug", "--print"]);
+    command.env("TMUX_WORKSPACE_SHELL", world.fakes.path().join("zsh"));
+    let out = quietly(command);
+    let shown = text(&out.stdout);
+    assert_eq!(
+        (text(&out.stderr).as_str(), out.status.code()),
+        ("", Some(0))
+    );
+
+    let version = env!("CARGO_PKG_VERSION");
+    let os = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else if cfg!(target_env = "musl") {
+        "unknown-linux-musl"
+    } else {
+        "unknown-linux-gnu"
+    };
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(lines[0], "### Environment");
+    assert_eq!(
+        lines[1],
+        format!(
+            "tmux-workspace {version} (release, {}-{os})",
+            std::env::consts::ARCH
+        )
+    );
+    assert!(lines[2].contains(" · tmux 3."), "{}", lines[2]);
+    assert!(lines[2].ends_with(" · zsh 5.9 · Ghostty"), "{}", lines[2]);
+    assert_eq!(
+        lines[3],
+        "python3 3.15 · fzf ✓ · zoxide ✓ · sesh ✗ · lazygit ✓"
+    );
+    assert_eq!(lines[4], "integrations: claude ✗ codex ✗ omp ✗ nvim ✗");
+    assert_eq!(lines[5], "");
+    assert_eq!(lines[6], "### Doctor");
+    assert!(
+        lines[7].starts_with("1 pane · ") && lines[7].ends_with(" warnings · 0 errors"),
+        "{}",
+        lines[7]
+    );
+    assert!(
+        shown.contains("\nWARN  ~/.local/bin/tmux-workspace: missing; run install.sh\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.ends_with(
+            "\n### Last errors (tmux-workspace log)\n\
+             2026-11-06 01:12 open: cannot write ~/Projects/folder-2\n\
+             2026-11-06 01:13 save: tmux list-panes exited with status 1\n"
+        ),
+        "{shown}"
+    );
+    // Nothing else: no question, no link, no browser, no clipboard.
+    assert!(
+        !shown.contains(QUESTION) && !shown.contains("https://"),
+        "{shown}"
+    );
+    assert_eq!(world.fakes.calls(OPENER) + world.fakes.calls("tw-clip"), 0);
+}
+
+#[test]
+fn only_the_last_ten_lines_of_the_log_are_in_the_report() {
+    let world = World::new();
+    let lines: Vec<String> = (1..=15)
+        .map(|n| format!("2026-11-06 01:{n:02} open: failure number {n:02}"))
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    world.log(&refs);
+    let out = quietly(world.command(&["bug", "--print"]));
+    let shown = text(&out.stdout);
+    assert!(!shown.contains("number 05"), "{shown}");
+    assert!(shown.contains("number 06\n"), "{shown}");
+    assert!(shown.ends_with("number 15\n"), "{shown}");
+}
+
+#[test]
+fn an_empty_log_says_none() {
+    let world = World::new();
+    let out = quietly(world.command(&["bug", "--print"]));
+    assert!(
+        text(&out.stdout).ends_with("### Last errors (tmux-workspace log)\nnone\n"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn an_idea_has_only_the_environment() {
+    let world = World::new();
+    world.log(&["2026-11-06 01:12 open: x"]);
+    let out = quietly(world.command(&["idea", "--print"]));
+    let shown = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        shown.starts_with("### Environment\ntmux-workspace "),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("### Doctor") && !shown.contains("errors"),
+        "{shown}"
+    );
+    assert!(
+        shown.ends_with("integrations: claude ✗ codex ✗ omp ✗ nvim ✗\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_clone_is_a_clone_and_an_unknown_kind_is_said_so() {
+    let world = World::new();
+    fs::remove_file(world.share.path().join("VERSION")).unwrap();
+    let out = quietly(world.command(&["idea", "--print"]));
+    assert!(
+        text(&out.stdout)
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains(" (unknown, "),
+        "{}",
+        text(&out.stdout)
+    );
+    fs::write(world.share.path().join("Cargo.toml"), "").unwrap();
+    let out = quietly(world.command(&["idea", "--print"]));
+    assert!(
+        text(&out.stdout)
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains(" (clone, "),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn a_usage_mistake_is_status_2_with_the_usage() {
+    let world = World::new();
+    for (command, args) in [("bug", ["--nope"]), ("idea", ["--print=1"])] {
+        let out = quietly(world.command(&[command, args[0]]));
+        assert_eq!(
+            text(&out.stderr),
+            format!("Usage: tmux-workspace {command} [--print]\n")
+        );
+        assert_eq!(
+            (text(&out.stdout).as_str(), out.status.code()),
+            ("", Some(2))
+        );
+    }
+    assert_eq!(world.fakes.calls(OPENER), 0);
+    assert_eq!(log_lines(world.scratch.state_dir()), Vec::<String>::new());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The privacy promise
+
+/// What the machine knows and a report must not tell: the names of a workspace, the folders, the login
+/// and host names, an address, a key.
+const EMAIL: &str = "planted.person@secret-corp.example";
+const IPV4: &str = "203.0.113.77";
+const SECRET_KEY: &str = "sk-live-51HqLyjWDarjtT1zdp7dcAbCdEf";
+const MIXED_TOKEN: &str = "a1B2c3D4e5F6a7B8c9D0a1B2c3D4e5F6a7B8c9D0";
+const SCREEN_TEXT: &str = "screen-secret-text";
+const ENVIRONMENT_VALUE: &str = "env-secret-value-77";
+
+#[test]
+fn nothing_that_identifies_reaches_the_report_or_the_link() {
+    let world = World::new();
+    let home = world.scratch.home().to_string_lossy().into_owned();
+    let canonical = world
+        .scratch
+        .home()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let folder = world.scratch.home().join("clients/acme");
+    fs::create_dir_all(&folder).unwrap();
+    // A workspace whose session, tab, pane label and folder are all secrets, with a pane that the doctor
+    // warns about, so that its place is in a warning, and a pane with secret text on its screen.
+    let (pane, _program) = codex_pane(&world, "acme-secret");
+    world
+        .scratch
+        .tmux(&["rename-window", "-t", &pane, "client-x"]);
+    world.scratch.tmux(&[
+        "set-option",
+        "-p",
+        "-t",
+        &pane,
+        "@workspace_label",
+        "secret-label",
+    ]);
+    let screen = world.scratch.tmux(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &pane,
+        "-c",
+        &folder.to_string_lossy(),
+        &format!("printf '{SCREEN_TEXT}\n'; exec sleep 300"),
+    ]);
+    world.scratch.settle(&screen);
+    let real_user = command_output("id", &["-un"]);
+    let real_host = command_output("hostname", &[]);
+    let real_short = command_output("hostname", &["-s"]);
+    let planted = [
+        format!("2026-11-06 01:01 open: cannot write {home}/clients/acme: Permission denied"),
+        format!("2026-11-06 01:02 open: cannot read {canonical}/clients/acme/notes.txt"),
+        format!("2026-11-06 01:03 setup: mail {EMAIL} from {IPV4} with {SECRET_KEY}"),
+        format!("2026-11-06 01:04 setup: token {MIXED_TOKEN} for plantedusername"),
+        format!(
+            "2026-11-06 01:05 update: {real_user}@{real_host} then {real_host} and {real_short} as {real_user}"
+        ),
+        "2026-11-06 01:06 save: session acme-secret window client-x label secret-label".to_string(),
+        "2026-11-06 01:07 open: fetch https://deploy:hunter2@git.example.org/repo.git".to_string(),
+        "2026-11-06 01:08 open: bound to ::1 and fe80::1%en0".to_string(),
+    ];
+    world.log(&planted.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let secrets: Vec<&str> = vec![
+        "acme-secret",
+        "client-x",
+        "secret-label",
+        "clients",
+        "acme",
+        "notes.txt",
+        EMAIL,
+        "secret-corp",
+        IPV4,
+        "sk-live",
+        "51HqLyjWDarjtT1zdp7dc",
+        MIXED_TOKEN,
+        "plantedusername",
+        "hunter2",
+        "deploy",
+        "fe80",
+        SCREEN_TEXT,
+        ENVIRONMENT_VALUE,
+        &home,
+        &canonical,
+    ];
+    let words: Vec<&str> = [real_user.as_str(), real_host.as_str(), real_short.as_str()]
+        .into_iter()
+        .filter(|word| !word.is_empty())
+        .collect();
+    let assert_clean = |what: &str, shown: &str| {
+        for secret in &secrets {
+            assert!(!shown.contains(secret), "{what} has {secret}:\n{shown}");
+        }
+        for word in &words {
+            assert!(!has_word(shown, word), "{what} has {word}:\n{shown}");
+        }
+    };
+    let trace = world.scratch.state_dir().join("trace");
+    let with_surroundings = |mut command: Command| {
+        command
+            .env("TW_SECRET_ENV", ENVIRONMENT_VALUE)
+            .env("TMUX_WORKSPACE_TRACE", &trace);
+        command
+    };
+
+    // The report, as it is printed.
+    let out = quietly(with_surroundings(world.command(&["bug", "--print"])));
+    let printed = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_clean("the printed report", &printed);
+    // And what stands in for them, so that it is not just empty.
+    assert!(
+        printed.contains("\nWARN  workspace-1:0.0 codex: No Codex status. Review /hooks\n"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("cannot write ~/folder-1/folder-2: Permission denied"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("cannot read ~/folder-1/folder-2/folder-3"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("mail <email> from <ip> with <token>"),
+        "{printed}"
+    );
+    assert!(printed.contains("token <token> for <user>"), "{printed}");
+    assert!(
+        printed.contains("update: <email> then <host> and <host> as <user>"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("session workspace-1 window tab-1 label label-1"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("fetch https://git.example.org/repo.git"),
+        "{printed}"
+    );
+    assert!(printed.contains("bound to <ip> and <ip>"), "{printed}");
+
+    // The report that is shown before the question, and the link the opener is given.
+    let (status, stderr, shown) =
+        on_a_terminal(with_surroundings(world.on_a_desktop(&["bug"])), "\n");
+    assert_eq!((status, stderr.as_str()), (0, ""));
+    assert_clean("the report shown before the question", &shown);
+    let url = world.opened();
+    assert_clean("the link", &percent_decode(&url));
+    assert_clean("the encoded link", &url);
+    assert!(
+        param(&url, "diagnostics")
+            .unwrap()
+            .contains("workspace-1:0.0 codex")
+    );
+
+    // Over SSH the link is shown and the report is copied.
+    let (_, _, shown) = on_a_terminal(with_surroundings(world.over_ssh(&["bug"])), "");
+    assert_clean("the report shown over SSH", &shown);
+    assert_clean("what was copied", &world.copied());
+
+    // No screen was read.
+    let calls = fs::read_to_string(&trace).unwrap();
+    assert!(!calls.contains("capture-pane"), "{calls}");
+}
+
+#[test]
+fn the_names_of_the_server_are_numbered_alike_in_the_report_and_the_link() {
+    let world = World::new();
+    let (_pane, _program) = codex_pane(&world, "gamma");
+    world.log(&["2026-11-06 01:00 save: gamma and alpha"]);
+    let (_, _, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), "\n");
+    let url = world.opened();
+    for line in [
+        "WARN  workspace-2:0.0 codex: No Codex status. Review /hooks",
+        "save: workspace-2 and workspace-1",
+    ] {
+        assert!(shown.contains(line), "{line}\n{shown}");
+        assert!(param(&url, "diagnostics").unwrap().contains(line), "{line}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The question, the browser and the clipboard
+
+#[test]
+fn a_yes_opens_the_issue_form_with_the_report_in_the_link() {
+    for answer in ["\n", "y\n", "Y\n", "yes\n"] {
+        let world = World::new();
+        world.log(&["2026-11-06 01:12 open: cannot write ~/Projects/folder-2"]);
+        let (status, stderr, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), answer);
+        assert_eq!((status, stderr.as_str()), (0, ""), "{answer:?}");
+        let url = world.opened();
+        assert!(
+            url.starts_with("https://github.com/ahmmkh/tmux-workspace/issues/new?template=bug.yml&title=%5BBug%5D%3A%20&environment="),
+            "{url}"
+        );
+        // The report is in full on the screen, then the question, then what happened.
+        assert!(
+            shown.starts_with("### Environment\ntmux-workspace "),
+            "{shown}"
+        );
+        assert!(shown.contains("\n### Doctor\n"), "{shown}");
+        assert!(shown.contains("\n### Last errors (tmux-workspace log)\n2026-11-06 01:12 open: cannot write ~/Projects/folder-2\n"), "{shown}");
+        assert!(shown.contains(&format!("\n\n{QUESTION} ")), "{shown}");
+        assert!(shown.ends_with("Opened the issue form in your browser. Nothing is sent until you press Submit there.\n"), "{shown}");
+        // The form gets what the report says, as the two fields the issue form has.
+        let environment = param(&url, "environment").unwrap();
+        assert!(
+            shown.contains(&format!("### Environment\n{environment}\n")),
+            "{shown}"
+        );
+        let diagnostics = param(&url, "diagnostics").unwrap();
+        assert!(shown.contains(&diagnostics), "{diagnostics}\n{shown}");
+        assert!(!diagnostics.contains("shortened"));
+        assert_eq!(
+            world.fakes.calls("tw-clip"),
+            0,
+            "a link that fits needs no clipboard"
+        );
+    }
+}
+
+#[test]
+fn an_idea_opens_the_idea_form_with_only_the_environment() {
+    let world = World::new();
+    let (status, _, shown) = on_a_terminal(world.on_a_desktop(&["idea"]), "y\n");
+    assert_eq!(status, 0);
+    let url = world.opened();
+    assert!(
+        url.starts_with("https://github.com/ahmmkh/tmux-workspace/issues/new?template=idea.yml&title=%5BIdea%5D%3A%20&environment="),
+        "{url}"
+    );
+    assert_eq!(param(&url, "diagnostics"), None);
+    assert!(
+        shown.contains(QUESTION) && !shown.contains("Doctor"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn any_other_answer_opens_nothing_and_sends_nothing() {
+    for answer in ["n\n", "N\n", "no\n", "nope\n", "x\n"] {
+        let world = World::new();
+        let (status, stderr, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), answer);
+        assert_eq!((status, stderr.as_str()), (0, ""), "{answer:?}");
+        assert!(shown.contains(QUESTION), "{answer:?}: {shown}");
+        assert!(
+            shown.ends_with("Nothing was opened or sent.\n"),
+            "{answer:?}: {shown}"
+        );
+        assert_eq!(
+            world.fakes.calls(OPENER) + world.fakes.calls("tw-clip"),
+            0,
+            "{answer:?}"
+        );
+    }
+}
+
+#[test]
+fn print_asks_nothing_even_on_a_terminal() {
+    let world = World::new();
+    // Nothing is typed: a question would wait for an answer that does not come.
+    let (status, stderr, shown) = on_a_terminal(world.on_a_desktop(&["bug", "--print"]), "");
+    assert_eq!((status, stderr.as_str()), (0, ""));
+    assert!(shown.starts_with("### Environment\n"), "{shown}");
+    assert!(
+        !shown.contains(QUESTION) && !shown.contains("https://"),
+        "{shown}"
+    );
+    assert_eq!(world.fakes.calls(OPENER) + world.fakes.calls("tw-clip"), 0);
+}
+
+#[test]
+fn without_a_terminal_the_report_and_the_link_are_printed_and_nothing_is_opened() {
+    let world = World::new();
+    let out = quietly(world.on_a_desktop(&["bug"]));
+    let shown = text(&out.stdout);
+    assert_eq!(
+        (text(&out.stderr).as_str(), out.status.code()),
+        ("", Some(0))
+    );
+    assert!(shown.starts_with("### Environment\n"), "{shown}");
+    assert!(!shown.contains(QUESTION), "{shown}");
+    let (_, link) = shown
+        .split_once(
+            "Open this link to file the issue; nothing is sent until you submit it there:\n",
+        )
+        .unwrap_or_else(|| panic!("no link in {shown}"));
+    let url = link.trim_end();
+    assert!(
+        url.starts_with("https://github.com/ahmmkh/tmux-workspace/issues/new?template=bug.yml&"),
+        "{url}"
+    );
+    assert!(param(url, "diagnostics").is_some());
+    assert_eq!(world.fakes.calls(OPENER) + world.fakes.calls("tw-clip"), 0);
+}
+
+#[test]
+fn over_ssh_nothing_opens_the_link_is_shown_and_the_report_is_copied() {
+    let world = World::new();
+    world.log(&["2026-11-06 01:12 open: x"]);
+    let (status, stderr, shown) = on_a_terminal(world.over_ssh(&["bug"]), "");
+    assert_eq!((status, stderr.as_str()), (0, ""));
+    assert_eq!(world.fakes.calls(OPENER), 0, "no browser over SSH");
+    assert!(
+        !shown.contains(QUESTION),
+        "there is nothing to ask: {shown}"
+    );
+    // The whole report went to tw-clip, which does OSC 52.
+    let copied = world.copied();
+    assert!(copied.starts_with("### Environment\n"), "{copied}");
+    assert!(
+        copied.contains("### Last errors (tmux-workspace log)\n2026-11-06 01:12 open: x"),
+        "{copied}"
+    );
+    assert!(
+        shown.contains(copied.trim_end()),
+        "what was copied is what is shown"
+    );
+    // The link is shown, and the clipboard is said.
+    let url = shown
+        .lines()
+        .find(|line| line.starts_with("https://github.com/"))
+        .unwrap_or_else(|| panic!("no link in {shown}"));
+    assert_eq!(
+        param(url, "environment").unwrap(),
+        copied
+            .split("\n\n")
+            .next()
+            .unwrap()
+            .strip_prefix("### Environment\n")
+            .unwrap()
+    );
+    assert!(
+        shown.ends_with(
+            "The report is on your clipboard; paste it into the form if a field is empty.\n"
+        ),
+        "{shown}"
+    );
+}
+
+#[test]
+fn ssh_is_told_by_either_variable() {
+    for variable in ["SSH_CONNECTION", "SSH_TTY"] {
+        let world = World::new();
+        let mut command = world.on_a_desktop(&["bug"]);
+        command
+            .env_remove("SSH_CONNECTION")
+            .env(variable, "/dev/ttys042");
+        let (status, _, shown) = on_a_terminal(command, "");
+        assert_eq!(status, 0, "{variable}");
+        assert_eq!(world.fakes.calls(OPENER), 0, "{variable}");
+        assert_eq!(world.fakes.calls("tw-clip"), 1, "{variable}");
+        assert!(
+            shown.contains("The report is on your clipboard"),
+            "{variable}: {shown}"
+        );
+    }
+}
+
+#[test]
+fn without_an_opener_it_is_the_same_as_over_ssh() {
+    let world = World::new();
+    fs::remove_file(world.fakes.path().join(OPENER)).unwrap();
+    let (status, _, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), "");
+    assert_eq!(status, 0);
+    assert!(!shown.contains(QUESTION), "{shown}");
+    assert!(
+        shown.contains("\nhttps://github.com/ahmmkh/tmux-workspace/issues/new?template=bug.yml&"),
+        "{shown}"
+    );
+    assert!(
+        shown.ends_with(
+            "The report is on your clipboard; paste it into the form if a field is empty.\n"
+        ),
+        "{shown}"
+    );
+    assert_eq!(world.fakes.calls("tw-clip"), 1);
+}
+
+#[test]
+fn an_opener_that_fails_leaves_the_link_and_the_clipboard() {
+    let world = World::new();
+    world.fakes.add(OPENER, "exit 1");
+    let (status, stderr, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), "\n");
+    assert_eq!((status, stderr.as_str()), (0, ""));
+    assert_eq!(world.fakes.calls(OPENER), 1);
+    assert!(
+        shown.contains(&format!("{OPENER} did not open it.\n")),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("\nhttps://github.com/ahmmkh/tmux-workspace/issues/new?template=bug.yml&"),
+        "{shown}"
+    );
+    assert_eq!(world.fakes.calls("tw-clip"), 1);
+}
+
+#[test]
+fn without_tw_clip_it_says_the_report_was_not_copied() {
+    let world = World::new();
+    fs::remove_file(world.fakes.path().join("tw-clip")).unwrap();
+    let (status, _, shown) = on_a_terminal(world.over_ssh(&["bug"]), "");
+    assert_eq!(status, 0);
+    assert!(
+        shown.ends_with("The report could not be copied (tw-clip is missing); copy it from above if a field is empty.\n"),
+        "{shown}"
+    );
+}
+
+/// Lines for errors.log that make the link too long.
+fn long_errors() -> Vec<String> {
+    (0..10)
+        .map(|n| {
+            format!(
+                "2026-11-06 01:{n:02} open: failure {n} {}",
+                "word ".repeat(150)
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_link_over_eight_thousand_bytes_is_trimmed_and_the_full_report_is_copied() {
+    let world = World::new();
+    let lines = long_errors();
+    world.log(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+    let (status, stderr, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), "\n");
+    assert_eq!((status, stderr.as_str()), (0, ""));
+    let url = world.opened();
+    assert!(url.len() <= 8000, "{}", url.len());
+    // The newest lines are in the link, the oldest are not, the environment is whole.
+    let diagnostics = param(&url, "diagnostics").unwrap();
+    assert!(diagnostics.contains("failure 9 "), "{diagnostics}");
+    assert!(!diagnostics.contains("failure 0 "), "{diagnostics}");
+    assert!(
+        diagnostics.ends_with("(shortened to fit the link)"),
+        "{diagnostics}"
+    );
+    assert_eq!(param(&url, "environment").unwrap().lines().count(), 4);
+    // The clipboard has all ten.
+    let copied = world.copied();
+    for n in 0..10 {
+        assert!(copied.contains(&format!("failure {n} ")), "{n}");
+    }
+    assert!(
+        !copied.contains("shortened"),
+        "the full report is the full report"
+    );
+    assert!(shown.ends_with("The link carries only the newest part of the diagnostics. The full report is on your clipboard; paste it into the form.\n"), "{shown}");
+}
+
+#[test]
+fn a_long_report_without_a_terminal_says_the_link_is_short_and_copies_nothing() {
+    let world = World::new();
+    let lines = long_errors();
+    world.log(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+    let out = quietly(world.on_a_desktop(&["bug"]));
+    let shown = text(&out.stdout);
+    assert!(shown.contains("failure 0 "), "the full report is shown");
+    assert!(
+        shown.ends_with(
+            "The link carries only the newest part of the diagnostics; the report above is whole.\n"
+        ),
+        "{shown}"
+    );
+    assert_eq!(world.fakes.calls(OPENER) + world.fakes.calls("tw-clip"), 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn on_macos_the_browser_is_open_and_no_display_is_needed() {
+    let world = World::new();
+    let (status, _, _) = on_a_terminal(world.command(&["bug"]), "\n");
+    assert_eq!(status, 0);
+    assert!(world.opened().starts_with("https://github.com/"));
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn on_linux_a_screen_is_needed_for_xdg_open() {
+    let world = World::new();
+    let (status, _, shown) = on_a_terminal(world.command(&["bug"]), "");
+    assert_eq!(status, 0);
+    assert_eq!(world.fakes.calls("xdg-open"), 0);
+    assert!(shown.contains("The report is on your clipboard"), "{shown}");
+    for display in ["DISPLAY", "WAYLAND_DISPLAY"] {
+        let world = World::new();
+        let mut command = world.command(&["bug"]);
+        command.env(display, ":0");
+        on_a_terminal(command, "\n");
+        assert_eq!(world.fakes.calls("xdg-open"), 1, "{display}");
+    }
+}
+
+#[test]
+fn no_run_of_these_tests_can_reach_a_real_opener_or_clipboard() {
+    let world = World::new();
+    let command = world.on_a_desktop(&["bug"]);
+    let path = command
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .unwrap();
+    assert_eq!(
+        path,
+        world.fakes.path().as_os_str(),
+        "only the fakes are on PATH"
+    );
+    assert!(
+        world.scratch.home().join(".local/bin/tw-clip").is_file(),
+        "tw-clip is the fake"
     );
 }
