@@ -116,7 +116,7 @@ that this file replaces, on lines 82, 87, 90 and 91. It gains one line after its
 settings:
 
 ```tmux
-source-file "/Users/kh/Projects/tmux-workspace/agent-status.conf"
+source-file "/Users/<user>/Projects/tmux-workspace/agent-status.conf"
 ```
 
 This is the content of `agent-status.conf`:
@@ -375,7 +375,7 @@ The change appends three entries to `~/.claude/settings.json`, for `PermissionRe
 `PreToolUse` and `StopFailure`. Each has this shape with `"timeout": 3`:
 
 ```sh
-[ -n "$TMUX_PANE" ] && /usr/bin/python3 /Users/kh/.local/lib/tmux-workspace/agent-hook.py claude; true
+[ -n "$TMUX_PANE" ] && /usr/bin/python3 /Users/<user>/.local/lib/tmux-workspace/agent-hook.py claude; true
 ```
 
 It always exits 0 and starts no Python outside tmux. The supacode, herdr and graphify hooks

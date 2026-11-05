@@ -5,7 +5,7 @@ Date: 2026-11-05 · Status: approved in conversation, awaiting spec review · Br
 ## Intent
 
 The repository is public on GitHub but only its author can use it. It has no README and no
-LICENSE. It hardcodes `/Users/kh` and macOS tools, and the author's Doppler project sits in
+LICENSE. It hardcodes `/Users/<user>` and macOS tools, and the author's Doppler project sits in
 the tracked `config.json`. This change makes it a project that a stranger on macOS or Linux
 can install with one command, understand from the README, and trust because CI tests it on
 every supported environment. It also adds the first full-screen interface: an agent and
@@ -120,8 +120,8 @@ failed tmux call. A pane that vanished between refreshes is skipped.
 
 | Today | After |
 |---|---|
-| `tmux.conf` calls `/Users/kh/.local/bin/tmux-workspace` (21 places) | Calls `$HOME/.local/bin/tmux-workspace` inside single-quoted shell commands, so `sh` expands it at run time |
-| `source-file "/Users/kh/Projects/tmux-workspace/agent-status.conf"` | `source-file ~/.config/tmux-workspace/agent-status.conf`, a symlink the installer creates |
+| `tmux.conf` calls `/Users/<user>/.local/bin/tmux-workspace` (21 places) | Calls `$HOME/.local/bin/tmux-workspace` inside single-quoted shell commands, so `sh` expands it at run time |
+| `source-file "/Users/<user>/Projects/tmux-workspace/agent-status.conf"` | `source-file ~/.config/tmux-workspace/agent-status.conf`, a symlink the installer creates |
 | `integrations/codex-hooks.json` hardcodes paths (8 places) | Uses a `{{AGENT_HOOK}}` placeholder that `bin/install-terminal-settings` fills in |
 | `snapshot` loads `~/.local/lib/tmux-workspace/agent-hook.py` | Loads `integrations/agent-hook.py` relative to the resolved script, with the old path as fallback |
 | `pbcopy` in five copy bindings | `bin/tw-clip`: `pbcopy`, else `wl-copy` (Wayland), else `xclip`, else `xsel`, else OSC 52 to the client tty |
