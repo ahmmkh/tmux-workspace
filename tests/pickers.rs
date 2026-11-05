@@ -12,7 +12,7 @@ use common::{EXE, Fakes, on_a_terminal, outside_tmux, quietly, started, text};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
-use tmux_workspace::testing::{ScratchTmux, TempDir};
+use tmux_workspace::testing::{ScratchTmux, TempDir, wait_for};
 
 /// A scratch server (session `alpha`), a home, and the fake programs the binary finds on its `PATH`.
 struct World {
@@ -130,7 +130,8 @@ impl World {
         names
     }
 
-    /// A session of its own, with a pane that sleeps; give its pane.
+    /// A session of its own, with a pane that sleeps; give its pane once it runs `sleep` for good: a
+    /// pane that still starts up shows as `tmux` or the shell, which has no agent status.
     fn session(&self, name: &str, dir: &Path) -> String {
         self.scratch.tmux(&[
             "new-session",
@@ -143,7 +144,9 @@ impl World {
             dir.to_str().unwrap(),
             "exec sleep 300",
         ]);
-        self.scratch.expand(&format!("={name}:"), "#{pane_id}")
+        let pane = self.scratch.expand(&format!("={name}:"), "#{pane_id}");
+        self.scratch.settle(&pane);
+        pane
     }
 
     fn alpha(&self) -> String {
@@ -184,20 +187,13 @@ fn names_of(rows: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Wait until every pane of the server has stopped being a shell and runs `sleep`.
+/// Wait until every pane of the server runs `sleep`, with the rule of `wait_for`: the same listing on
+/// three reads in a row. For panes that one tmux command made, which `ScratchTmux::pane` cannot wait for
+/// one by one. A new pane shows as `tmux`, then as the shell, and only then as `sleep`.
 fn wait_for_sleep_everywhere(scratch: &ScratchTmux) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let commands = scratch.tmux(&["list-panes", "-a", "-F", "#{pane_current_command}"]);
-        if commands.lines().all(|command| command == "sleep") {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "panes still start up: {commands}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let commands = || scratch.tmux(&["list-panes", "-a", "-F", "#{pane_current_command}"]);
+    let panes = commands().lines().count();
+    wait_for(commands, &vec!["sleep"; panes].join("\n"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -301,7 +297,6 @@ fn the_workspace_picker_gives_fzf_the_live_workspaces_then_other_folders_then_pr
         &[],
     );
     world.fakes.fzf_exiting(130);
-    wait_for_sleep_everywhere_in(&world.scratch, "beta");
 
     let (status, stderr, shown) = on_a_terminal(world.bin(&["open"]), "");
     assert_eq!((status, stderr.as_str(), shown.as_str()), (0, "", ""));
@@ -339,17 +334,6 @@ fn the_workspace_picker_gives_fzf_the_live_workspaces_then_other_folders_then_pr
             "--info=inline",
         ]
     );
-}
-
-fn wait_for_sleep_everywhere_in(scratch: &ScratchTmux, session: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while scratch.expand(&format!("={session}:"), "#{pane_current_command}") != "sleep" {
-        assert!(
-            Instant::now() < deadline,
-            "the pane of {session} does not start"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -864,7 +848,6 @@ fn the_tab_rows_show_the_labels_the_panes_and_the_status_of_each_tab() {
         "@workspace_agent",
         "done",
     ]);
-    wait_for_sleep_everywhere(&world.scratch);
     world.fakes.fzf_exiting(130);
     let mut command = world.bin(&["pick-window"]);
     command.env("TMUX_PANE", &one);
@@ -1013,7 +996,6 @@ fn a_tab_whose_folder_is_missing_starts_in_the_folder_of_the_session() {
     let world = World::new();
     let home = world.folder("session-folder");
     let pane = world.session("beta", &home);
-    wait_for_sleep_everywhere_in(&world.scratch, "beta");
     let mut command = world.bin(&["new-tab", "x", "/nonexistent/folder"]);
     command.env("TMUX_PANE", &pane);
     assert_eq!(quietly(command).status.code(), Some(0));
@@ -1024,7 +1006,6 @@ fn a_tab_whose_folder_is_missing_starts_in_the_folder_of_the_session() {
     let projects = world.projects();
     let doomed = world.folder("doomed");
     let pane = world.session("gone", &doomed);
-    wait_for_sleep_everywhere_in(&world.scratch, "gone");
     std::fs::remove_dir(&doomed).unwrap();
     let mut command = world.bin(&["new-tab", "y", ""]);
     command.env("TMUX_PANE", &pane);

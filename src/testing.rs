@@ -125,7 +125,9 @@ impl Drop for TempDir {
 }
 
 /// A tmux server on its own socket that never loads the user's config or state: session `alpha`,
-/// window `one`, 120x40, running `sleep`. Dropping it kills the server.
+/// window `one`, 120x40, running `sleep`. Dropping it kills the server. `new` returns once the pane of
+/// `alpha:one` has settled on `sleep`, as `pane` does for the panes it starts, so a test never reads
+/// the command of a pane that still starts up.
 pub struct ScratchTmux {
     name: String,
     socket: String,
@@ -155,6 +157,7 @@ impl ScratchTmux {
             SLEEP,
         ]);
         scratch.socket = scratch.expand("alpha", "#{socket_path}");
+        scratch.settle("alpha:one");
         scratch
     }
 
@@ -204,8 +207,15 @@ impl ScratchTmux {
         full.extend(rest);
         full.push(SLEEP);
         let pane = self.tmux(&full);
-        wait_for(|| self.expand(&pane, "#{pane_current_command}"), "sleep");
+        self.settle(&pane);
         pane
+    }
+
+    /// Wait until the pane of `target` runs `sleep` for good (see `wait_for`: three reads in a row). Every
+    /// pane that a test starts with `exec sleep 300` and later reads the command of, or prints it
+    /// through the binary, has to be waited for like this first.
+    pub fn settle(&self, target: &str) {
+        wait_for(|| self.expand(target, "#{pane_current_command}"), "sleep");
     }
 
     /// The server's socket path.
