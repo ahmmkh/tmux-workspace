@@ -45,6 +45,8 @@ cp -R "$root/shell" "$root/integrations" "$root/legacy" "$dir/"
 find "$dir" -name __pycache__ -type d -prune -exec rm -rf {} +
 find "$dir" \( -name '*.pyc' -o -name .DS_Store \) -type f -exec rm -f {} +
 printf '%s\n' "$version" >"$dir/VERSION"
+# The same modes whatever the umask of the build: readable by all, executable where it was.
+chmod -R u=rwX,go=rX "$dir"
 
 archive=tmux-workspace-$target.tar.gz
 # No macOS metadata (._ files, extended attributes): Linux tar would warn about it.

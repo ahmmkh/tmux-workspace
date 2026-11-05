@@ -99,6 +99,14 @@ class Package(unittest.TestCase):
         for path in ['bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'install.sh']:
             self.assertTrue(members[f'{top}/{path}'].mode & 0o111, path)
 
+    def test_modes_do_not_depend_on_the_umask_of_the_build(self):
+        executables = {'bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'install.sh', 'legacy/bin/tmux-workspace'}
+        with tarfile.open(release_dist() / ARCHIVE) as tar:
+            for member in tar.getmembers():
+                path = member.name.split('/', 1)[1] if '/' in member.name.rstrip('/') else ''
+                wanted = 0o755 if member.isdir() or path in executables else 0o644
+                self.assertEqual(oct(member.mode & 0o777), oct(wanted), member.name)
+
     def test_checksums_are_in_sha256sum_format(self):
         dist = release_dist()
         digest = hashlib.sha256((dist / ARCHIVE).read_bytes()).hexdigest()
@@ -120,15 +128,33 @@ class Package(unittest.TestCase):
         self.assertIn('usage: scripts/package.sh TARGET [OUTDIR]', result.stderr)
 
 
+def copy_tree(dest):
+    """The working tree as a clone has it: tracked and new files, none that git ignores (no binary, no target/)."""
+    listed = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+                            capture_output=True, check=True).stdout.decode().split('\0')
+    for name in filter(None, listed):
+        source = ROOT / name
+        if source.is_file():
+            (dest / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest / name)
+    return dest
+
+
 class Installer(unittest.TestCase):
     def setUp(self):
         # install.sh links the binary that make build copies here, and runs it for the agent integrations.
-        if not (ROOT / 'bin' / 'tmux-workspace').is_file():
+        if not BINARY.is_file():
             self.fail('bin/tmux-workspace is not built: run make build (make test does)')
         self.home = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.home, True)
         self.bin = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.bin, True)
+        # TMPDIR of install.sh: what it downloads goes here, and must be gone when it is done.
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # Files of the test itself, outside HOME and TMPDIR.
+        self.work = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.work, True)
         for tool in CORE:
             found = shutil.which(tool)
             if found:
@@ -140,6 +166,7 @@ class Installer(unittest.TestCase):
 
     def stub(self, name, body='exit 0'):
         path = self.bin / name
+        path.unlink(missing_ok=True)  # never write through a link to the real program
         path.write_text('#!/bin/sh\n' + body + '\n')
         path.chmod(0o755)
 
@@ -147,13 +174,37 @@ class Installer(unittest.TestCase):
         # -V reports the version; every other call fails, as when no server runs.
         self.stub('tmux', f'[ "$1" = -V ] && {{ echo "tmux {version}"; exit 0; }}\nexit 1')
 
-    def install(self, *flags, check=True):
-        env = {'HOME': str(self.home), 'PATH': str(self.bin), 'SHELL': '/bin/zsh', 'LANG': 'C'}
-        result = subprocess.run(['/bin/bash', str(ROOT / 'install.sh'), *flags], env=env, capture_output=True,
-                                text=True, timeout=120, start_new_session=True)  # no terminal to ask on
+    def env(self, **extra):
+        """The environment of install.sh: this HOME and PATH, and the built binary in place of a build.
+        A value of None leaves that variable out."""
+        env = {'HOME': str(self.home), 'PATH': str(self.bin), 'SHELL': '/bin/zsh', 'LANG': 'C',
+               'TMPDIR': str(self.tmp), 'TMUX_WORKSPACE_BINARY': str(BINARY)}
+        env.update(extra)
+        return {key: value for key, value in env.items() if value is not None}
+
+    def run_script(self, argv, check, script_input=None, **extra):
+        result = subprocess.run(argv, env=self.env(**extra), input=script_input, capture_output=True, text=True,
+                                timeout=120, start_new_session=True)  # no terminal to ask on
         if check:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
+
+    def install(self, *flags, check=True, **extra):
+        return self.run_script(['/bin/bash', str(ROOT / 'install.sh'), *flags], check, **extra)
+
+    def piped(self, *flags, check=True, **extra):
+        """install.sh the way `curl … | bash` runs it: the script on standard input, no clone around it."""
+        extra.setdefault('TMUX_WORKSPACE_BINARY', None)
+        return self.run_script(['/bin/bash', '-s', '--', *flags], check, (ROOT / 'install.sh').read_text(), **extra)
+
+    @property
+    def share(self):
+        return self.home / '.local/share/tmux-workspace'
+
+    def tool(self, *args, **extra):
+        """Run the installed ~/.local/bin/tmux-workspace."""
+        return subprocess.run([str(self.home / '.local/bin/tmux-workspace'), *args], env=self.env(**extra),
+                              capture_output=True, text=True, timeout=60, start_new_session=True)
 
     def tree(self):
         """Every path under HOME: links by target, files by content."""
@@ -360,9 +411,8 @@ class Installer(unittest.TestCase):
         def controlling_terminal():  # the pty becomes /dev/tty for install.sh
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-        env = {'HOME': str(self.home), 'PATH': str(self.bin), 'SHELL': '/bin/zsh', 'LANG': 'C'}
         proc = subprocess.Popen(['/bin/bash', str(ROOT / 'install.sh')], stdin=slave, stdout=slave, stderr=slave,
-                                env=env, preexec_fn=controlling_terminal)
+                                env=self.env(), preexec_fn=controlling_terminal)
         os.close(slave)
         output = b''
         try:
@@ -385,6 +435,186 @@ class Installer(unittest.TestCase):
             os.close(master)
         self.assertEqual(proc.returncode, 0, output.decode(errors='replace'))
         self.assertIn(b'tmux-workspace installed', output)
+
+    # -- Releases: a piped install downloads, checks and unpacks the archive of this platform. --------------
+
+    def corrupt_dist(self):
+        """A copy of the release whose SHA256SUMS does not match its archive."""
+        dist = self.work / 'corrupt'
+        shutil.copytree(release_dist(), dist)
+        sums = (dist / 'SHA256SUMS').read_text()
+        (dist / 'SHA256SUMS').write_text(('1' if sums[0] != '1' else '2') + sums[1:])
+        return dist
+
+    def test_remote_install_verifies_and_extracts_the_archive(self):
+        out = self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist())).stdout
+        current = self.share / 'current'
+        self.assertEqual(os.readlink(current), VERSION)
+        self.assertEqual((self.share / VERSION / 'VERSION').read_text(), VERSION + '\n')
+        self.assertEqual((self.share / VERSION / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        self.assertEqual(os.readlink(self.home / '.local/bin/tmux-workspace'), str(current / 'bin/tmux-workspace'))
+        self.assertEqual(os.readlink(self.home / '.local/bin/tw-clip'), str(current / 'bin/tw-clip'))
+        self.assertEqual(os.readlink(self.home / '.tmux.conf'), str(current / 'tmux.conf'))
+        self.assertEqual(os.readlink(self.home / '.config/tmux-workspace/agent-status.conf'),
+                         str(current / 'agent-status.conf'))
+        self.assertIn(f'. "{current}/shell/work.sh"', (self.home / '.zshrc').read_text())
+        topic = self.tool('help-topic', 'park')
+        self.assertEqual(topic.returncode, 0, topic.stderr)
+        self.assertIn('Park Pane', topic.stdout)
+        self.assertIn('tmux-workspace installed', out)
+        self.assertEqual(list(self.tmp.iterdir()), [], 'the download is cleaned up')
+
+    def test_a_second_remote_install_changes_nothing(self):
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()))
+        before = self.tree()
+        out = self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist())).stdout
+        self.assertIn('already installed', out)
+        self.assertEqual(self.tree(), before)
+
+    def test_a_newer_release_replaces_the_older_and_keeps_one_before_it(self):
+        for version in ('2.0.1', '2.0.2', '2.0.3'):
+            self.piped('--yes', TMUX_WORKSPACE_DIST=str(renumbered_dist(version, self.work / version)))
+        self.assertEqual(os.readlink(self.share / 'current'), '2.0.3')
+        self.assertEqual(sorted(path.name for path in self.share.iterdir()), ['2.0.2', '2.0.3', 'current'])
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / '2.0.3/bin/tmux-workspace')
+
+    def test_checksum_mismatch_writes_nothing(self):
+        result = self.piped('--yes', check=False, TMUX_WORKSPACE_DIST=str(self.corrupt_dist()))
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(f'checksum mismatch for {ARCHIVE}; nothing was installed', result.stderr)
+        self.assertEqual(self.tree(), {}, 'no ~/.local/bin/tmux-workspace, no share folder, nothing')
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_unsupported_platform_without_cargo_exits_3(self):
+        self.stub('uname', 'case "$1" in -m) echo sparc ;; *) echo SunOS ;; esac')
+        message = 'no prebuilt binary for SunOS/sparc; install Rust (https://rustup.rs) and rerun'
+        for result in (self.piped('--yes', check=False), self.install('--yes', check=False, TMUX_WORKSPACE_BINARY=None)):
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertIn(message, result.stderr)
+            self.assertEqual(self.tree(), {})
+
+    def test_missing_downloader_exits_3(self):
+        self.assertIsNone(shutil.which('curl', path=str(self.bin)))
+        self.assertIsNone(shutil.which('wget', path=str(self.bin)))
+        result = self.piped('--yes', check=False)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('need curl or wget to download tmux-workspace', result.stderr)
+        self.assertEqual(self.tree(), {})
+
+    def recording_curl(self):
+        """A curl that writes down its arguments and fails, as without a network."""
+        log = self.work / 'curl.log'
+        self.stub('curl', f'printf "%s\\n" "$@" >> "{log}"\nexit 22')
+        return log
+
+    def urls(self, log):
+        return [arg for arg in log.read_text().splitlines() if '://' in arg]
+
+    def test_version_flag_selects_the_release(self):
+        log = self.recording_curl()
+        result = self.piped('--yes', '--version', 'v9.9.9', check=False)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.urls(log)[0],
+                         f'https://github.com/ahmmkh/tmux-workspace/releases/download/v9.9.9/{ARCHIVE}')
+        self.assertEqual(self.tree(), {})
+
+    def test_without_a_version_the_latest_release_is_fetched(self):
+        log = self.recording_curl()
+        self.assertEqual(self.piped('--yes', check=False).returncode, 3)
+        self.assertEqual(self.urls(log)[0],
+                         f'https://github.com/ahmmkh/tmux-workspace/releases/latest/download/{ARCHIVE}')
+
+    def test_a_malformed_version_is_a_usage_error(self):
+        result = self.piped('--version', 'latest', check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--version needs a release like v2.0.0', result.stderr)
+
+    def test_remote_dry_run_writes_nothing(self):
+        out = self.piped('--yes', '--dry-run', TMUX_WORKSPACE_DIST=str(release_dist())).stdout
+        self.assertEqual(self.tree(), {})
+        self.assertIn(f'would    unpack tmux-workspace {VERSION} to {self.share}/{VERSION}', out)
+        self.assertIn(f'would    link {self.home}/.local/bin/tmux-workspace -> {self.share}/current/bin/tmux-workspace',
+                      out)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_a_release_install_uninstalls(self):
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()))
+        result = self.run_script(['/bin/bash', str(self.share / 'current/install.sh'), '--uninstall'], True)
+        self.assertIn('tmux-workspace removed', result.stdout)
+        self.assertFalse(os.path.lexists(self.home / '.local/bin/tmux-workspace'))
+        self.assertFalse(os.path.lexists(self.home / '.tmux.conf'))
+        self.assertFalse(os.path.lexists(self.home / '.config/tmux-workspace/agent-status.conf'))
+        self.assertNotIn(BLOCK, (self.home / '.zshrc').read_text())
+        self.assertTrue((self.share / 'current').is_dir(), 'the program files stay, as a clone did')
+
+    def test_a_stray_stage_variable_removes_nothing(self):
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()))
+        mine = self.work / 'mine'
+        (mine / 'release').mkdir(parents=True)
+        (mine / 'release' / 'notes').write_text('keep\n')
+        self.run_script(['/bin/bash', str(self.share / 'current/install.sh'), '--yes'], True,
+                        TMUX_WORKSPACE_STAGE=str(mine))
+        self.assertEqual((mine / 'release' / 'notes').read_text(), 'keep\n')
+
+    def test_a_piped_uninstall_finds_the_release_install(self):
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()))
+        out = self.piped('--uninstall').stdout
+        self.assertIn('tmux-workspace removed', out)
+        self.assertFalse(os.path.lexists(self.home / '.local/bin/tmux-workspace'))
+
+    def test_python_is_optional(self):
+        (self.bin / 'python3').unlink()
+        out = self.install('--yes').stdout
+        self.assertIn('python3 3.9+ not found: dash, ai and cleanup need it until they are ported', out)
+        self.assertIn('tmux-workspace installed', out)
+
+    def test_an_old_python_only_warns(self):
+        (self.bin / 'python3').unlink()
+        self.stub('python3', 'echo 3.8')
+        out = self.install('--yes').stdout
+        self.assertIn('python3 3.9+ not found', out)
+        self.assertIn('tmux-workspace installed', out)
+
+    def test_deps_no_longer_installs_python(self):
+        (self.bin / 'python3').unlink()
+        brew = self.work / 'brew.log'
+        self.stub('brew', f'echo "$*" >> {brew}')
+        self.install('--deps', '--yes')
+        self.assertNotIn('python', brew.read_text())
+
+    # -- A clone: the binary is given, built with cargo, or downloaded for the version in Cargo.toml. -------
+
+    def clone(self):
+        """A copy of this checkout without its binary, as a fresh clone is."""
+        return copy_tree(self.work / 'clone')
+
+    def test_checkout_copies_the_given_binary_into_bin(self):
+        clone = self.clone()
+        script = ['/bin/bash', str(clone / 'install.sh'), '--yes']
+        self.run_script(script, True)
+        self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), clone / 'bin/tmux-workspace')
+        self.assertIn('already installed', self.run_script(script, True).stdout)
+
+    def test_checkout_without_cargo_downloads_its_version_once(self):
+        clone = self.clone()
+        script = ['/bin/bash', str(clone / 'install.sh'), '--yes']
+        self.run_script(script, True, TMUX_WORKSPACE_BINARY=None, TMUX_WORKSPACE_DIST=str(release_dist()))
+        self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        self.assertEqual(list(self.tmp.iterdir()), [])
+        # The binary of that version is there: a second run needs no download.
+        out = self.run_script(script, True, TMUX_WORKSPACE_BINARY=None,
+                              TMUX_WORKSPACE_DIST=str(self.work / 'nowhere')).stdout
+        self.assertIn('already installed', out)
+
+    def test_checkout_with_cargo_builds_the_release_binary(self):
+        clone = self.clone()
+        built = clone / 'target/release/tmux-workspace'
+        self.stub('cargo', f'echo "$PWD $*" > "{self.work}/cargo.log"\nmkdir -p target/release\n'
+                           f'cp "{BINARY}" target/release/tmux-workspace')
+        self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, TMUX_WORKSPACE_BINARY=None)
+        self.assertEqual((self.work / 'cargo.log').read_text(), f'{clone} build --release --locked\n')
+        self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), built.read_bytes())
 
     def test_script_is_valid_bash_32_syntax(self):
         subprocess.run(['/bin/bash', '-n', str(ROOT / 'install.sh')], check=True)
