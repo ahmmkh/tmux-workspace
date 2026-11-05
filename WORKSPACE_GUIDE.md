@@ -5,14 +5,16 @@ It covers core concepts, everyday shortcuts, advanced parking workflows, sesh wo
 
 ## Start here
 
-The source lives in your clone: `~/.local/share/tmux-workspace` after a piped install, or
-wherever you cloned it. `install.sh` links it into place, so editing the clone changes the live setup.
+A release install keeps its files in `~/.local/share/tmux-workspace/<version>`, and `current` there
+points at the one in use. A clone is wherever you cloned it, and is the live source. `install.sh` links
+the files into place from one or the other. Edit a clone, not a release install: `work update` replaces
+the release. The [README](README.md) covers installing, updating and uninstalling.
 
 - See every pane and agent: **`Ctrl+a`, release, then `A`**
 - Open the AI tools (optional, see section 13): **`Ctrl+a`, release, then `a`**
 - Check terminal, hooks and saves: `tmux-workspace doctor` or **`Ctrl+a D`**
 - Choose the projects folder again: `tmux-workspace setup`
-- Keybindings, `work`, recovery, agent hooks and Neovim integration all run through symlinks to the clone.
+- Keybindings, `work`, recovery, agent hooks and Neovim integration all run through symlinks into the installed release or the clone.
 
 ---
 
@@ -259,27 +261,29 @@ You do not need a special launcher. You can type `claude`, `codex`, `omp`, or `n
 
 ### One canonical project
 
-Edit these files in your clone; `install.sh` links them into place, so there are no copies.
+`install.sh` links these files into place from the installed release (`~/.local/share/tmux-workspace/current`)
+or from your clone, so there are no copies. Edit them in a clone: a release install is replaced by `work update`.
 
 | Project path | Live integration |
 |---|---|
 | `tmux.conf` | `~/.tmux.conf` symlink; options, keybindings and status |
 | `agent-status.conf` | `~/.config/tmux-workspace/agent-status.conf` symlink, loaded by `tmux.conf`. It holds the formats and hooks of the agent status marks. |
-| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; the controller, dashboard and AI entry point |
+| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; the Rust binary: pane start, agent hooks, recovery, the pickers, `help`, `doctor`, `update`. `dash`, `ai` and `cleanup` hand over to `legacy/`. A release carries it; in a clone `install.sh` builds it (`make build` makes a debug build), and git ignores it. |
 | `bin/tw-clip`, `bin/tw-sound` | `~/.local/bin` symlinks; clipboard and agent sounds for macOS and Linux |
-| `lib/` | Python modules: `paths`, `workspace_model`, `dashboard`, `onboarding`, `diagnostics`, the AI tools |
+| `legacy/` | The Python that `dash`, `ai` and `cleanup` still run on (Python 3.9+), until they are ported: `legacy/bin/tmux-workspace` and the modules in `legacy/lib/`. Nothing links to it; the binary starts it. |
 | `config.example.json` | Template for `~/.config/tmux-workspace/config.json`: projects folder, model, Doppler; no API key |
 | `shell/work.sh`, `shell/work.fish` | The `work` command; `install.sh` sources it from `~/.zshrc`/`~/.bashrc` or links it for fish. `shell.zsh` stays for older `.zshrc` lines. |
 | `sesh.toml` | `~/.config/sesh/sesh.toml` symlink when sesh is installed |
-| `integrations/agent-hook.py` | `~/.local/lib/tmux-workspace/agent-hook.py` symlink (`install.sh --agents`). The helper publishes pane identities and reports Claude Code and Codex status. |
+| `integrations/agent-hook.py` | A shim for the hook entries that 1.x registered, which ran it through `~/.local/lib/tmux-workspace/agent-hook.py`: it hands the call to `tmux-workspace agent-hook`. `install.sh --agents` replaces those entries and removes the link. The hook, which publishes pane identities and reports Claude Code and Codex status, is part of the binary. |
 | `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink. The omp extension publishes the pane identity and reports the agent status of omp. |
 | `integrations/tmux_workspace.lua` | `~/.config/nvim/lua/custom/tmux_workspace.lua` symlink |
 
 Shared application registrations stay in their owning configurations, and
-`bin/install-integrations` (run by `install.sh --agents`) merges them with backups:
-`~/.claude/settings.json` invokes the agent-hook path above for the session hooks, for the
-status line (only when you have none) and for the three agent status hooks `PermissionRequest`,
-`PreToolUse` and `StopFailure`. Each status hook entry always exits with status 0.
+`tmux-workspace integrations install` (run by `install.sh --agents`) merges them with backups:
+`~/.claude/settings.json` runs `tmux-workspace agent-hook claude` for the session hooks and for the
+three agent status hooks `PermissionRequest`, `PreToolUse` and `StopFailure`, and
+`tmux-workspace agent-hook claude-status` for the status line (only when you have none). Each status
+hook entry always exits with status 0.
 `~/.config/nvim/init.lua` calls `require('custom.tmux_workspace').setup()`.
 
 ### Private state and backups stay separate
@@ -289,7 +293,8 @@ configuration backups (`backups/`). Agent conversation history stays with its
 original harness. None of that private state lives in the clone.
 
 To move the clone, run `./install.sh` from the new place; it relinks everything.
-`./install.sh --uninstall` removes the links and puts back the files it replaced.
+`./install.sh --uninstall` removes the links and puts back the files it replaced; for a release
+install, run `~/.local/share/tmux-workspace/current/install.sh --uninstall`.
 
 ---
 
@@ -617,7 +622,7 @@ Interactive behavior still requires real tmux/fzf checks.
 
 ## iTerm2 keyboard and scrolling setup
 
-Run `bin/install-integrations` (or `install.sh --agents`) from this project to install the
+Run `install.sh --agents` (or `tmux-workspace integrations install`) to install the
 **tmux workspace** dynamic profile on macOS and merge the Claude Code and Codex hooks. The
 installer preserves unrelated hooks, keeps backups under
 `~/.local/state/tmux-workspace/backups/integrations-*`, and can be rerun.
@@ -724,12 +729,12 @@ Missing or ambiguous titles are ignored rather than updating an unrelated pane.
 
 Codex now uses native `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt` and `SessionEnd` hooks.
-The registrations are in `integrations/codex-hooks.json`; the shared helper is
-`integrations/agent-hook.py`. The existing Codex `notify` computer-use integration
+The registrations are in `integrations/codex-hooks.json`; each runs
+`tmux-workspace agent-hook codex`. The existing Codex `notify` computer-use integration
 is preserved.
 
-After installation, open **`/hooks` in Codex and review/trust the new `agent-hook.py codex`
-entries**. Codex requires review of new hook definitions before running them. The
+After installation, open **`/hooks` in Codex and review/trust the new
+`tmux-workspace agent-hook codex` entries**. Codex requires review of new hook definitions before running them. The
 installer does not change trusted hashes or bypass that review. Restart/resume existing
 Codex CLIs to load the registrations. See the [official hook documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 
@@ -758,6 +763,6 @@ is not proof of trust; `/hooks` remains the authority for whether Codex runs the
 
 To undo the iTerm2 changes, select your original **Default** profile and remove the
 `~/Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json` symlink.
-To undo Codex registration, remove only the `agent-hook.py codex` entries from
+To undo Codex registration, remove only the `tmux-workspace agent-hook codex` entries from
 `~/.codex/hooks.json`. A full backup restore is appropriate only if you made no later
 hook edits. The installer prints the backup directory it created.
