@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.1 — 2026-11-06
+
+`work update` in a terminal that was open before the upgrade to 2.0 no longer makes a workspace.
+
+### Fixed
+
+- A terminal opened before the upgrade still has the `work` function of 1.x, so `work update` ran
+  `tmux-workspace open update` and made a workspace named `update` (a folder, a tmux session, a zoxide
+  entry). `open update` now exits with status 2 and says to run `exec $SHELL`, unless a workspace named
+  `update` is open. `work ./update` runs `open -- update`, so it still makes or opens that workspace.
+- `open --update` made a workspace named `--update`, and so did any name that starts with `-`. It exits
+  with status 2 now. After `--` a name is taken as it is, so `open -- --update` still makes one.
+- `install.sh` ends an update, and the in-place upgrade of a 1.x clone, with `reload   run exec $SHELL
+  in terminals that are already open, so they get the new work command`.
+
 ## 2.0.0 — 2026-11-05
 
 The parts that run all the time are Rust now, and installing no longer needs Python or a clone.
