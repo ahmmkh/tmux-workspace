@@ -349,12 +349,33 @@ run_staged() {
     exec bash "$STAGED/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 }
 
+# Piped, with a clone at the install home: the piped install of v1 cloned there. Rather than unpack a
+# release beside it, update the clone in place (fast-forward only, the new binary first), and let
+# the installer that came with the pull do the rest. Hook entries of v1 keep working through
+# integrations/agent-hook.py, which runs the binary now.
+clone_install() {
+    local root=$1
+    if [ "$UNINSTALL" = 0 ]; then
+        git_update "$root"
+        if [ "$UPDATE" = 1 ] && [ -z "$UPDATED_FROM" ]; then
+            say "done" "already up to date ($(clone_label "$root" HEAD))"
+            exit 0
+        fi
+        if [ -n "$UPDATED_FROM" ]; then
+            TMUX_WORKSPACE_UPDATE_FROM=$UPDATED_FROM
+            export TMUX_WORKSPACE_UPDATE_FROM
+        fi
+    fi
+    exec bash "$root/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+}
+
 # Piped (`curl … | bash`): no clone or release is around this script. Download the release, and its
 # own installer does the rest.
 remote_install() {
     local home
     home=$(share_home)
     detect_platform
+    if [ -e "$home/.git" ]; then clone_install "$home"; fi
     if [ "$UNINSTALL" = 1 ]; then
         if [ -f "$home/current/install.sh" ]; then
             exec bash "$home/current/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
@@ -953,6 +974,8 @@ main() {
     fi
     check_requirements
     if [ "$KIND" = clone ]; then install_binary; fi
+    # Handed over after a pull or a download: what the links lead to changed, even when they did not.
+    if [ -n "$UPDATE_FROM" ]; then CHANGED=1; fi
     do_install
 }
 

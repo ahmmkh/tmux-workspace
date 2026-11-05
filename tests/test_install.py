@@ -804,6 +804,72 @@ class Installer(unittest.TestCase):
         self.assertIn('is on mine, not main', result.stderr)
         self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), head)
 
+    # -- v1: a piped install cloned to ~/.local/share/tmux-workspace. Rerunning the piped install upgrades
+    #    that clone in place. -------------------------------------------------------------------------------
+
+    def v1_install(self, *flags):
+        """A v1 piped install: the clone at the install home, set up by its own (Python era) install.sh.
+        Returns the upstream repository and the clone's commit."""
+        upstream = self.upstream_and_clone(self.v1, self.share)
+        self.run_script(['/bin/bash', str(self.share / 'install.sh'), '--yes', *flags], True, **self.clone_env())
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / 'bin/tmux-workspace')
+        return upstream, self.git(self.share, 'rev-parse', 'HEAD')
+
+    def test_a_v1_clone_is_upgraded_in_place(self):
+        upstream, v1 = self.v1_install()
+        head = self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        out = self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env()).stdout
+        self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), head)
+        self.assertIn(f'from 1.0.0 {v1[:7]} to {VERSION} {head[:7]}', out)
+        self.assertIn('tmux-workspace installed', out, 'the pull changed it, so it is not "already installed"')
+        self.assertEqual((self.share / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / 'bin/tmux-workspace')
+        self.assertFalse(os.path.lexists(self.share / 'current'), 'no release unpacked beside the clone')
+        self.assertEqual(self.git(self.share, 'status', '--porcelain'), '', 'the binary is not a change')
+        topic = self.tool('help-topic', 'park')
+        self.assertEqual(topic.returncode, 0, topic.stderr)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_v1_hook_entries_keep_working_after_the_upgrade(self):
+        (self.home / '.claude').mkdir()
+        upstream, _ = self.v1_install('--agents')
+        settings = self.home / '.claude/settings.json'
+        status_line = json.loads(settings.read_text())['statusLine']['command']
+        self.assertIn('agent-hook.py claude-status', status_line)
+        self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env())
+        # The v1 entry, unchanged without --agents, now runs the shim, which runs the binary (the shim
+        # itself is tested in tests/cli.rs). Outside a Claude pane the hook says nothing and succeeds.
+        self.assertEqual(json.loads(settings.read_text())['statusLine']['command'], status_line)
+        helper = self.home / '.local/lib/tmux-workspace/agent-hook.py'
+        self.assertEqual(helper.resolve(), self.share / 'integrations/agent-hook.py')
+        self.assertEqual(helper.read_text(), (ROOT / 'integrations/agent-hook.py').read_text())
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve().read_bytes(), BINARY.read_bytes())
+        hook = subprocess.run(['/bin/sh', '-c', status_line], input='{"session_id": "0123456789abcdef"}',
+                              env=self.env(), capture_output=True, text=True, timeout=30)
+        self.assertEqual((hook.returncode, hook.stdout, hook.stderr), (0, '', ''))
+
+    def test_a_v1_clone_is_not_pulled_when_the_new_binary_cannot_be_had(self):
+        upstream, v1 = self.v1_install()
+        self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        result = self.piped('--yes', check=False, TMUX_WORKSPACE_DIST=str(self.corrupt_dist()), **self.clone_env())
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('checksum mismatch', result.stderr)
+        self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), v1)
+        self.assertEqual(self.git(self.share, 'status', '--porcelain'), '')
+        # The link still leads to the v1 program, which is still there.
+        self.assertTrue((self.home / '.local/bin/tmux-workspace').resolve().is_file())
+
+    def test_a_v1_clone_with_changes_is_left_alone(self):
+        upstream, v1 = self.v1_install()
+        self.commit(upstream, self.v2(VERSION), 'the Rust port')
+        (self.share / 'tmux.conf').write_text('mine\n')
+        result = self.piped('--yes', check=False, TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f'{self.share} has uncommitted changes', result.stderr)
+        self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), v1)
+        self.assertEqual((self.share / 'tmux.conf').read_text(), 'mine\n')
+
     def test_script_is_valid_bash_32_syntax(self):
         subprocess.run(['/bin/bash', '-n', str(ROOT / 'install.sh')], check=True)
 
