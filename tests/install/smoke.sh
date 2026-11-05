@@ -36,12 +36,23 @@ checks() {
         [ -z "$out" ] || fail "agent-hook printed: $out"
     done
 
-    # pane-start in a labelled pane gives it an identity and becomes TMUX_WORKSPACE_SHELL.
+    # pane-start in a labelled pane gives it an identity and becomes TMUX_WORKSPACE_SHELL. A program that
+    # exits at once stands in for the shell: macOS has only /usr/bin/true, and Alpine only /bin/true. A
+    # TMUX_WORKSPACE_SHELL that does not exist is no error: pane-start falls back to the login shell, which
+    # waits in the pane for input and never writes the status file.
+    shell=''
+    for candidate in /usr/bin/true /bin/true; do
+        if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            shell=$candidate
+            break
+        fi
+    done
+    [ -n "$shell" ] || fail 'neither /usr/bin/true nor /bin/true exists'
     pane=$(tmux new-window -d -P -F '#{pane_id}' -t smoke 'sleep 60')
     tmux set-option -p -t "$pane" @workspace_label smoke-pane
     rm -f "$HOME/pane-start.status"
     tmux respawn-pane -k -t "$pane" \
-        "TMUX_WORKSPACE_SHELL=/bin/true $HOME/.local/bin/tmux-workspace pane-start; echo \$? >$HOME/pane-start.status; sleep 60"
+        "TMUX_WORKSPACE_SHELL=$shell $HOME/.local/bin/tmux-workspace pane-start; echo \$? >$HOME/pane-start.status; sleep 60"
     n=0
     while [ ! -s "$HOME/pane-start.status" ] && [ "$n" -lt 20 ]; do
         sleep 1
