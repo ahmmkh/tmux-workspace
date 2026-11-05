@@ -22,7 +22,8 @@ testing = []
 libc = "0.2"
 # Codex identity reads Codex's state_*.sqlite (Task 5); declared now so Cargo.lock is settled.
 rusqlite = { version = "0.41", features = ["bundled"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip: parse floats exactly like Python, so re-written JSON keeps its numbers.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 
 [[test]]
 name = "cli"
