@@ -168,25 +168,26 @@ Restart running agents afterwards. `tmux-workspace integrations install|uninstal
 
 ## Performance
 
-The paths that run all the time are a Rust binary. Python spends about 35 ms starting before it does
+The paths that run all the time are a Rust binary. Python spends about 37 ms starting before it does
 anything, and a new pane, a Claude Code tool call and the status line each wait for that. `make bench`
 times them against the Python of v1, which stays in `legacy/` for the purpose: hyperfine, 30 runs
 after 3 warm-ups, the mean, on a scratch tmux server with 5 panes in 2 sessions.
 
 | Path | Runs when | v1 (Python) | 2.0 (Rust) | Target |
 |---|---|---|---|---|
-| Agent hook with nothing to do | every Claude Code tool call | 35.8 ms | 1.9 ms | ≤ 5 ms |
-| `pane-start` until it hands over to your shell | every new pane and tab | 50.4 ms | 6.9 ms | ≤ 15 ms |
-| `agent-hook claude-status` | every refresh of Claude's status line | 56.0 ms | 14.9 ms | ≤ 20 ms |
-| `help` | `Ctrl+a ?` | 36.9 ms | 2.0 ms | ≤ 5 ms |
-| `save`, 5 panes | autosave every 5 minutes, `Ctrl+a Ctrl+s` | 284.1 ms | 30.9 ms | ≤ 60 ms |
+| Agent hook with nothing to do | every Claude Code tool call | 37.5 ms | 1.8 ms | ≤ 5 ms |
+| `pane-start` until it hands over to your shell | every new pane and tab | 52.9 ms | 6.6 ms | ≤ 15 ms |
+| `agent-hook claude-status` | every refresh of Claude's status line | 58.7 ms | 14.9 ms | ≤ 20 ms |
+| `help` | `Ctrl+a ?` | 37.8 ms | 1.8 ms | ≤ 5 ms |
+| `save`, 5 panes | autosave every 5 minutes, `Ctrl+a Ctrl+s` | 304.3 ms | 32.3 ms | ≤ 60 ms |
 
 Measured on an Apple M4 Pro, macOS 27.2, tmux 3.8, Python 3.15.2, hyperfine 2.0.0. What is left of
 a path is mostly other programs: here a tmux call costs about 4 ms, a `ps` of one process about
 1 ms, and a `ps` that lists the processes of the panes about 10 ms. So the binary batches its calls
-and asks for little: a save of five panes makes 9 tmux calls and 2 `ps` calls, and reads only the
-processes on the ttys of the panes. `make bench` needs [hyperfine](https://github.com/sharkdp/hyperfine);
-CI prints the numbers of a shared Linux runner on every run, for information only.
+and asks for little: a save of five panes makes 9 tmux calls and 2 `ps` calls, and lists the
+processes on the ttys of the panes and the applications they record, not every process on the machine.
+`make bench` needs [hyperfine](https://github.com/sharkdp/hyperfine); CI prints the numbers of a
+shared Linux runner on every run, for information only.
 
 ## Configuration
 
@@ -224,16 +225,23 @@ the background. A workspace named `update` opens with `work ./update`.
 
 ## Uninstall
 
+How you uninstall depends on how you installed:
+
 ```sh
-~/.local/share/tmux-workspace/current/install.sh --uninstall    # an install from a release
-./install.sh --uninstall                                        # in your clone
+~/.local/share/tmux-workspace/current/install.sh --uninstall    # a release install
+~/.local/share/tmux-workspace/install.sh --uninstall            # a 1.x install that the one-line command upgraded in place
+./install.sh --uninstall                                        # in the clone you made yourself
 ```
 
-Rerunning the install command with `bash -s -- --uninstall` does the same for a release install. It
-removes the links, the shell lines and any agent integrations, and restores what the installer
+A release install has a `current` link in `~/.local/share/tmux-workspace`. A 1.x install made with
+the one-line command is a git clone in that same folder, and stays one after you run the command
+again: it has a `.git`, no `current`, and `install.sh` directly in it. For either, rerunning the
+one-line command with `bash -s -- --uninstall` finds the installer in that folder for you.
+
+It removes the links, the shell lines and any agent integrations, and restores what the installer
 replaced. A running tmux server stops starting panes through tmux-workspace; restart it to finish.
-Your snapshots and `~/.config/tmux-workspace` stay, and so do the program files in
-`~/.local/share/tmux-workspace`: delete that folder to remove them.
+Your snapshots and `~/.config/tmux-workspace` stay, and so does the folder `~/.local/share/tmux-workspace`
+(the program files of a release, or the clone): delete it to remove them.
 
 ## Troubleshooting
 

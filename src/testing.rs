@@ -415,6 +415,24 @@ impl FakeHost {
                 .filter(|(_, p)| ttys.split(',').any(|tty| p.tty == tty))
                 .map(|(pid, p)| format!("{pid} {} {} {} {}", p.ppid, p.pgid, p.tpgid, p.lstart))
                 .collect(),
+            // The processes on the ttys and the processes named: the union, as ps selects. A pid that
+            // is gone is no error while the ttys select something.
+            [
+                "-t",
+                ttys,
+                "-p",
+                pids,
+                "-o",
+                "pid=,ppid=,pgid=,tpgid=,lstart=",
+            ] => self
+                .procs
+                .iter()
+                .filter(|(pid, p)| {
+                    ttys.split(',').any(|tty| p.tty == tty)
+                        || pids.split(',').any(|named| named == pid.to_string())
+                })
+                .map(|(pid, p)| format!("{pid} {} {} {} {}", p.ppid, p.pgid, p.tpgid, p.lstart))
+                .collect(),
             _ => return Err(Error::Msg(format!("FakeHost: unexpected ps {args:?}"))),
         };
         if lines.is_empty() {

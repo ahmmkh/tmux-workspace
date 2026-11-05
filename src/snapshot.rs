@@ -200,16 +200,30 @@ pub fn process_table(host: &dyn Host) -> Result<ProcessTable> {
 /// What `process_table` asks `ps` for.
 const PROCESS_COLUMNS: &str = "pid=,ppid=,pgid=,tpgid=,lstart=";
 
-/// The processes on these ttys (as `ps` names them: `ttys001`, `pts/3`), which is all of the table a
-/// save looks at: the processes of the panes, the agents in them, and the processes between. Asking
-/// for them alone is what keeps `save` fast: `ps -ax` takes 20 ms on a Mac with a thousand
-/// processes, `ps -t` 10. When `ps` cannot take the list (a pane whose tty is gone) every process is
-/// read, as before.
-fn process_table_on(host: &dyn Host, ttys: &[String]) -> Result<ProcessTable> {
-    if !ttys.is_empty()
-        && let Ok(listing) = host.run(&procs::ps(&["-t", &ttys.join(","), "-o", PROCESS_COLUMNS]))
-    {
-        return Ok(read_process_table(&listing));
+/// The processes on these ttys (as `ps` names them: `ttys001`, `pts/3`) and the processes `pids` name:
+/// the table a save looks things up in. It needs the processes of the panes, the agents in them and the
+/// processes between, which share the tty of the pane, and the applications the panes record, which do
+/// not always: Neovim 0.10 and later record the pid of `nvim --embed`, a child of the Neovim on the tty
+/// that has a session of its own and no tty. `ps` takes the union of the two lists in one call. Asking for
+/// those alone is what keeps `save` fast: `ps -ax` takes 20 ms on a Mac with a thousand processes, this 10.
+/// A recorded process that is gone is not in the table, as before. When `ps` cannot take the lists (a pane
+/// whose tty is gone) every process is read, as before.
+fn process_table_on(host: &dyn Host, ttys: &[String], pids: &[i32]) -> Result<ProcessTable> {
+    if !ttys.is_empty() {
+        let ttys = ttys.join(",");
+        let pids = pids
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut args = vec!["-t", ttys.as_str()];
+        if !pids.is_empty() {
+            args.extend(["-p", pids.as_str()]);
+        }
+        args.extend(["-o", PROCESS_COLUMNS]);
+        if let Ok(listing) = host.run(&procs::ps(&args)) {
+            return Ok(read_process_table(&listing));
+        }
     }
     process_table(host)
 }
@@ -247,6 +261,25 @@ fn pane_ttys(panes: &[Fields]) -> Vec<String> {
         }
     }
     ttys
+}
+
+/// The pids the panes record in `@workspace_app`, each once. A record that is not JSON, or has no pid
+/// that is a positive number, names none.
+fn recorded_pids(panes: &[Fields]) -> Vec<i32> {
+    let mut pids = Vec::new();
+    for pane in panes {
+        let pid = option_json(pane.get("@workspace_app"))
+            .ok()
+            .and_then(|app| json_int(app.as_object()?.get("pid")?))
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 0);
+        if let Some(pid) = pid
+            && !pids.contains(&pid)
+        {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 /// Python's `int(value)` of a JSON value: a whole number, a number cut at the point, a bool or a number in text.
@@ -523,7 +556,7 @@ fn save_locked(root: &Path, tmux: &Tmux, host: &dyn Host, force: bool) -> Result
         return Ok(Saved::Nothing);
     }
     let ttys = pane_ttys(&panes);
-    let table = process_table_on(host, &ttys)?;
+    let table = process_table_on(host, &ttys, &recorded_pids(&panes))?;
 
     // Every pane gets an identity, in one tmux call.
     let kept: Vec<&Fields> = panes
@@ -1198,6 +1231,7 @@ mod tests {
 
     // ---- tmux-free pieces
 
+    use crate::host::RealHost;
     use crate::testing::{FakeHost, Proc, ScratchTmux};
 
     /// A host that answers every command with the same text.
@@ -1304,7 +1338,7 @@ mod tests {
     #[test]
     fn the_table_of_a_save_is_the_processes_on_the_ttys_of_the_panes_from_one_ps_call() {
         let host = host_with_four_processes();
-        let table = process_table_on(&host, &["ttys001".into(), "ttys002".into()]).unwrap();
+        let table = process_table_on(&host, &["ttys001".into(), "ttys002".into()], &[]).unwrap();
         let mut pids: Vec<_> = table.keys().copied().collect();
         pids.sort();
         assert_eq!(pids, [100, 200, 300]);
@@ -1318,6 +1352,51 @@ mod tests {
     }
 
     #[test]
+    fn the_table_of_a_save_also_has_the_processes_the_panes_record() {
+        let host = host_with_four_processes();
+        // 400 is on a tty that has no pane (it stands for a process that has left its tty), and 777 is gone.
+        let table = process_table_on(&host, &["ttys001".into()], &[400, 777]).unwrap();
+        let mut pids: Vec<_> = table.keys().copied().collect();
+        pids.sort();
+        assert_eq!(
+            pids,
+            [100, 200, 400],
+            "the recorded process that is gone is not in it"
+        );
+        let calls = host.calls_to("ps");
+        assert_eq!(calls.len(), 1, "one ps call for both lists");
+        assert_eq!(
+            calls[0][1..],
+            ["-t", "ttys001", "-p", "400,777", "-o", PROCESS_COLUMNS]
+        );
+    }
+
+    fn pane_recording(app: &str) -> Fields {
+        let mut pane = Fields::default();
+        pane.set("@workspace_app", app);
+        pane
+    }
+
+    #[test]
+    fn the_pids_a_save_asks_for_are_the_positive_ones_the_panes_record_once() {
+        let panes = [
+            pane_recording(r#"{"kind": "nvim", "pid": 9001}"#),
+            pane_recording(r#"{"kind": "claude", "pid": 42, "id": "x"}"#),
+            pane_recording(r#"{"kind": "nvim", "pid": 9001}"#),
+            pane_recording(r#"{"kind": "codex", "pid": "77"}"#),
+            pane_recording(""),
+            pane_recording("{not json"),
+            pane_recording(r#"{"kind": "nvim"}"#),
+            pane_recording(r#"{"pid": 0}"#),
+            pane_recording(r#"{"pid": -5}"#),
+            pane_recording(r#"{"pid": 99999999999}"#),
+            pane_recording("[1, 2]"),
+            Fields::default(),
+        ];
+        assert_eq!(recorded_pids(&panes), [9001, 42, 77]);
+    }
+
+    #[test]
     fn the_table_of_a_save_is_every_process_when_ps_refuses_the_list_of_ttys() {
         // A pane whose tty is gone makes `ps -t` fail for all of them.
         let host = Failing {
@@ -1326,7 +1405,7 @@ mod tests {
             word: "-t",
             error: "ps: no such tty",
         };
-        let table = process_table_on(&host, &["ttys001".into(), "gone".into()]).unwrap();
+        let table = process_table_on(&host, &["ttys001".into(), "gone".into()], &[400]).unwrap();
         assert_eq!(table.len(), 4, "nothing is missed for it");
         let calls = host.host.calls_to("ps");
         assert_eq!(calls.len(), 2);
@@ -1337,7 +1416,7 @@ mod tests {
     #[test]
     fn the_table_of_a_save_is_every_process_when_no_pane_has_a_tty() {
         let host = host_with_four_processes();
-        assert_eq!(process_table_on(&host, &[]).unwrap().len(), 4);
+        assert_eq!(process_table_on(&host, &[], &[100]).unwrap().len(), 4);
         assert_eq!(host.calls_to("ps").len(), 1);
         assert_eq!(host.calls_to("ps")[0][1], "-axo");
     }
@@ -1640,6 +1719,168 @@ mod tests {
             .collect();
         assert_eq!(scans.len(), 2, "{calls:?}");
         assert_eq!(scans[1][1..], ["-axo", "pid=,ppid=,tty=,comm="]);
+    }
+
+    /// A world with one extra pane, `editor` (identity `bbb...`), that runs `sleep`. `app` is what it records
+    /// in `@workspace_app`.
+    const EDITOR_PANE_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn editor_pane(scratch: &ScratchTmux, app: &Value) -> (String, i32, String) {
+        let pane = scratch.pane(&["new-window", "-t", "alpha:", "-n", "editor"]);
+        scratch.tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "@workspace_id",
+            EDITOR_PANE_ID,
+        ]);
+        scratch.tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "@workspace_app",
+            &app.to_string(),
+        ]);
+        let pid = scratch.expand(&pane, "#{pane_pid}").parse().unwrap();
+        let tty = scratch.expand(&pane, "#{pane_tty}");
+        (pane, pid, tty.trim_start_matches("/dev/").to_string())
+    }
+
+    fn saved_editor_app(root: &Path) -> Value {
+        let (_path, data) = read_snapshot_in(root).unwrap().unwrap();
+        data["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pane| pane["id"] == json!(EDITOR_PANE_ID))
+            .unwrap_or_else(|| panic!("the editor pane is not in the snapshot: {data}"))["app"]
+            .clone()
+    }
+
+    /// Neovim 0.10 and later record the pid of `nvim --embed`, the server below the Neovim on the tty. It
+    /// is detached: it has a session of its own and no tty (`??`). The save must still find it, as it did
+    /// when it read every process.
+    #[test]
+    fn an_app_that_has_left_the_tty_is_found_below_the_pane_and_saved() {
+        let scratch = ScratchTmux::new();
+        let session = TempDir::new();
+        let session_file = session.path().join("session.vim");
+        fs::write(&session_file, "").unwrap();
+        let app = json!({
+            "kind": "nvim",
+            "id": session_file.to_string_lossy(),
+            "pid": 9001,
+            "birth": "Mon Sep 28 07:00:00 2026",
+            "cwd": "/work",
+        });
+        let (_pane, pane_pid, tty) = editor_pane(&scratch, &app);
+        let mut host = FakeHost::new();
+        host.procs.insert(
+            pane_pid,
+            Proc {
+                pgid: pane_pid,
+                tpgid: pane_pid,
+                lstart: "Mon Sep 28 06:00:00 2026".into(),
+                ..Proc::new(1, &tty, "nvim")
+            },
+        );
+        // Detached: its own process group, no tty, and so no foreground group of one (tpgid 0).
+        host.procs.insert(
+            9001,
+            Proc {
+                pgid: 9001,
+                tpgid: 0,
+                lstart: "Mon Sep 28 07:00:00 2026".into(),
+                ..Proc::new(pane_pid, "", "nvim")
+            },
+        );
+        let tmux = Tmux::new().socket(scratch.socket());
+        let root = TempDir::new();
+        save_in(root.path(), &tmux, &host, true).unwrap();
+        assert_eq!(saved_editor_app(root.path()), app);
+        // Still two ps calls: the table names the recorded pid in the call that lists the ttys.
+        let calls = host.calls_to("ps");
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0][1], "-t");
+        assert!(
+            calls[0][2].split(',').any(|listed| listed == tty),
+            "{calls:?}"
+        );
+        assert_eq!(calls[0][3..5], ["-p", "9001"], "{calls:?}");
+    }
+
+    /// The same with a real process, which `ps -t` really does not list: a child of the pane's process that
+    /// called `setsid`. (`perl` does it: macOS has no `setsid` command.)
+    #[test]
+    fn a_really_detached_app_below_the_pane_is_saved() {
+        struct Kill(i32);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                // SAFETY: a pid of a process this test started.
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+            }
+        }
+        let scratch = ScratchTmux::new();
+        let dir = TempDir::new();
+        let pid_file = dir.path().join("pid");
+        let script = "use POSIX; $p = fork(); if (!$p) { POSIX::setsid(); exec \"sleep\", \"300\" } \
+                      open F, \">\", $ARGV[0]; print F $p; close F; sleep 300";
+        let command = format!("exec perl -e '{script}' '{}'", pid_file.display());
+        let pane = scratch.tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "alpha:",
+            "-n",
+            "editor",
+            &command,
+        ]);
+        scratch.tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "@workspace_id",
+            EDITOR_PANE_ID,
+        ]);
+        let read_pid = || fs::read_to_string(&pid_file).unwrap_or_default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while read_pid().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid: i32 = read_pid().trim().parse().expect("perl wrote the pid");
+        let _kill = Kill(pid);
+        let pid_text = pid.to_string();
+        let listing = |args: &[&str]| RealHost.run(&procs::ps(args)).unwrap_or_default();
+        let birth = listing(&["-p", &pid_text, "-o", "lstart="]);
+        assert!(!birth.is_empty(), "the child runs");
+        let tty = scratch.expand(&pane, "#{pane_tty}");
+        let tty = tty.trim_start_matches("/dev/");
+        // The premise: listing the tty does not show it.
+        assert!(
+            !listing(&["-t", tty, "-o", "pid="])
+                .split_whitespace()
+                .any(|listed| listed == pid_text),
+            "the child is on the tty"
+        );
+        let app = json!({"kind": "nvim", "id": "/x/session.vim", "pid": pid, "birth": birth});
+        scratch.tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "@workspace_app",
+            &app.to_string(),
+        ]);
+        let tmux = Tmux::new().socket(scratch.socket());
+        let root = TempDir::new();
+        save_in(root.path(), &tmux, &RealHost, true).unwrap();
+        assert_eq!(saved_editor_app(root.path()), app);
     }
 
     /// A machine whose commands fail on request. Every command is recorded, the failing ones too.

@@ -294,7 +294,9 @@ original harness. None of that private state lives in the clone.
 
 To move the clone, run `./install.sh` from the new place; it relinks everything.
 `./install.sh --uninstall` removes the links and puts back the files it replaced; for a release
-install, run `~/.local/share/tmux-workspace/current/install.sh --uninstall`.
+install, run `~/.local/share/tmux-workspace/current/install.sh --uninstall`. (A 1.x install that the
+one-line command upgraded in place is a clone in `~/.local/share/tmux-workspace`: run its
+`install.sh --uninstall`.)
 
 ---
 

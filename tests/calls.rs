@@ -239,8 +239,8 @@ fn save_with_five_panes_makes_at_most_nine_tmux_calls_and_two_ps_calls() {
         2,
         "the process table and the Codex scan\n{text}"
     );
-    // The two ps calls read the processes on the ttys of the panes, not every process: `ps -ax` takes
-    // 140 ms on a Mac with a thousand processes, and the save has 60 ms.
+    // The two ps calls list the processes on the ttys of the panes (and the recorded apps), not every
+    // process: `ps -ax` takes 140 ms on a Mac with a thousand processes, and the save has 60 ms.
     let mut ttys: Vec<String> = scratch
         .tmux(&["list-panes", "-a", "-F", "#{pane_tty}"])
         .lines()
@@ -282,6 +282,47 @@ fn save_with_five_panes_makes_at_most_nine_tmux_calls_and_two_ps_calls() {
         std::fs::read_to_string(&again).unwrap()
     );
     assert!(started(&again, "ps") <= 2);
+}
+
+#[test]
+fn a_save_names_the_recorded_apps_in_the_ps_call_that_lists_the_ttys() {
+    // Neovim records the pid of a child that has left the tty, which `ps -t` does not list: the same call
+    // asks for it with `-p`, and a save still makes two ps calls.
+    let scratch = five_panes();
+    let panes = scratch.tmux(&["list-panes", "-a", "-F", "#{pane_id} #{pane_pid}"]);
+    let mut recorded = Vec::new();
+    for (line, kind) in panes.lines().take(2).zip(["nvim", "claude"]) {
+        let (pane, pid) = line.split_once(' ').unwrap();
+        let app = json!({"kind": kind, "id": "x", "pid": pid.parse::<i32>().unwrap(), "birth": "Mon Sep 28 07:00:00 2026"});
+        scratch.tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            pane,
+            "@workspace_app",
+            &app.to_string(),
+        ]);
+        recorded.push(pid.to_string());
+    }
+    recorded.sort();
+    let dir = TempDir::new();
+    let trace = traced(&scratch, dir.path(), "save");
+    let text = std::fs::read_to_string(&trace).unwrap();
+    let scans: Vec<&str> = text.lines().filter(|l| l.starts_with("ps ")).collect();
+    assert_eq!(scans.len(), 2, "{text}");
+    let words: Vec<&str> = scans[0].split(' ').collect();
+    assert_eq!(&words[..2], ["ps", "-t"], "{text}");
+    assert_eq!(words[3], "-p", "{text}");
+    let mut named: Vec<&str> = words[4].split(',').collect();
+    named.sort();
+    assert_eq!(named, recorded, "{text}");
+    assert_eq!(
+        &words[5..],
+        ["-o", "pid=,ppid=,pgid=,tpgid=,lstart="],
+        "{text}"
+    );
+    // The Codex scan lists the ttys alone: only a process on a pane's tty is a pane's Codex.
+    assert!(!scans[1].contains(" -p "), "{text}");
 }
 
 #[test]

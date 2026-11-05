@@ -4,18 +4,18 @@
 
 The parts that run all the time are Rust now, and installing no longer needs Python or a clone.
 
-Python spends about 35 ms starting before it does anything, and the agent hook, `pane-start`, the
+Python spends about 37 ms starting before it does anything, and the agent hook, `pane-start`, the
 status line, `help` and autosave each paid for it. They run in a Rust binary now. `make bench`, on an
 Apple M4 Pro (macOS 27.2, tmux 3.8, Python 3.15.2), hyperfine, mean of 30 runs on a scratch server
 with 5 panes:
 
 | Path | 1.0.0 (Python) | 2.0.0 (Rust) |
 |---|---|---|
-| Agent hook with nothing to do (every Claude Code tool call) | 35.8 ms | 1.9 ms |
-| `pane-start` until it hands over to your shell (every new pane) | 50.4 ms | 6.9 ms |
-| `agent-hook claude-status` (every status line refresh) | 56.0 ms | 14.9 ms |
-| `help` (`Ctrl+a ?`) | 36.9 ms | 2.0 ms |
-| `save` of 5 panes (autosave, `Ctrl+a Ctrl+s`) | 284.1 ms | 30.9 ms |
+| Agent hook with nothing to do (every Claude Code tool call) | 37.5 ms | 1.8 ms |
+| `pane-start` until it hands over to your shell (every new pane) | 52.9 ms | 6.6 ms |
+| `agent-hook claude-status` (every status line refresh) | 58.7 ms | 14.9 ms |
+| `help` (`Ctrl+a ?`) | 37.8 ms | 1.8 ms |
+| `save` of 5 panes (autosave, `Ctrl+a Ctrl+s`) | 304.3 ms | 32.3 ms |
 
 ### Install
 
