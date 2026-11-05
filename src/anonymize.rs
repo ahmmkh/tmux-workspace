@@ -181,6 +181,18 @@ const SECRET_PREFIXES: [&str; 9] = [
 /// A run of this many letters, digits, `_` and `-` that mixes letters and digits is a token.
 const LONG_RUN: usize = 24;
 
+/// The names of the Rust targets that a report says (see `bug::target`). They mix letters and digits
+/// and the longer ones are as long as a token, but they are no secret.
+const TARGETS: [&str; 7] = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "armv7-unknown-linux-gnueabihf",
+    "riscv64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+];
+
 /// One word to replace: a name of the server, the login name or the host name.
 struct Word {
     needle: String,
@@ -680,6 +692,7 @@ fn hide_tokens(text: &str) -> String {
             out.push_str(&run[..start]);
             out.push_str("<token>");
         } else if len >= LONG_RUN
+            && !TARGETS.contains(&run)
             && run.bytes().any(|b| b.is_ascii_alphabetic())
             && run.bytes().any(|b| b.is_ascii_digit())
         {
@@ -873,6 +886,32 @@ mod tests {
                 "abcdefghijklmnopqrstuvwxyzabcdef 123456789012345678901234567890"
             ),
             "abcdefghijklmnopqrstuvwxyzabcdef 123456789012345678901234567890"
+        );
+    }
+
+    #[test]
+    fn a_target_triple_is_no_token_although_it_mixes_letters_and_digits() {
+        let mut anon = plain();
+        for target in [
+            "x86_64-unknown-linux-musl",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "armv7-unknown-linux-gnueabihf",
+            "riscv64-unknown-linux-gnu",
+        ] {
+            let text = format!("tmux-workspace 2.1.0 (release, {target})");
+            assert_eq!(clean(&mut anon, &text), text);
+        }
+        // What only looks like one is a token all the same.
+        assert_eq!(
+            clean(&mut anon, "x86_64-unknown-linux-musl-9f8e7d6c5b4a"),
+            "<token>"
+        );
+        assert_eq!(
+            clean(&mut anon, "x86_64-secret1234567890abcdef-x"),
+            "<token>"
         );
     }
 

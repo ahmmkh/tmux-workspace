@@ -295,7 +295,7 @@ work bug --print
 it in full, and asks before it opens GitHub's issue form with the report filled in. You read the form and
 press Submit; nothing is sent before that. Names of workspaces, tabs and pane labels, folders, user and host
 names, e-mail and IP addresses, keys and passwords in URLs are replaced or removed, and pane contents,
-environment variables and shell history are never read. Over SSH it prints the link and copies the report
+environment variables, shell history and git remotes are never in the report. Over SSH it prints the link and copies the report
 with `tw-clip` instead. The [guide](WORKSPACE_GUIDE.md#reporting-a-bug-or-an-idea) lists everything the
 report holds.
 

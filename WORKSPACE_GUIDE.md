@@ -369,7 +369,7 @@ environment only.
 - **What is left out**: workspace names become `workspace-1`, tab names `tab-1`, pane labels `label-1`,
   folders under your home `folder-1` (the home itself is `~`; generic folders such as `Projects` and
   `src` stay). Your user and host names, e-mail and IP addresses, keys and tokens, and passwords in URLs
-  are removed. Pane contents, environment variables, shell history and git remotes are never read.
+  are removed. Pane contents, environment variables, shell history and git remotes are never in the report.
 - `work bug --print` only prints the report. Without a terminal it prints the report and the link and opens
   nothing. Over SSH, or with no way to open a browser, it prints the link and copies the full report with
   `tw-clip` (OSC 52, which works over SSH): paste it into the form if a field is empty. A link over 8000

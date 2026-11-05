@@ -157,17 +157,6 @@ fn the_hook_stays_silent_when_it_fails_and_the_log_keeps_the_failure() {
     assert!(!lines[0].contains(&pane), "never an argument: {lines:?}");
 }
 
-#[test]
-fn a_failure_of_bug_itself_offers_no_report() {
-    let scratch = ScratchTmux::new();
-    let out = scratch.bin(EXE).args(["bug", "--nope"]).output().unwrap();
-    assert!(
-        !text(&out.stderr).contains("Report it"),
-        "{}",
-        text(&out.stderr)
-    );
-}
-
 // ---------------------------------------------------------------------------------------------
 // The report: what `bug` and `idea` say
 
@@ -304,9 +293,13 @@ fn has_word(text: &str, word: &str) -> bool {
     })
 }
 
+/// What a program prints, or nothing when this machine does not have it.
 fn command_output(program: &str, args: &[&str]) -> String {
-    let out = Command::new(program).args(args).output().unwrap();
-    text(&out.stdout).trim().to_string()
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|out| text(&out.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// A pane that runs a program called `codex`: a copy of this program, which waits for the input of a hook

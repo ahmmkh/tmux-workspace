@@ -1302,8 +1302,8 @@ DESCRIPTION:
 WHAT IT LEAVES OUT:
   Workspace, tab and pane label names become workspace-1, tab-1, label-1, and folders
   under your home become folder-1 (your home is ~). User and host names, e-mail and IP
-  addresses, keys and tokens, and passwords in URLs are removed. Never pane contents,
-  environment variables, shell history or git remotes.
+  addresses, keys and tokens, and passwords in URLs are removed. The report never has
+  pane contents, environment variables, shell history or git remotes.
 
 SHELL USAGE:
   work bug              Report a bug
