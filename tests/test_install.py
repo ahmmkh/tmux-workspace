@@ -27,6 +27,8 @@ CORE = ['uname', 'id', 'dirname', 'basename', 'readlink', 'mkdir', 'ln', 'mv', '
         'sed', 'tr', 'date', 'find', 'sort', 'mktemp', 'cat', 'rm', 'env', 'bash', 'sh', 'ls', 'head', 'base64',
         'tar', 'gzip', 'sha256sum', 'shasum', 'cmp']
 BLOCK = '# >>> tmux-workspace >>>'
+# What an upgrade ends with: terminals that were open before it still have the work command they started with.
+RELOAD_SHELLS = 'reload   run exec $SHELL in terminals that are already open, so they get the new work command'
 # The debug build in Cargo's target folder, or the binary that TMUX_WORKSPACE_BINARY names.
 BINARY = Path(os.environ.get('TMUX_WORKSPACE_BINARY')
               or Path(os.environ.get('CARGO_TARGET_DIR') or ROOT / 'target') / 'debug' / 'tmux-workspace').resolve()
@@ -778,6 +780,36 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.tool('help-topic', 'park').returncode, 0)
         self.assertEqual(list(self.tmp.iterdir()), [])
 
+    def test_an_update_to_a_newer_release_says_to_reload_open_terminals(self):
+        self.release('2.0.0')
+        out = self.update(dist=self.newer('2.0.1')).stdout
+        self.assertEqual(out.splitlines()[-2:], ['done     updated 2.0.0 → 2.0.1', RELOAD_SHELLS])
+
+    def test_only_an_upgrade_says_to_reload_open_terminals(self):
+        # A first install ends with "next  open a new terminal", which covers it.
+        out = self.install('--yes').stdout
+        self.assertIn('open a new terminal', out)
+        self.assertNotIn('exec $SHELL', out)
+        out = self.install('--yes').stdout
+        self.assertIn('already installed', out)
+        self.assertNotIn('exec $SHELL', out)
+        out = self.release('2.0.0').stdout
+        self.assertIn('open a new terminal', out)
+        self.assertNotIn('exec $SHELL', out)
+        out = self.release('2.0.0').stdout
+        self.assertIn('already installed', out)
+        self.assertNotIn('exec $SHELL', out)
+        # Nothing changes when there is nothing newer, or when an update is only asked about or only shown.
+        out = self.update(dist=self.newer('2.0.0')).stdout
+        self.assertIn('already up to date (2.0.0)', out)
+        self.assertNotIn('exec $SHELL', out)
+        out = self.update('--check', dist=self.newer('2.0.1')).stdout
+        self.assertIn('update available', out)
+        self.assertNotIn('exec $SHELL', out)
+        out = self.piped('--update', '--dry-run', TMUX_WORKSPACE_DIST=str(self.newer('2.0.1'))).stdout
+        self.assertIn('dry run: nothing changed', out)
+        self.assertNotIn('exec $SHELL', out)
+
     def test_update_when_already_up_to_date_changes_nothing(self):
         self.release('2.0.1')
         before = self.tree()
@@ -948,9 +980,11 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), head)
         self.assertIn('updated 2.0.0', out.stdout)
         self.assertIn(f'→ 2.0.1 {head[:7]}', out.stdout)
+        self.assertEqual(out.stdout.splitlines()[-1], RELOAD_SHELLS)
         self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
         again = self.tool('update', **self.clone_env())
         self.assertIn(f'already up to date (2.0.1 {head[:7]})', again.stdout)
+        self.assertNotIn('exec $SHELL', again.stdout)
 
     def test_update_of_a_clone_builds_the_new_version_before_the_pull(self):
         clone = self.work / 'checkout'
@@ -1039,6 +1073,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.git(self.share, 'rev-parse', 'HEAD'), head)
         self.assertIn(f'from 1.0.0 {v1[:7]} to {VERSION} {head[:7]}', out)
         self.assertIn('tmux-workspace installed', out, 'the pull changed it, so it is not "already installed"')
+        self.assertIn(RELOAD_SHELLS, out.splitlines(), 'terminals that are open still have the work of v1')
         self.assertEqual((self.share / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
         self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / 'bin/tmux-workspace')
         self.assertFalse(os.path.lexists(self.share / 'current'), 'no release unpacked beside the clone')

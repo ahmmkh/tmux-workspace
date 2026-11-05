@@ -1020,7 +1020,15 @@ do_install() {
         *) say note "$BIN_DIR is not on PATH yet; new shells get it from the work command block" ;;
     esac
     say "done" "tmux-workspace installed"
+    # UPDATE_FROM names the version this upgrades from (a v1 clone, pulled in place), so terminals are
+    # open already. A first install has none, and `next` tells it to open one.
+    if [ -n "$UPDATE_FROM" ]; then say_reload_shells; fi
     say next "open a new terminal, then: work my-project   (Ctrl+a ? lists every shortcut)"
+}
+
+# A terminal that is open keeps the work command it started with, which may be an older one.
+say_reload_shells() {
+    say reload "run exec \$SHELL in terminals that are already open, so they get the new work command"
 }
 
 # Whether the agent integrations are installed: an update registers them again only then.
@@ -1044,6 +1052,7 @@ finish_update() {
     fi
     "$BIN_DIR/tmux-workspace" doctor >/dev/null 2>&1 || true
     say "done" "updated ${UPDATE_FROM:-an earlier version} → $(installed_label)"
+    say_reload_shells
 }
 
 stop_server_hooks() {
