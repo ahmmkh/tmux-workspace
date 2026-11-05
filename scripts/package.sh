@@ -49,14 +49,18 @@ printf '%s\n' "$version" >"$dir/VERSION"
 chmod -R u=rwX,go=rX "$dir"
 
 archive=tmux-workspace-$target.tar.gz
-# No macOS metadata (._ files, extended attributes): Linux tar would warn about it.
+# No macOS metadata (._ files, extended attributes): Linux tar would warn about it. Every file is
+# root's: tar run as root restores owners, and the uid of the build machine is nobody's there.
 COPYFILE_DISABLE=1
 export COPYFILE_DISABLE
-if tar --version 2>/dev/null | grep -q bsdtar; then
-    (cd "$stage" && tar --no-xattrs -czf "$out/$archive" "$top")
-else
-    (cd "$stage" && tar -czf "$out/$archive" "$top")
-fi
+case $(tar --version 2>/dev/null) in
+    *bsdtar*) (cd "$stage" && tar --no-xattrs --uid 0 --gid 0 --uname root --gname root -czf "$out/$archive" "$top") ;;
+    *'GNU tar'*) (cd "$stage" && tar --owner=0 --group=0 --numeric-owner -czf "$out/$archive" "$top") ;;
+    *)
+        echo 'package.sh: needs GNU tar or bsdtar, which can make root the owner of the files' >&2
+        exit 1
+        ;;
+esac
 
 if command -v sha256sum >/dev/null 2>&1; then
     sum=$(cd "$out" && sha256sum "$archive")

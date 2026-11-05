@@ -107,6 +107,14 @@ class Package(unittest.TestCase):
                 wanted = 0o755 if member.isdir() or path in executables else 0o644
                 self.assertEqual(oct(member.mode & 0o777), oct(wanted), member.name)
 
+    def test_members_belong_to_root_whoever_packed_them(self):
+        # Unpacked as root, an archive restores its owners: those of the build machine are nobody's here.
+        with tarfile.open(release_dist() / ARCHIVE) as tar:
+            for member in tar.getmembers():
+                self.assertEqual((member.uid, member.gid), (0, 0), member.name)
+                self.assertIn(member.uname, ('', 'root'), member.name)
+                self.assertIn(member.gname, ('', 'root'), member.name)
+
     def test_checksums_are_in_sha256sum_format(self):
         dist = release_dist()
         digest = hashlib.sha256((dist / ARCHIVE).read_bytes()).hexdigest()

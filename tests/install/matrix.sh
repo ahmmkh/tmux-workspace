@@ -26,7 +26,7 @@ else
     # The cargo registry and target folder live in a volume, so the next run builds only what changed.
     if ! docker run --rm -v "$REPO":/src:ro -v "$dist":/dist -v tmux-workspace-cargo:/cache \
         -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target -w /src rust:1-alpine \
-        sh -c "apk add -q musl-dev && scripts/package.sh $arch-unknown-linux-musl /dist && chown -R $(id -u):$(id -g) /dist"; then
+        sh -c "apk add -q musl-dev tar && scripts/package.sh $arch-unknown-linux-musl /dist && chown -R $(id -u):$(id -g) /dist"; then
         echo 'FAIL building the archive'
         exit 1
     fi
