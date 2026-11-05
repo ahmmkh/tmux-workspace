@@ -153,6 +153,22 @@ impl World {
         self.scratch.expand("alpha:one", "#{pane_id}")
     }
 
+    /// Save, then lose the server: closing its only session ends it. What is left is a save that a
+    /// new server would be started with.
+    fn lose_the_server(&self) {
+        let mut command = self.scratch.bin(EXE);
+        command.arg("save");
+        let saved = quietly(command);
+        assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
+        assert!(self.scratch.state_dir().join("latest.json").is_file());
+        self.scratch.tmux(&["kill-session", "-t", "alpha"]);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while self.scratch.run(&["has-session"]).status.success() {
+            assert!(Instant::now() < deadline, "the server still runs");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn option(&self, target: &str, name: &str) -> String {
         self.scratch
             .tmux(&["show-options", "-pqv", "-t", target, name])
@@ -747,18 +763,7 @@ fn outside_tmux_the_workspace_is_attached_with_exec() {
 #[test]
 fn a_server_that_is_gone_is_started_with_the_saved_workspaces() {
     let world = World::new();
-    // Save, then lose the server: closing its only session ends it.
-    let mut command = world.scratch.bin(EXE);
-    command.arg("save");
-    let saved = quietly(command);
-    assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
-    assert!(world.scratch.state_dir().join("latest.json").is_file());
-    world.scratch.tmux(&["kill-session", "-t", "alpha"]);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while world.scratch.run(&["has-session"]).status.success() {
-        assert!(Instant::now() < deadline, "the server still runs");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    world.lose_the_server();
 
     world.ok(&["open", "beta"]);
 
@@ -771,6 +776,174 @@ fn a_server_that_is_gone_is_started_with_the_saved_workspaces() {
             .tmux(&["show-options", "-gqv", "@workspace_initialized"]),
         "1"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// open update, open -NAME and open -- NAME
+//
+// A shell that was open before the upgrade to 2.0 still has the 1.x `work` function, which sends
+// `work update` to `open update` and `work --update` to `open --update`.
+
+/// What `open update` says when no workspace has that name.
+const RELOAD_THE_SHELL: &str = "No workspace named update is open, so this looks like work update from a terminal opened before tmux-workspace 2.0.
+Run exec $SHELL (or open a new terminal), then work update again.
+To make a workspace named update, run: work ./update
+";
+
+/// What the refusal of a name that starts with a dash says.
+fn dash_refusal(name: &str) -> String {
+    format!("Workspace error: A workspace name cannot start with -: {name}\n")
+}
+
+#[test]
+fn a_bare_update_with_no_update_workspace_says_to_reload_the_shell() {
+    let world = World::new();
+    let projects = world.projects();
+    let out = world.run(&["open", "update"]);
+    assert_eq!(text(&out.stderr), RELOAD_THE_SHELL);
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(out.status.code(), Some(2));
+    // Nothing was made: no session, no folder, nothing told to zoxide, and none of what a
+    // workspace that opens does first.
+    assert_eq!(world.sessions(), ["alpha"]);
+    assert!(!projects.join("update").exists());
+    assert_eq!(world.fakes.calls("zoxide"), 0);
+    assert_eq!(
+        world
+            .scratch
+            .tmux(&["show-options", "-gqv", "@workspace_initialized"]),
+        ""
+    );
+}
+
+#[test]
+fn the_same_holds_when_no_tmux_server_runs() {
+    let world = World::new();
+    let projects = world.projects();
+    world.lose_the_server();
+
+    let out = world.run(&["open", "update"]);
+    assert_eq!(text(&out.stderr), RELOAD_THE_SHELL);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!projects.join("update").exists());
+    assert_eq!(world.fakes.calls("zoxide"), 0);
+    // No server was started for it, so the save was not restored either.
+    assert!(!world.scratch.run(&["has-session"]).status.success());
+}
+
+#[test]
+fn a_bare_update_asks_no_first_run_questions() {
+    let world = World::fresh();
+    let config = world.home().join(".config/tmux-workspace/config.json");
+    let (status, stderr, shown) = on_a_terminal(world.bin(&["open", "update"]), "");
+    assert_eq!((status, stderr.as_str()), (2, RELOAD_THE_SHELL));
+    assert_eq!(shown, "");
+    assert!(!config.exists());
+}
+
+#[test]
+fn open_dash_dash_update_makes_the_workspace_named_update() {
+    let world = World::new();
+    let projects = world.projects();
+    world.ok(&["open", "--", "update"]);
+    assert_eq!(world.sessions(), ["alpha", "update"]);
+    assert!(projects.join("update").is_dir());
+    assert_eq!(
+        world.scratch.expand("=update:", "#{session_path}"),
+        projects.join("update").to_str().unwrap()
+    );
+}
+
+#[test]
+fn a_bare_update_opens_the_update_workspace_that_is_open() {
+    let world = World::new();
+    world.session("update", &world.folder("update"));
+    let (out, trace) = world.traced(world.bin(&["open", "update"]));
+    assert_eq!(
+        (text(&out.stderr).as_str(), out.status.code()),
+        ("", Some(0))
+    );
+    assert_eq!(
+        traced_line(&trace, "tmux switch-client"),
+        "tmux switch-client -t =update"
+    );
+    assert!(
+        trace
+            .iter()
+            .all(|line| !line.starts_with("tmux new-session")),
+        "{trace:?}"
+    );
+    assert_eq!(world.sessions(), ["alpha", "update"]);
+}
+
+#[test]
+fn a_name_that_starts_with_a_dash_is_refused() {
+    let world = World::new();
+    let projects = world.projects();
+    for name in ["--update", "-x", "-"] {
+        let out = world.run(&["open", name]);
+        assert_eq!(text(&out.stderr), dash_refusal(name), "{name}");
+        assert_eq!(text(&out.stdout), "", "{name}");
+        assert_eq!(out.status.code(), Some(2), "{name}");
+    }
+    assert_eq!(world.sessions(), ["alpha"]);
+    assert_eq!(std::fs::read_dir(&projects).unwrap().count(), 0);
+    assert_eq!(world.fakes.calls("zoxide"), 0);
+    assert_eq!(
+        world
+            .scratch
+            .tmux(&["show-options", "-gqv", "@workspace_initialized"]),
+        ""
+    );
+}
+
+#[test]
+fn a_refused_dash_name_starts_no_server_and_asks_no_first_run_questions() {
+    let world = World::fresh();
+    world.lose_the_server();
+    let config = world.home().join(".config/tmux-workspace/config.json");
+    let (status, stderr, shown) = on_a_terminal(world.bin(&["open", "--update"]), "");
+    assert_eq!(
+        (status, stderr.as_str()),
+        (2, dash_refusal("--update").as_str())
+    );
+    assert_eq!(shown, "");
+    assert!(!config.exists());
+    assert!(!world.scratch.run(&["has-session"]).status.success());
+}
+
+#[test]
+fn a_name_after_dash_dash_is_taken_literally_even_with_a_dash() {
+    let world = World::new();
+    let projects = world.projects();
+    world.ok(&["open", "--", "--update"]);
+    assert_eq!(world.sessions(), ["--update", "alpha"]);
+    assert!(projects.join("--update").is_dir());
+    assert_eq!(
+        world.scratch.expand("=--update:", "#{session_path}"),
+        projects.join("--update").to_str().unwrap()
+    );
+    // zoxide takes the name as a name, not as one of its options.
+    assert_eq!(
+        world.fakes.all_args("zoxide")[0],
+        ["query", "--", "--update"]
+    );
+}
+
+#[test]
+fn open_dash_dash_alone_picks_like_open_alone() {
+    let world = World::new();
+    let projects = world.projects();
+    std::fs::create_dir(projects.join("docs")).unwrap();
+    let (status, stderr, shown) = on_a_terminal(world.bin(&["open", "--"]), "\n");
+    assert_eq!((status, stderr.as_str()), (0, ""));
+    assert!(shown.contains(" 1. ● alpha"), "{shown:?}");
+    assert!(shown.contains(" 2. 📁 docs\n"), "{shown:?}");
+    assert!(
+        shown.ends_with("Number, or a new workspace name (Enter cancels): "),
+        "{shown:?}"
+    );
+    assert_eq!(world.sessions(), ["alpha"]);
 }
 
 // ---------------------------------------------------------------------------------------------

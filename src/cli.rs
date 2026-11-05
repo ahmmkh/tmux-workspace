@@ -121,7 +121,7 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             park::unpark(&tmux, &target, &direction, command == "choose-park").map(|()| 0)
         }
         // `work NAME` and `prefix s`; without a name, the workspace picker.
-        "open" => pick::open_workspace(&Tmux::new(), args.first().map(String::as_str)).map(|()| 0),
+        "open" => open(&Tmux::new(), args, &mut std::io::stderr()),
         "pick-window" => pick::pick_window(&Tmux::new()).map(|()| 0),
         // The preview of the tab picker: it reads the index from its argument.
         "window-preview" => {
@@ -147,6 +147,45 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "dash" | "dashboard" | "ai" | "cleanup" => Err(legacy(command, args)),
         _ => fail(format!("Unknown workspace command: {command}")),
     }
+}
+
+/// What `work update` says when it reaches `open`: the shell that ran it was opened before 2.0.
+const OLD_SHELL: &str = "No workspace named update is open, so this looks like work update from a terminal opened before tmux-workspace 2.0.
+Run exec $SHELL (or open a new terminal), then work update again.
+To make a workspace named update, run: work ./update";
+
+/// `open [--] [NAME]`: open the workspace NAME, or pick one.
+///
+/// A shell opened before 2.0 still has the `work` function of 1.x, which sends everything but
+/// `work rm` here: `work update` is `open update` and `work --update` is `open --update`. Neither is
+/// meant as a workspace, so `open` refuses (status 2, nothing made) a name that starts with `-`, and
+/// `update` unless a workspace has that name. After `--` the name is taken as it is: `work ./update`
+/// is `open -- update`. The checks come before everything `open` does: no first-run questions, no
+/// server started, no saved workspaces restored.
+fn open(tmux: &Tmux, args: &[String], errors: &mut dyn Write) -> Result<i32> {
+    let (literal, name) = match args {
+        [dashes, rest @ ..] if dashes == "--" => (true, rest.first()),
+        _ => (false, args.first()),
+    };
+    let name = name.map(String::as_str);
+    if let Some(name) = name.filter(|_| !literal) {
+        if name.starts_with('-') {
+            writeln!(
+                errors,
+                "Workspace error: A workspace name cannot start with -: {name}"
+            )?;
+            return Ok(2);
+        }
+        if name == "update"
+            && !pick::session_names(tmux)
+                .iter()
+                .any(|session| session == name)
+        {
+            writeln!(errors, "{OLD_SHELL}")?;
+            return Ok(2);
+        }
+    }
+    pick::open_workspace(tmux, name).map(|()| 0)
 }
 
 /// Hand a command that is not ported yet to `legacy/bin/tmux-workspace`: become `python3` running it.

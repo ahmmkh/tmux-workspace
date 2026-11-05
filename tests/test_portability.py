@@ -185,8 +185,11 @@ class ShellIntegration(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 self.assertEqual(self.work(shell, 'update'), ['update'])
                 self.assertEqual(self.work(shell, 'update', '--check')[-1], 'update --check')
-                # A workspace named update opens through the path form.
-                self.assertEqual(self.work(shell, './update')[-1], 'open update')
+                # A workspace named update opens through the path form, which gives open its name after --:
+                # a bare `open update` is what a shell from before 2.0 runs for `work update`.
+                self.assertEqual(self.work(shell, './update')[-1], 'open -- update')
+                self.assertEqual(self.work(shell, './update', 'x')[-1], 'open -- update x')
+                self.assertEqual(self.work(shell, 'update')[-1], 'update')
 
     def test_work_sh_puts_local_bin_on_path(self):
         for shell, flag in (('bash', '--norc'), ('zsh', '-f')):

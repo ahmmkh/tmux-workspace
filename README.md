@@ -58,7 +58,7 @@ binaries are static, so any distribution works. Options go after `bash -s --`, a
 release other than the latest:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.sh | bash -s -- --version v2.0.0 --agents
+curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.sh | bash -s -- --version v2.0.1 --agents
 ```
 
 `readlink ~/.local/share/tmux-workspace/current` names the installed version. On any other platform

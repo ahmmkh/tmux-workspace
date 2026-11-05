@@ -32,8 +32,10 @@ work() {
         "$HOME/.local/bin/tmux-workspace" update "$@"
         ;;
     ./update)
+        # A workspace named update. After --, open takes the name as it is: a bare `open update` is
+        # what the work function of 1.x runs for `work update`, and open refuses that.
         shift
-        "$HOME/.local/bin/tmux-workspace" open update "$@"
+        "$HOME/.local/bin/tmux-workspace" open -- update "$@"
         ;;
     *)
         "$HOME/.local/bin/tmux-workspace" open "$@"
