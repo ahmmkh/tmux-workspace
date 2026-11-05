@@ -46,12 +46,53 @@ curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.
 <img src="docs/images/onboarding.svg" alt="Animation of a first run: install.sh links its files, asks where projects live (answered ~/code), then a new terminal runs work api, names the first pane, and opens the dashboard with Ctrl+a A" width="100%">
 
 The installer downloads the release archive for your machine and checks it against the release's
-`SHA256SUMS` before it writes anything: if the checksum differs, it stops and installs nothing. It
-unpacks the release to `~/.local/share/tmux-workspace/<version>` (`current` there points at the
-version in use), links `tmux-workspace`, `tw-clip` and `tw-sound` into `~/.local/bin`,
-`agent-status.conf` into `~/.config/tmux-workspace` and `tmux.conf` to `~/.tmux.conf`, adds the `work`
-command to your shell, and asks where you keep your projects. Every file it replaces is backed up, and running it
-again changes nothing. Read [`install.sh`](install.sh) first if you prefer; it is one bash script.
+`SHA256SUMS` before it writes anything: if the checksum differs, it stops and installs nothing. In a
+terminal it then asks what to set up:
+
+```text
+tmux-workspace 2.1.0 installer
+macOS 27 arm64 · zsh · brew · found: tmux 3.5a, git, python3 3.13
+
+What should I set up?   ↑↓ move · space toggle · enter install · q quit
+
+Needed for tmux-workspace to work
+  [■] tmux-workspace        ~/.local/bin/tmux-workspace
+  [■] tmux config           ~/.tmux.conf (yours moves to a backup)
+  [■] work command          ~/.zshrc
+Recommended
+› [x] fzf                   fuzzy pickers · brew install fzf
+  [x] zoxide                `work` finds folders you visit often · brew install zoxide
+  [x] Claude Code status    found ~/.claude
+  [x] Codex status          found ~/.codex
+  [x] iTerm2 profile        a "tmux workspace" profile
+Optional
+  [ ] lazygit               Ctrl+a g popup · brew install lazygit
+  [ ] sesh                  picker fallback · brew install sesh
+The agent rows go on and off together.
+
+Projects folder [~/Projects]: ~/code
+  ✓ fzf                   brew install fzf
+  ✓ zoxide                brew install zoxide
+  ✓ unpack                tmux-workspace 2.1.0 to ~/.local/share/tmux-workspace
+  ✓ tmux-workspace        ~/.local/bin/tmux-workspace
+  …
+```
+
+The needed rows are always set up (tmux too, with your package manager, when it is missing or older
+than 3.3); recommended rows start ticked, optional ones do not, and what you have already is on the
+`found` line. `q` or `Esc` quits without changing anything. Then the installer unpacks the release to
+`~/.local/share/tmux-workspace/<version>` (`current` there points at the version in use), links
+`tmux-workspace`, `tw-clip` and `tw-sound` into `~/.local/bin`, `agent-status.conf` into
+`~/.config/tmux-workspace` and `tmux.conf` to `~/.tmux.conf`, adds the `work` command to your shell,
+and sets the projects folder. Every file it replaces is backed up, and running it again changes
+nothing. Read [`install.sh`](install.sh) first if you prefer; it is one bash script.
+
+What the commands print goes to `~/.local/state/tmux-workspace/install.log`. When a step fails, the
+installer shows the end of that log, what to do, and a link to a new GitHub issue with your system and
+the end of the log filled in: your home folder, user and host names, e-mail and IP addresses and
+anything that looks like a token are taken out first, and nothing is sent until you open the link and
+submit it. Without a terminal (a script, CI), or with `--yes` or `--dry-run`, there is no checklist:
+the options below decide, and the output is the plain one line per change it always was.
 
 Releases are built for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). The Linux
 binaries are static, so any distribution works. Options go after `bash -s --`, and `--version` picks a
@@ -78,7 +119,9 @@ below.
 | `--uninstall` | Remove the links and the shell lines, and restore the backups |
 
 tmux-workspace is a complete tmux configuration with `Ctrl+a` as the prefix. If you already have a
-`~/.tmux.conf`, the installer asks before replacing it, and `--uninstall` puts yours back.
+`~/.tmux.conf`, the checklist says it moves to a backup (without a terminal, `--yes` replaces it), and
+`--uninstall` puts yours back. `--no-shell`, `--no-tmux-conf` and `--projects` take their rows or the
+question out of the checklist.
 
 ### From a clone
 
