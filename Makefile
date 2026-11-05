@@ -1,8 +1,10 @@
 PYTHON ?= python3
 RUNTIME := legacy/bin/tmux-workspace $(wildcard legacy/lib/*.py) legacy/integrations/agent-hook.py integrations/agent-hook.py $(wildcard scripts/*.py)
-SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh tests/install/smoke.sh tests/install/matrix.sh
+SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh scripts/package.sh tests/install/smoke.sh tests/install/matrix.sh
+# The release target of this machine: Linux releases are static musl builds.
+TARGET ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p' | sed 's/-gnu$$/-musl/')
 
-.PHONY: build test lint test-install screenshots
+.PHONY: build test lint dist test-install screenshots
 
 # bin/tmux-workspace is the debug build, copied there (it is gitignored): install.sh links it, and the
 # Python tests and the demo run it from that path. The old file goes first: macOS can kill a signed
@@ -22,6 +24,10 @@ lint:
 	for f in $(RUNTIME); do $(PYTHON) -m py_compile "$$f" || exit 1; done
 	cargo clippy --all-targets --features testing -- -D warnings
 	cargo fmt --check
+
+# The release archive of this machine in dist/: make dist TARGET=x86_64-apple-darwin for another one.
+dist:
+	scripts/package.sh $(TARGET) dist
 
 # Fresh Linux containers; pick some with: make test-install IMAGES="debian:12 alpine:3.20"
 test-install:

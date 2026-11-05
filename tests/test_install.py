@@ -1,11 +1,18 @@
-"""install.sh on a temporary HOME. PATH holds stubs and core utilities only, never the machine's tools."""
+"""install.sh on a temporary HOME. PATH holds stubs and core utilities only, never the machine's tools.
+
+Nothing here downloads from GitHub: releases come from TMUX_WORKSPACE_DIST, a folder that scripts/package.sh
+fills with the binary `make build` made."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import platform
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -14,8 +21,103 @@ sys.path.insert(0, str(ROOT / 'legacy' / 'lib'))
 import paths  # noqa: E402
 
 CORE = ['uname', 'id', 'dirname', 'basename', 'readlink', 'mkdir', 'ln', 'mv', 'cp', 'chmod', 'grep', 'awk',
-        'sed', 'tr', 'date', 'find', 'sort', 'mktemp', 'cat', 'rm', 'env', 'bash', 'sh', 'ls', 'head', 'base64']
+        'sed', 'tr', 'date', 'find', 'sort', 'mktemp', 'cat', 'rm', 'env', 'bash', 'sh', 'ls', 'head', 'base64',
+        'tar', 'gzip', 'sha256sum', 'shasum', 'cmp']
 BLOCK = '# >>> tmux-workspace >>>'
+BINARY = ROOT / 'bin' / 'tmux-workspace'
+VERSION = re.search(r'^version = "([^"]+)"', (ROOT / 'Cargo.toml').read_text(), re.M).group(1)
+TARGETS = {('Darwin', 'arm64'): 'aarch64-apple-darwin', ('Darwin', 'x86_64'): 'x86_64-apple-darwin',
+           ('Linux', 'x86_64'): 'x86_64-unknown-linux-musl', ('Linux', 'aarch64'): 'aarch64-unknown-linux-musl',
+           ('Linux', 'arm64'): 'aarch64-unknown-linux-musl'}
+TARGET = TARGETS.get((platform.system(), platform.machine()), 'unknown')
+ARCHIVE = f'tmux-workspace-{TARGET}.tar.gz'
+
+
+def package(outdir):
+    """scripts/package.sh for this machine's target, with the binary `make build` made instead of a release build."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith('TMUX')}
+    env['TMUX_WORKSPACE_BINARY'] = str(BINARY)
+    return subprocess.run(['sh', str(ROOT / 'scripts' / 'package.sh'), TARGET, str(outdir)], env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+_DIST = []
+
+
+def release_dist():
+    """The release folder scripts/package.sh makes: the archive, SHA256SUMS and VERSION. Made once."""
+    if not _DIST:
+        if not BINARY.is_file():
+            raise unittest.SkipTest('bin/tmux-workspace is not built: run make build (make test does)')
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+        result = package(tmp / 'dist')
+        assert result.returncode == 0, result.stdout + result.stderr
+        _DIST.append(tmp / 'dist')
+    return _DIST[0]
+
+
+def renumbered_dist(version, dest):
+    """The release of release_dist() as version VERSION: its folder, VERSION file and checksums."""
+    old_top, new_top = f'tmux-workspace-{VERSION}', f'tmux-workspace-{version}'
+    dest.mkdir(parents=True)
+    with tarfile.open(release_dist() / ARCHIVE) as source, tarfile.open(dest / ARCHIVE, 'w:gz') as copy:
+        for member in source.getmembers():
+            data = source.extractfile(member).read() if member.isfile() else None
+            member.name = new_top + member.name[len(old_top):]
+            if member.name == f'{new_top}/VERSION':
+                data = (version + '\n').encode()
+                member.size = len(data)
+            copy.addfile(member, io.BytesIO(data) if data is not None else None)
+    digest = hashlib.sha256((dest / ARCHIVE).read_bytes()).hexdigest()
+    (dest / 'SHA256SUMS').write_text(f'{digest}  {ARCHIVE}\n')
+    (dest / 'VERSION').write_text(version + '\n')
+    return dest
+
+
+class Package(unittest.TestCase):
+    """scripts/package.sh TARGET OUTDIR: the archive a release publishes for one target."""
+
+    def test_archive_has_the_release_layout(self):
+        top = f'tmux-workspace-{VERSION}'
+        with tarfile.open(release_dist() / ARCHIVE) as tar:
+            members = {member.name.rstrip('/'): member for member in tar.getmembers()}
+            version = tar.extractfile(f'{top}/VERSION').read()
+            binary = tar.extractfile(f'{top}/bin/tmux-workspace').read()
+        names = set(members)
+        self.assertTrue(all(name == top or name.startswith(top + '/') for name in names), sorted(names))
+        for path in ['bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'tmux.conf', 'agent-status.conf',
+                     'sesh.toml', 'shell/work.sh', 'shell/work.fish', 'shell.zsh', 'integrations/agent-hook.py',
+                     'integrations/claude-hooks.json', 'integrations/codex-hooks.json',
+                     'integrations/tmux-workspace.ts', 'legacy/bin/tmux-workspace', 'legacy/lib/paths.py',
+                     'legacy/integrations/agent-hook.py', 'config.example.json', 'install.sh', 'README.md',
+                     'LICENSE', 'CHANGELOG.md', 'WORKSPACE_GUIDE.md', 'VERSION']:
+            self.assertIn(f'{top}/{path}', names)
+        self.assertFalse([name for name in names if '__pycache__' in name or name.endswith('.pyc')])
+        self.assertEqual(version, (VERSION + '\n').encode())
+        self.assertEqual(binary, BINARY.read_bytes())
+        for path in ['bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'install.sh']:
+            self.assertTrue(members[f'{top}/{path}'].mode & 0o111, path)
+
+    def test_checksums_are_in_sha256sum_format(self):
+        dist = release_dist()
+        digest = hashlib.sha256((dist / ARCHIVE).read_bytes()).hexdigest()
+        self.assertEqual((dist / 'SHA256SUMS').read_text(), f'{digest}  {ARCHIVE}\n')
+        self.assertEqual((dist / 'VERSION').read_text(), VERSION + '\n')
+
+    def test_packaging_again_replaces_the_checksum_of_that_archive(self):
+        out = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (out / 'SHA256SUMS').write_text(f'{"0" * 64}  tmux-workspace-other.tar.gz\n{"1" * 64}  {ARCHIVE}\n')
+        result = package(out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        digest = hashlib.sha256((out / ARCHIVE).read_bytes()).hexdigest()
+        self.assertEqual((out / 'SHA256SUMS').read_text(),
+                         f'{"0" * 64}  tmux-workspace-other.tar.gz\n{digest}  {ARCHIVE}\n')
+
+    def test_a_missing_target_is_a_usage_error(self):
+        result = subprocess.run(['sh', str(ROOT / 'scripts' / 'package.sh')], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('usage: scripts/package.sh TARGET [OUTDIR]', result.stderr)
 
 
 class Installer(unittest.TestCase):
