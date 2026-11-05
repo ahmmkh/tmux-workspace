@@ -695,7 +695,8 @@ def open_workspace(name=None):
         pass
 
     if session_name not in session_names():
-        tm('new-session', '-d', '-s', session_name, '-c', str(target_dir))
+        # -n: with automatic-rename off, tmux would name the tab after the default command.
+        tm('new-session', '-d', '-s', session_name, '-n', session_name, '-c', str(target_dir))
 
     connect_session(session_name)
 
@@ -750,7 +751,7 @@ def delete_workspace(name=None):
         if other:
             tm('switch-client', '-t', '=' + other, check=False)
         else:
-            tm('new-session', '-d', '-s', 'main', '-c', str(PROJECTS_ROOT))
+            tm('new-session', '-d', '-s', 'main', '-n', 'main', '-c', str(PROJECTS_ROOT))
             tm('switch-client', '-t', '=main', check=False)
 
     tm('kill-session', '-t', '=' + target)

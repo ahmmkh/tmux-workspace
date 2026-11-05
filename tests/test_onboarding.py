@@ -130,6 +130,23 @@ class FirstWork(Base):
         self.assertEqual(setup.call_count, 1)
         self.assertEqual(ws.PROJECTS_ROOT, (self.home / 'dev').resolve())
 
+    def test_new_workspace_names_its_first_tab(self):
+        """Without -n, tmux names the tab after the quoted default command, which shows as \\\\."""
+        ws = load_workspace()
+        calls = []
+
+        def tm(*args, **kwargs):
+            calls.append(args)
+            return ''
+        with mock.patch.object(ws, 'tm', side_effect=tm), mock.patch.object(ws, 'ROOT', self.home / 'state'), \
+                mock.patch.object(ws, 'PROJECTS_ROOT', self.home / 'Projects'), \
+                mock.patch.object(ws, 'session_names', return_value=[]), mock.patch.object(ws, 'connect_session'), \
+                mock.patch.object(ws, 'initialize'), mock.patch.object(ws.paths, 'needs_onboarding', return_value=False), \
+                mock.patch.object(ws.subprocess, 'run', return_value=mock.Mock(returncode=1, stdout='')):
+            ws.open_workspace('api')
+        created = [c for c in calls if c[0] == 'new-session'][0]
+        self.assertEqual(created[created.index('-n') + 1], 'api')
+
     def test_non_interactive_work_never_prompts(self):
         ws = load_workspace()
         with mock.patch.object(ws, 'choose_or_create_workspace'), \

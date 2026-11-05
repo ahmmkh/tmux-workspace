@@ -404,14 +404,7 @@ do_install() {
         *) say note "$BIN_DIR is not on PATH yet; new shells get it from the work command block" ;;
     esac
     say "done" "tmux-workspace installed"
-    cat <<'EOF'
-
-Next: open a new terminal, then
-  work my-project      open or create a workspace
-  Ctrl+a A             dashboard of every pane and agent
-  Ctrl+a ?             every shortcut
-  tmux-workspace doctor
-EOF
+    say next "open a new terminal, then: work my-project   (Ctrl+a ? lists every shortcut)"
 }
 
 stop_server_hooks() {
