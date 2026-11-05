@@ -3,6 +3,8 @@
 #   work            pick a workspace
 #   work NAME       open or create a workspace
 #   work rm [NAME]  close a workspace
+#   work update     update tmux-workspace (--check only says whether there is an update)
+#   work ./update   open a workspace that is named update
 # Set TMUX_WORKSPACE_ZOXIDE_CD=1 before sourcing to let zoxide take over cd.
 
 if [ "${TMUX_WORKSPACE_ZOXIDE_CD:-0}" = 1 ] && command -v zoxide >/dev/null 2>&1; then
@@ -24,6 +26,14 @@ work() {
     rm|delete|kill)
         shift
         "$HOME/.local/bin/tmux-workspace" kill-workspace "$@"
+        ;;
+    update)
+        shift
+        "$HOME/.local/bin/tmux-workspace" update "$@"
+        ;;
+    ./update)
+        shift
+        "$HOME/.local/bin/tmux-workspace" open update "$@"
         ;;
     *)
         "$HOME/.local/bin/tmux-workspace" open "$@"

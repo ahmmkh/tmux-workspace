@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run it by hand on a branch that has no pull request yet.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,17 +20,42 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The v1-upgrade tests in tests/test_install.py need the history (commit 30b1401).
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
       - name: Install tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux fzf zsh shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux fzf zsh shellcheck lsof
       - name: Install tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install tmux fzf shellcheck
+        # actionlint: make lint checks the workflows when it is installed (here, not on the Linux runner).
+        run: brew install tmux fzf shellcheck actionlint
       - run: tmux -V
+      - run: rustup component add clippy rustfmt
+      - run: cargo --version
       - run: make lint test
+      # Report only: a runner is a shared machine, so its numbers vary and a slow run is no failure.
+      # The Python column of the claude-status row says n/a on Linux: agent-hook.py of v1 only looks for
+      # tmux in /opt/homebrew/bin, so it publishes nothing there.
+      - name: Bench (report only)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq hyperfine
+          status=0
+          make -s bench >"$RUNNER_TEMP/bench.md" 2>"$RUNNER_TEMP/bench.log" || status=$?
+          {
+            echo '### make bench'
+            echo
+            cat "$RUNNER_TEMP/bench.md"
+            echo
+            grep '^bench:' "$RUNNER_TEMP/bench.log" | grep -v 'building\|timing' || true
+          } >>"$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/bench.md"
+          if [ "$status" != 0 ]; then cat "$RUNNER_TEMP/bench.log"; fi
 
   python39:
     # macOS still ships Python 3.9 as /usr/bin/python3. setup-python has no 3.9 for new
@@ -39,11 +66,78 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Runtime code compiles on Python 3.9
-        run: for f in bin/tmux-workspace bin/install-integrations lib/*.py integrations/agent-hook.py scripts/*.py; do python -m py_compile "$f"; done
-      - run: python -m unittest tests.test_workspace_model tests.test_dashboard
+        run: for f in legacy/bin/tmux-workspace $(find legacy integrations scripts -name '*.py'); do python -m py_compile "$f"; done
+      # The units that need neither the binary nor tmux. The other suites use unittest features of
+      # Python 3.11 (enterContext) or a tmux server, and run in the Tests job.
+      - run: python -m unittest tests.test_workspace_model tests.test_dashboard tests.test_ansi2svg tests.test_ai_boundaries tests.test_history_ai tests.test_stats
+
+  tmux-floor:
+    # The oldest and the newest tmux the project supports, from the distributions' own packages.
+    name: tmux ${{ matrix.tmux }} (${{ matrix.image }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: 'debian:12'
+            tmux: '3.3'
+          - image: 'ubuntu:24.04'
+            tmux: '3.4'
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    env:
+      # The runner VMs set a UTF-8 locale and the images do not. Without one, tmux 3.3 prints the
+      # separator of its formats (and every non-ASCII character) as "_", whatever the client asks for.
+      LANG: C.UTF-8
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends tmux fzf zsh python3 git curl ca-certificates build-essential procps lsof perl
+      - name: The tmux of the floor
+        run: |
+          tmux -V
+          tmux -V | grep -q '^tmux ${{ matrix.tmux }}' || { echo "::error::expected tmux ${{ matrix.tmux }}"; exit 1; }
+          fzf --version
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Trust the checkout
+        # The container runs as root over a checkout that the runner (uid 1001) made, and git refuses such
+        # a repository ("detected dubious ownership"). tests/test_install.py lists the files with git.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo --version
+      - run: make test
+
+  dist:
+    # The archive the install jobs below install from, built as a release is.
+    name: Archive (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - run: rustup target add x86_64-unknown-linux-musl
+      - run: scripts/package.sh x86_64-unknown-linux-musl dist
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
   install-linux:
     name: Install on ${{ matrix.image }}
+    needs: dist
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +145,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: tests/install/matrix.sh '${{ matrix.image }}'
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - run: TMUX_WORKSPACE_DIST="$PWD/dist" tests/install/matrix.sh '${{ matrix.image }}'
 
   install-macos:
     name: Install on macOS

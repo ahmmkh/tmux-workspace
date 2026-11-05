@@ -1,0 +1,59 @@
+name: Stats
+
+# Once a day: record the install and traffic numbers of this repository (GitHub keeps only 14 days of
+# traffic and no history of stars or downloads) in the private repository ahmmkh/tmux-workspace-stats.
+# Read them with `make stats`. scripts/stats.py explains the files.
+#
+# Needs the Actions secret STATS_TOKEN, a fine-grained token of ahmmkh for the repositories
+# tmux-workspace and tmux-workspace-stats with Administration: Read-only (traffic) and Contents:
+# Read and write. Without it the job only prints a notice.
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stats
+  cancel-in-progress: false
+
+jobs:
+  record:
+    name: Record the numbers
+    # Not in forks: they have neither the secret nor the repository to record into.
+    if: github.repository == 'ahmmkh/tmux-workspace'
+    runs-on: ubuntu-latest
+    env:
+      STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
+    steps:
+      - name: No token
+        if: env.STATS_TOKEN == ''
+        run: echo "::notice title=Stats not recorded::The secret STATS_TOKEN is not set, so there is nothing to record with. See the comment at the top of .github/workflows/stats.yml."
+      - uses: actions/checkout@v5
+        if: env.STATS_TOKEN != ''
+      - uses: actions/checkout@v5
+        if: env.STATS_TOKEN != ''
+        with:
+          repository: ahmmkh/tmux-workspace-stats
+          token: ${{ secrets.STATS_TOKEN }}
+          path: stats
+      - name: Record
+        if: env.STATS_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.STATS_TOKEN }}
+        run: python3 scripts/stats.py record stats/
+      - name: Commit and push what changed
+        if: env.STATS_TOKEN != ''
+        working-directory: stats
+        run: |
+          git add traffic.csv snapshots.csv
+          if git diff --cached --quiet; then
+            echo 'Nothing changed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "Record $(date -u +%Y-%m-%d)"
+          git push

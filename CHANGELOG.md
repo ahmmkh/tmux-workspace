@@ -1,5 +1,90 @@
 # Changelog
 
+## 2.0.0 — 2026-11-05
+
+The parts that run all the time are Rust now, and installing no longer needs Python or a clone.
+
+Python spends about 37 ms starting before it does anything, and the agent hook, `pane-start`, the
+status line, `help` and autosave each paid for it. They run in a Rust binary now. `make bench`, on an
+Apple M4 Pro (macOS 27.2, tmux 3.8, Python 3.15.2), hyperfine, mean of 30 runs on a scratch server
+with 5 panes:
+
+| Path | 1.0.0 (Python) | 2.0.0 (Rust) |
+|---|---|---|
+| Agent hook with nothing to do (every Claude Code tool call) | 37.5 ms | 1.8 ms |
+| `pane-start` until it hands over to your shell (every new pane) | 52.9 ms | 6.6 ms |
+| `agent-hook claude-status` (every status line refresh) | 58.7 ms | 14.9 ms |
+| `help` (`Ctrl+a ?`) | 37.8 ms | 1.8 ms |
+| `save` of 5 panes (autosave, `Ctrl+a Ctrl+s`) | 304.3 ms | 32.3 ms |
+
+### Install
+
+- `install.sh` downloads a prebuilt binary for macOS (arm64, x86_64) or Linux (x86_64, arm64; static
+  musl, so any distribution), checks it against the release's `SHA256SUMS` before it writes anything,
+  and unpacks it to `~/.local/share/tmux-workspace/<version>`. It no longer clones the repository.
+  `--version vX.Y.Z` installs another release.
+- From a clone, it builds the binary with cargo (Rust 1.89 or newer), or downloads the release of the
+  clone's version when there is no cargo.
+- Python 3.9 or newer is needed only for `dash`, `ai` and `cleanup` until they are ported. Without
+  it the installer warns and goes on; `--deps` no longer installs Python.
+- On Alpine, `--deps` installs procps: agent status and snapshots read processes with its `ps`, and
+  BusyBox's lacks the options they use.
+
+### Added
+
+- `work update` and `tmux-workspace update [--check]`: update an install from a release (checked
+  against `SHA256SUMS`, the version before is kept) or a clone (a fast-forward `git pull`). They keep
+  the choices you made at install time.
+- `tmux-workspace integrations install|uninstall|status`, which replaces `bin/install-integrations`.
+  `install.sh --agents` and `--uninstall` call it.
+- `make bench` (hyperfine against the Python of 1.0.0, in `legacy/`), `make dist` (the release archive of
+  this machine) and, for maintainers, `make stats` (downloads, clones, views and stars; see
+  `docs/RELEASING.md`).
+- `TMUX_WORKSPACE_TRACE=<file>` appends a line for every tmux, ps or other process the program starts.
+
+### Fixed
+
+- The agent hook finds `tmux` and `lsof` on `PATH`. It only looked in `/opt/homebrew/bin/tmux` and
+  `/usr/sbin/lsof`, so on Linux and on Intel Macs agent status never worked.
+- Hook commands in the Claude Code and Codex settings are shell-quoted, so a home folder with a space
+  in its name works.
+- `integrations` keeps the order of keys in your settings files and treats only this project's hook
+  entries as its own.
+
+### Upgrading
+
+- Installed with the one-line command: run it again once. A 1.x install made by that command (a clone
+  in `~/.local/share/tmux-workspace`) is updated in place. Your snapshots, options, key bindings and
+  config stay as they are. After that, `work update` updates.
+- Hooks registered by 1.x call `agent-hook.py`; they keep working through a small shim until
+  `install.sh --agents` (or a later `work update`) rewrites them to `tmux-workspace agent-hook`.
+  Review the Codex entries with `/hooks` afterwards, and restart running agents.
+- Using a clone and updating it with `git pull`: run `./install.sh` right after pulling 2.0.
+  `bin/tmux-workspace` is a build product now, and tmux starts it in every new pane.
+
+### Differences from 1.0.0
+
+- Error text for failures of the operating system (a file that cannot be read, a folder that cannot
+  be made) uses Rust's wording instead of Python's.
+- Some inputs that crashed the Python give a clear error: `No such pane: <id>`; `park` with no
+  argument parks the current pane.
+- Autosave records an error for one pane (a Codex lookup that fails, a Neovim that does not save)
+  instead of giving up on the whole save.
+- Ctrl-C at the label prompt of a new pane keeps the pane, and Ctrl-C while an app is being reopened
+  goes to the app.
+- `work update` updates tmux-workspace, so a workspace named `update` opens with `work ./update`.
+- A config or settings file that is not valid JSON is reported in the words of Rust's JSON library
+  (`key must be a string at line 1 column 2`) instead of Python's (`Expecting property name enclosed
+  in double quotes: line 1 column 2 (char 1)`).
+
+### Known issues
+
+- On tmux 3.4, a label, session or window name that contains `$` gains a backslash each time it is
+  restored, because tmux 3.4 prints `$` as `\$`. 1.x does the same; the fix is planned for 2.0.1.
+- On tmux 3.3, the tmux server needs a UTF-8 locale (for example `LANG=C.UTF-8`). Without one, save,
+  park and the pickers fail with `A workspace name or directory contains unsupported control
+  characters`. 1.x does the same; see Troubleshooting in the README.
+
 ## 1.0.0 — 2026-11-05
 
 The first release for anyone to install.

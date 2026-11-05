@@ -1,0 +1,117 @@
+name: Release
+
+# A v* tag builds the four archives and publishes them. A pull request builds the same four and
+# publishes nothing (a dry run), so a broken target is found before the tag.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            # Built on an Apple silicon runner: the archive is checked, the binary is not run.
+            native: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            native: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            native: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install musl-tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - run: rustup target add '${{ matrix.target }}'
+      - name: Package
+        # rusqlite compiles SQLite from C: with musl's own headers, not the glibc ones of the runner.
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: scripts/package.sh '${{ matrix.target }}' dist
+      - name: The binary in the archive runs
+        if: matrix.native
+        run: |
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf 'dist/tmux-workspace-${{ matrix.target }}.tar.gz' -C "$RUNNER_TEMP/unpacked"
+          for binary in "$RUNNER_TEMP"/unpacked/tmux-workspace-*/bin/tmux-workspace; do
+            out=$("$binary" help-topic park)
+            printf '%s\n' "$out" | head -n 3
+            [ -n "$out" ] || { echo '::error::help-topic park printed nothing'; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: parts
+      - name: Merge the archives, SHA256SUMS and VERSION
+        run: |
+          mkdir dist
+          cp parts/dist-*/tmux-workspace-*.tar.gz dist/
+          # Every build wrote the line of its own archive; install.sh and update read the four together.
+          cat parts/dist-*/SHA256SUMS | sort -k 2 >dist/SHA256SUMS
+          sort -u parts/dist-*/VERSION >dist/VERSION
+          [ "$(wc -l <dist/VERSION)" -eq 1 ] || { echo '::error::the builds disagree about the version'; exit 1; }
+          [ "$(find dist -name '*.tar.gz' | wc -l)" -eq 4 ] || { echo '::error::expected four archives'; ls dist; exit 1; }
+          [ "$(wc -l <dist/SHA256SUMS)" -eq 4 ] || { echo '::error::expected four checksums'; exit 1; }
+          (cd dist && sha256sum -c SHA256SUMS)
+          ls -l dist
+      - name: The tag is the version of Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+          [ "$(cat dist/VERSION)" = "$version" ] || { echo "::error::the archives are version $(cat dist/VERSION), not $version"; exit 1; }
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # The lines under "## <version> …" up to the next "## " heading.
+          awk -v version="$version" '
+            /^## / { if (found) exit; name = $2; gsub(/[][]/, "", name); found = (name == version); next }
+            found { print }
+          ' CHANGELOG.md >notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section '## $version' with text in it"
+            exit 1
+          fi
+          cat notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # A tag with a hyphen (v2.1.0-rc1) is a prerelease, which releases/latest never points at.
+          case $GITHUB_REF_NAME in *-*) pre=--prerelease ;; *) pre= ;; esac
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md $pre

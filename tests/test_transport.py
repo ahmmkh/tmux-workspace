@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'legacy' / 'lib'))
 import ai_core as core
 
 MODEL = 'typesafe/jev-1.13'

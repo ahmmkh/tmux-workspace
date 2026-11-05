@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
 	if (!process.env.TMUX || !process.env.TMUX_PANE || !process.stdin.isTTY || !process.stdout.isTTY) return;
-	const helper = join(homedir(), ".local/lib/tmux-workspace/agent-hook.py");
+	const helper = join(homedir(), ".local/bin/tmux-workspace");
 	let current: { session_id: string; cwd: string; pid: number } | undefined;
 	let timer: Timer | undefined;
 
@@ -93,7 +93,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function send(event: "SessionStart" | "SessionEnd", value: NonNullable<typeof current>) {
-		spawnSync("/usr/bin/python3", [helper, "omp"], {
+		spawnSync(helper, ["agent-hook", "omp"], {
 			input: JSON.stringify({ ...value, hook_event_name: event }),
 			stdio: ["pipe", "ignore", "ignore"],
 			timeout: 3000,

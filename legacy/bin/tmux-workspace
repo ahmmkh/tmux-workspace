@@ -1029,7 +1029,9 @@ SHELL USAGE:
   work                  Fuzzy picker (switch or type new name to create)
   work my-project       Directly connect to or create my-project
   work .                Open workspace for current directory
-  work rm [name]        Delete / close a workspace"""
+  work rm [name]        Delete / close a workspace
+  work update           Update tmux-workspace (--check only looks)
+  work ./update         Open a workspace named update"""
     },
     {
         'id': 'workspace-last',

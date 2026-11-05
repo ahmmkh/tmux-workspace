@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'legacy' / 'lib'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fixtures import FIXTURE, PREVIEW  # noqa: E402
 import dashboard  # noqa: E402

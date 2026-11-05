@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'legacy' / 'lib'))
 import cleanup
 
 
@@ -59,7 +59,7 @@ class Cleanup(unittest.TestCase):
 
 class Picker(unittest.TestCase):
     def test_initialized_picker_does_not_wait_for_snapshot_lock(self):
-        ws = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/tmux-workspace'))
+        ws = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'legacy/bin/tmux-workspace'))
         with patch.dict(ws['initialize'].__globals__, option=lambda *_: '1',
                         lock=Mock(side_effect=AssertionError('picker waited for autosave'))):
             ws['initialize']()

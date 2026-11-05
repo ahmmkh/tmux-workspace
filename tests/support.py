@@ -1,6 +1,4 @@
-"""Helpers shared by tests that load the controller or drive a scratch tmux server."""
-import importlib.machinery
-import importlib.util
+"""Helpers shared by the tests that drive a scratch tmux server."""
 import os
 from pathlib import Path
 import subprocess
@@ -10,24 +8,11 @@ import unittest
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-SELF = ROOT / 'bin' / 'tmux-workspace'
+# The Python controller, which only dash, dashboard, ai and cleanup still run.
+SELF = ROOT / 'legacy' / 'bin' / 'tmux-workspace'
 # Panes end by themselves, so a leftover server does too. exec, because dash (Debian's sh) does not
 # hand the pane over to its last command, and the pane would show sh instead of sleep.
 SLEEP = 'exec sleep 300'
-
-
-def load_workspace():
-    """Load bin/tmux-workspace as a module. It has no .py suffix and sets the umask on import."""
-    path = str(SELF)
-    spec = importlib.util.spec_from_loader('tmux_workspace', importlib.machinery.SourceFileLoader('tmux_workspace', path))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    mask = os.umask(0)
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        os.umask(mask)
-    return module
 
 
 class ScratchTmux(unittest.TestCase):
@@ -93,7 +78,7 @@ class ScratchTmux(unittest.TestCase):
         self.assertEqual(read(), expected)
 
     def controller_env(self, pane=None):
-        """Environment in which bin/tmux-workspace talks to this server."""
+        """Environment in which legacy/bin/tmux-workspace talks to this server."""
         env = dict(self.env, TMUX=self.socket() + ',0,0')
         if pane:
             env['TMUX_PANE'] = pane
