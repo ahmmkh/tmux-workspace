@@ -9,8 +9,9 @@ function work --description 'Open, create or close a tmux workspace, or update t
         case update
             $HOME/.local/bin/tmux-workspace update $argv[2..-1]
         case ./update
-            # A workspace named update.
-            $HOME/.local/bin/tmux-workspace open update $argv[2..-1]
+            # A workspace named update. After --, open takes the name as it is: a bare `open update` is
+            # what the work function of 1.x runs for `work update`, and open refuses that.
+            $HOME/.local/bin/tmux-workspace open -- update $argv[2..-1]
         case '*'
             $HOME/.local/bin/tmux-workspace open $argv
     end
