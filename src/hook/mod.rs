@@ -5,6 +5,7 @@
 //! process calls.
 
 pub mod claude;
+pub mod codex;
 pub mod process;
 pub mod tmuxcmd;
 
@@ -237,23 +238,33 @@ fn run_at(
         };
         explicit_pid = Some(pid);
     }
-    if kind == "codex" {
-        // Task 5: Codex identity and events.
-        return Ok(None);
-    }
     let mut state = tmuxcmd::pane_state(host, &env.tmux, pane)?;
     let pane_pid = process::py_int(&state.pid)?;
-    let Some((pid, birth)) =
-        process::owner(host, kind, pane_pid, &state.tty, explicit_pid, None, None)?
-    else {
-        return Ok(None);
-    };
+    // A shared Codex app-server's inherited TMUX_PANE does not identify its client: the title does.
+    let mut routed = None;
+    let (pid, birth) =
+        match process::owner(host, kind, pane_pid, &state.tty, explicit_pid, None, None)? {
+            Some(identity) => identity,
+            None if kind == "codex" => match codex::detached_codex(host, &env.tmux, session_id)? {
+                Some((resolved, identity)) => {
+                    routed = Some(resolved);
+                    identity
+                }
+                None => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+    let pane = routed.as_deref().unwrap_or(pane);
     let mut metadata = Map::new();
     metadata.insert("kind".into(), kind.into());
     metadata.insert("id".into(), session_id.into());
     metadata.insert("pid".into(), pid.into());
     metadata.insert("cwd".into(), cwd.into());
     metadata.insert("birth".into(), birth.into());
+    if kind == "codex" {
+        codex::codex_event(host, &env.tmux, pane, payload, &Value::Object(metadata))?;
+        return Ok(None);
+    }
     if kind == "claude"
         && !status_line
         && event == Some("SessionStart")
@@ -592,6 +603,30 @@ mod tests {
             (
                 "claude",
                 json!({"hook_event_name": "PermissionRequest", "session_id": ""}),
+            ),
+            (
+                "codex",
+                json!({"hook_event_name": "StopFailure", "session_id": "s", "cwd": "/w"}),
+            ),
+            (
+                "codex",
+                json!({"hook_event_name": "CwdChanged", "session_id": "s", "cwd": "/w"}),
+            ),
+            (
+                "codex",
+                json!({"hook_event_name": "Stop", "agent_id": "sub", "session_id": "s", "cwd": "/w"}),
+            ),
+            (
+                "codex",
+                json!({"hook_event_name": "PreToolUse", "session_id": "", "cwd": "/w"}),
+            ),
+            (
+                "codex",
+                json!({"hook_event_name": "PermissionRequest", "session_id": "s"}),
+            ),
+            (
+                "codex",
+                json!({"hook_event_name": "UserPromptSubmit", "session_id": "s", "cwd": "w"}),
             ),
             (
                 "omp",

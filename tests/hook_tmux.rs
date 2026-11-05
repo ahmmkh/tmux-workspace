@@ -686,6 +686,11 @@ impl World {
     /// A host whose process tree makes `owner` give (PID, BIRTH): the pane's process runs `sleep`
     /// and PID, its child, runs Claude.
     fn host(&self, tmux: TmuxMode) -> FakeHost {
+        self.host_of("claude", tmux)
+    }
+
+    /// The same tree with `kind` (`claude` or `codex`) as the agent that runs in the pane.
+    fn host_of(&self, kind: &str, tmux: TmuxMode) -> FakeHost {
         let pane_pid: i32 = self
             .scratch
             .expand(&self.hidden, "#{pane_pid}")
@@ -701,14 +706,34 @@ impl World {
         host.procs.insert(
             PID,
             Proc {
-                args: "claude".into(),
+                args: kind.into(),
                 pgid: PID,
                 tpgid: PID,
                 lstart: BIRTH.into(),
-                ..Proc::new(pane_pid, &tty, "claude")
+                ..Proc::new(pane_pid, &tty, kind)
             },
         );
         host.procs.insert(pane_pid, Proc::new(1, &tty, "sleep"));
+        host
+    }
+
+    /// A host in which no agent runs in the pane: `owner` gives none.
+    fn host_without_agent(&self, tmux: TmuxMode) -> FakeHost {
+        let pane_pid: i32 = self
+            .scratch
+            .expand(&self.hidden, "#{pane_pid}")
+            .parse()
+            .unwrap();
+        let tty = self.scratch.expand(&self.hidden, "#{pane_tty}");
+        let mut host = FakeHost {
+            tmux,
+            parent: pane_pid,
+            ..FakeHost::new()
+        };
+        host.procs.insert(
+            pane_pid,
+            Proc::new(1, tty.strip_prefix("/dev/").unwrap(), "sleep"),
+        );
         host
     }
 
@@ -898,6 +923,283 @@ fn the_status_line_command_runs_in_the_world_and_prints_the_short_id() {
     )
     .unwrap();
     assert_eq!(printed.as_deref(), Some("Claude | session-\n"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// test_agent_status_tmux.py::HelperWrites, Codex: the real hook against a scratch server.
+
+impl World {
+    /// A Codex hook call from the pane's own Codex.
+    fn codex(&self, extra: Value) {
+        self.codex_on(&self.host_of("codex", TmuxMode::Real), extra);
+    }
+
+    fn codex_on(&self, host: &FakeHost, extra: Value) {
+        let printed =
+            hook::run("codex", &payload(extra), &self.env, host).expect("the hook does not fail");
+        assert_eq!(printed, None, "only the status line of Claude prints");
+    }
+
+    fn status_of(&self, pane: &str) -> String {
+        self.scratch
+            .tmux(&["show-options", "-pqv", "-t", pane, "@workspace_agent"])
+    }
+}
+
+/// A control-mode client of the session. tmux counts it as a terminal with focus.
+struct ControlClient {
+    child: std::process::Child,
+}
+
+impl ControlClient {
+    fn attach(scratch: &ScratchTmux, session: &str) -> ControlClient {
+        let child = scratch
+            .bin("tmux")
+            .env_remove("TMUX")
+            .args([
+                "-S",
+                scratch.socket(),
+                "-C",
+                "attach-session",
+                "-t",
+                session,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start a control client");
+        let focused = || {
+            scratch
+                .tmux(&["list-clients", "-t", session, "-F", "#{client_flags}"])
+                .matches("focused")
+                .count()
+                .to_string()
+        };
+        tmux_workspace::testing::wait_for(focused, "1");
+        ControlClient { child }
+    }
+}
+
+impl Drop for ControlClient {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn detached_codex_routes_by_thread_title_not_inherited_pane() {
+    let world = World::new();
+    let session = "01a128f8-8621-7561-8972-8d02a1234567";
+    let title = format!("codex | {}...", &session[..29]);
+    let actual = world
+        .scratch
+        .pane(&["new-window", "-t", "alpha:", "-n", "actual"]);
+    world
+        .scratch
+        .tmux(&["select-pane", "-t", &actual, "-T", &title]);
+    // Codex runs in `actual`; the hook inherited TMUX_PANE of `hidden`, so `owner` finds nothing
+    // there and the title finds the pane.
+    let pane_pid: i32 = world
+        .scratch
+        .expand(&actual, "#{pane_pid}")
+        .parse()
+        .unwrap();
+    let tty = world.scratch.expand(&actual, "#{pane_tty}");
+    let tty = tty.strip_prefix("/dev/").unwrap();
+    let mut host = FakeHost {
+        parent: PID,
+        ..FakeHost::new()
+    };
+    host.procs.insert(
+        PID,
+        Proc {
+            args: "codex".into(),
+            pgid: PID,
+            tpgid: PID,
+            lstart: "birth".into(),
+            ..Proc::new(pane_pid, tty, "codex")
+        },
+    );
+    host.procs.insert(pane_pid, Proc::new(1, tty, "sleep"));
+    let call = |event: &str| {
+        world.codex_on(
+            &host,
+            json!({"session_id": session, "hook_event_name": event, "turn_id": "turn"}),
+        )
+    };
+    call("UserPromptSubmit");
+    call("PermissionRequest");
+    assert_eq!(world.status_of(&actual), "blocked");
+    assert_eq!(world.status(), "");
+    // Two panes with the title are ambiguous: nothing is published.
+    world
+        .scratch
+        .tmux(&["select-pane", "-t", &world.hidden, "-T", &title]);
+    call("Stop");
+    assert_eq!(world.status_of(&actual), "blocked");
+    assert_eq!(world.status(), "");
+}
+
+#[test]
+fn codex_lifecycle_and_unrelated_tool_cannot_clear_approval() {
+    let world = World::new();
+    world.codex(json!({"hook_event_name": "SessionStart"}));
+    assert_eq!(world.status(), "idle");
+    world.codex(json!({"hook_event_name": "UserPromptSubmit", "turn_id": "turn-1"}));
+    assert_eq!(world.status(), "working");
+    world.codex(
+        json!({"hook_event_name": "PermissionRequest", "turn_id": "turn-1", "tool_name": "Bash"}),
+    );
+    assert_eq!(world.status(), "blocked");
+    world
+        .codex(json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1", "tool_name": "Read"}));
+    assert_eq!(world.status(), "blocked");
+    world.codex(json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1", "tool_name": "Bash", "tool_use_id": "call-1"}));
+    assert_eq!(world.status(), "working");
+    world.codex(json!({"hook_event_name": "Stop", "turn_id": "turn-1"}));
+    assert_eq!(world.status(), "done");
+    world
+        .codex(json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1", "tool_name": "Bash"}));
+    assert_eq!(world.status(), "done");
+    world.codex(json!({"hook_event_name": "SessionEnd"}));
+    assert_eq!(world.option("@workspace_app"), "");
+    assert_eq!(world.option("@workspace_codex"), "");
+    assert_eq!(world.status(), "");
+}
+
+#[test]
+fn codex_question_and_interrupt_and_old_turn() {
+    let world = World::new();
+    world.codex(json!({"hook_event_name": "UserPromptSubmit", "turn_id": "turn-2"}));
+    world.codex(json!({"hook_event_name": "Stop", "turn_id": "turn-1"}));
+    assert_eq!(world.status(), "working");
+    world.codex(json!({"hook_event_name": "PreToolUse", "turn_id": "turn-2",
+                       "tool_name": "request_user_input", "tool_use_id": "question"}));
+    assert_eq!(world.status(), "blocked");
+    world.codex(
+        json!({"hook_event_name": "PostToolUse", "turn_id": "turn-2",
+                       "tool_name": "request_user_input", "tool_use_id": "question"}),
+    );
+    assert_eq!(world.status(), "working");
+    world.codex(json!({"hook_event_name": "Interrupt", "turn_id": "turn-2"}));
+    assert_eq!(world.status(), "idle");
+}
+
+#[test]
+fn codex_compaction_preserves_turn_and_subagents_cannot_publish() {
+    let world = World::new();
+    world.codex(json!({"hook_event_name": "UserPromptSubmit", "turn_id": "turn-1"}));
+    world.codex(json!({"hook_event_name": "SessionStart", "source": "compact"}));
+    assert_eq!(world.status(), "working");
+    world.codex(json!({"hook_event_name": "Stop", "turn_id": "turn-1", "agent_id": "child"}));
+    assert_eq!(world.status(), "working");
+    world.codex(
+        json!({"hook_event_name": "Stop", "turn_id": "turn-1", "session_id": "other-session"}),
+    );
+    assert_eq!(world.status(), "working");
+    world.codex(json!({"hook_event_name": "SessionEnd", "session_id": "other-session"}));
+    assert_eq!(world.status(), "working");
+    // No Codex owns the pane any more.
+    world.codex_on(
+        &world.host_without_agent(TmuxMode::Real),
+        json!({"hook_event_name": "Stop", "turn_id": "turn-1"}),
+    );
+    assert_eq!(world.status(), "working");
+}
+
+#[test]
+fn codex_multiple_pending_questions_and_visible_completion() {
+    let world = World::new();
+    world.codex(json!({"hook_event_name": "UserPromptSubmit", "turn_id": "turn-1"}));
+    for key in ["a", "b"] {
+        world.codex(json!({"hook_event_name": "PreToolUse", "turn_id": "turn-1",
+                           "tool_name": "request_user_input", "tool_use_id": key}));
+    }
+    world.codex(
+        json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1",
+                       "tool_name": "request_user_input", "tool_use_id": "a"}),
+    );
+    assert_eq!(world.status(), "blocked");
+    world.codex(
+        json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1",
+                       "tool_name": "request_user_input", "tool_use_id": "b"}),
+    );
+    assert_eq!(world.status(), "working");
+    let _client = ControlClient::attach(&world.scratch, "alpha");
+    world.scratch.tmux(&["select-window", "-t", &world.hidden]);
+    world.codex(json!({"hook_event_name": "Stop", "turn_id": "turn-1"}));
+    assert_eq!(world.status(), "idle");
+}
+
+#[test]
+fn codex_parallel_approvals_match_arguments_without_recording_them() {
+    let world = World::new();
+    world.codex(json!({"hook_event_name": "UserPromptSubmit", "turn_id": "turn-1"}));
+    for command in ["private command one", "private command two"] {
+        world.codex(
+            json!({"hook_event_name": "PermissionRequest", "turn_id": "turn-1",
+                           "tool_name": "Bash", "tool_input": {"command": command}}),
+        );
+    }
+    assert!(!world.option("@workspace_codex").contains("private command"));
+    world.codex(
+        json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1", "tool_name": "Bash",
+                       "tool_use_id": "first", "tool_input": {"command": "private command one"}}),
+    );
+    assert_eq!(world.status(), "blocked");
+    world.codex(
+        json!({"hook_event_name": "PostToolUse", "turn_id": "turn-1", "tool_name": "Bash",
+                       "tool_use_id": "second", "tool_input": {"command": "private command two"}}),
+    );
+    assert_eq!(world.status(), "working");
+}
+
+#[test]
+fn codex_retries_when_another_hook_wins_its_compare_and_set() {
+    let world = World::new();
+    world.codex(json!({"hook_event_name": "UserPromptSubmit", "turn_id": "turn-1"}));
+    let raced = Rc::new(Cell::new(false));
+    let seen = Rc::clone(&raced);
+    let (socket, hidden) = (world.scratch.socket().to_string(), world.hidden.clone());
+    let host = world.host_of(
+        "codex",
+        TmuxMode::Scripted(Box::new(move |argv| {
+            if argv.iter().any(|arg| arg == "if-shell") && !seen.replace(true) {
+                // Another hook writes the record right after this one has read it.
+                let tmux = |args: &[&str]| {
+                    let mut argv = vec!["tmux".to_string(), "-S".into(), socket.clone()];
+                    argv.extend(args.iter().map(|arg| arg.to_string()));
+                    RealHost.run(&argv)
+                };
+                let read = tmux(&["show-options", "-t", &hidden, "-pqv", "@workspace_codex"])?;
+                let mut record: Value = serde_json::from_str(&read).unwrap();
+                record["pending"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!("other-approval"));
+                let record = dumps(&record, Style::Default, false);
+                tmux(&[
+                    "set-option",
+                    "-t",
+                    &hidden,
+                    "-p",
+                    "@workspace_codex",
+                    &record,
+                ])?;
+            }
+            RealHost.run(argv)
+        })),
+    );
+    world.codex_on(
+        &host,
+        json!({"hook_event_name": "PermissionRequest", "turn_id": "turn-1", "tool_name": "Bash"}),
+    );
+    assert!(raced.get());
+    let record: Value = serde_json::from_str(&world.option("@workspace_codex")).unwrap();
+    assert_eq!(record["pending"], json!(["other-approval", "Bash"]));
+    assert_eq!(world.status(), "blocked");
 }
 
 // ---------------------------------------------------------------------------------------------
