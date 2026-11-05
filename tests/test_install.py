@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'lib'))
+sys.path.insert(0, str(ROOT / 'legacy' / 'lib'))
 import paths  # noqa: E402
 
 CORE = ['uname', 'id', 'dirname', 'basename', 'readlink', 'mkdir', 'ln', 'mv', 'cp', 'chmod', 'grep', 'awk',
@@ -20,6 +20,9 @@ BLOCK = '# >>> tmux-workspace >>>'
 
 class Installer(unittest.TestCase):
     def setUp(self):
+        # install.sh links the binary that make build copies here, and runs it for the agent integrations.
+        if not (ROOT / 'bin' / 'tmux-workspace').is_file():
+            self.fail('bin/tmux-workspace is not built: run make build (make test does)')
         self.home = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.home, True)
         self.bin = Path(tempfile.mkdtemp()).resolve()

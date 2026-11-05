@@ -9,10 +9,19 @@ use crate::integrations;
 use crate::onboarding;
 use crate::pane;
 use crate::park;
+use crate::paths::share_root;
 use crate::pick;
+use crate::process::{self, Spawn};
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
+use std::time::Duration;
+
+/// How long the check of the Python version may take.
+const PYTHON_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The legacy Python is tested on 3.9, which is what macOS ships as `/usr/bin/python3`.
+const PYTHON_CHECK: &str = "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)";
 
 /// Run the command named by the arguments and return the process exit status.
 pub fn main() -> i32 {
@@ -132,8 +141,52 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             help::print_topic(args.first().map_or("", String::as_str));
             Ok(0)
         }
+        // Still Python: the stage 2 and 3 ports take these over.
+        "dash" | "dashboard" | "ai" | "cleanup" => Err(legacy(command, args)),
         _ => fail(format!("Unknown workspace command: {command}")),
     }
+}
+
+/// Hand a command that is not ported yet to `legacy/bin/tmux-workspace`: become `python3` running it.
+/// Returns only when that fails. Without a python3 of version 3.9 or later, it says so on stderr and
+/// exits 1: the error contract does not apply, as the command is not ours yet.
+pub fn legacy(command: &str, args: &[String]) -> Error {
+    let Some(python) = python3_9() else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "tmux-workspace {command} needs python3 3.9+ until it is ported (stage 2/3)"
+        );
+        std::process::exit(1);
+    };
+    let script = share_root().join("legacy/bin/tmux-workspace");
+    if !script.is_file() {
+        return Error::Msg(format!(
+            "{command} needs {}, which is missing",
+            script.display()
+        ));
+    }
+    let mut argv = vec![
+        python.to_string_lossy().into_owned(),
+        script.to_string_lossy().into_owned(),
+        command.to_string(),
+    ];
+    argv.extend(args.iter().cloned());
+    process::exec(&argv)
+}
+
+/// The `python3` on `PATH`, when it is version 3.9 or later. One `python3 -c` call.
+fn python3_9() -> Option<std::path::PathBuf> {
+    let python = process::which("python3")?;
+    let check = process::spawn(&Spawn {
+        argv: vec![
+            python.to_string_lossy().into_owned(),
+            "-c".into(),
+            PYTHON_CHECK.into(),
+        ],
+        timeout: Some(PYTHON_CHECK_TIMEOUT),
+        ..Spawn::default()
+    });
+    check.is_ok_and(|out| out.status == 0).then_some(python)
 }
 
 /// The pane named, or else the one the command runs in.

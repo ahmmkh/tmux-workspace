@@ -8,7 +8,7 @@ import shlex
 # 3.3 and 3.4 work; tmux.conf sets their missing cosmetic options with -q.
 TMUX_MIN = (3, 3)
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 
 
 def config_dir():
@@ -78,7 +78,7 @@ def projects_dir():
 
 
 def agent_hook_path():
-    return REPO / 'integrations' / 'agent-hook.py'
+    return REPO / 'legacy/integrations/agent-hook.py'
 
 
 def render_hooks(template, home):

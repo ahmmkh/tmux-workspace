@@ -383,7 +383,8 @@ do_install() {
     fi
     migrate_config
     if [ "$AGENTS" = 1 ]; then
-        act agents "Claude Code, Codex, omp and Neovim where installed" "$REPO/bin/install-integrations"
+        act agents "Claude Code, Codex, omp and Neovim where installed" \
+            env TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations install
     fi
     if [ "$DRY" = 1 ]; then
         say would "ask for your projects folder unless it is set"
@@ -419,8 +420,8 @@ do_uninstall() {
     fi
     if [ "$DRY" = 1 ]; then
         say would "remove the agent integrations that --agents added"
-    elif has python3; then
-        "$REPO/bin/install-integrations" --uninstall | while IFS= read -r line; do
+    else
+        TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations uninstall | while IFS= read -r line; do
             if [ -n "$line" ]; then say remove "$line"; fi
         done
     fi

@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'legacy' / 'lib'))
 import ai_core
 import panes_ai
 

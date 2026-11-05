@@ -6,5 +6,5 @@ __pycache__/
 config.json
 /target
 /dist
-# The built (or downloaded) binary; install.sh puts it here once Task 11 moves the Python script out.
+# The built (or downloaded) binary: make build and install.sh put it here.
 /bin/tmux-workspace
