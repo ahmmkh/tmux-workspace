@@ -859,7 +859,7 @@ do_install() {
             env TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations install
     fi
     if [ "$DRY" = 1 ]; then
-        say would "ask for your projects folder unless it is set"
+        [ "$UPDATE" = 1 ] || say would "ask for your projects folder unless it is set"
         say "done" "dry run: nothing changed"
         return 0
     fi
