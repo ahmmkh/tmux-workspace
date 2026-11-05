@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as it should
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The quickest way here is `work bug` (in tmux, `Ctrl+a` then `F`). It builds the **Environment** and
+        **Diagnostics** below for you, with the names of your workspaces, folders, user and host, addresses
+        and keys taken out, and it asks before it opens this form. Nothing is sent until you press Submit,
+        so read both fields first.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened instead.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The keys you pressed or the commands you ran, in order.
+      placeholder: |
+        1. work my-api
+        2. Ctrl+a w
+        3. ...
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by `work bug`. Run `work bug --print` to see it without opening anything.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: The doctor's warnings and the last failures of tmux-workspace, filled in by `work bug`.
+      render: markdown

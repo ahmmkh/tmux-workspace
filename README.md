@@ -283,6 +283,22 @@ directory. The core is Rust (`src/`, one binary, no dependencies besides `serde_
 it is standard library only. The installer runs on bash 3.2. Cutting a release and reading the
 install and traffic numbers are in [docs/RELEASING.md](docs/RELEASING.md).
 
+## Reporting a bug or an idea
+
+```sh
+work bug       # also Ctrl+a F in tmux
+work idea
+work bug --print
+```
+
+`work bug` builds a report of your setup, what `doctor` found and the last failures of tmux-workspace, shows
+it in full, and asks before it opens GitHub's issue form with the report filled in. You read the form and
+press Submit; nothing is sent before that. Names of workspaces, tabs and pane labels, folders, user and host
+names, e-mail and IP addresses, keys and passwords in URLs are replaced or removed, and pane contents,
+environment variables and shell history are never read. Over SSH it prints the link and copies the report
+with `tw-clip` instead. The [guide](WORKSPACE_GUIDE.md#reporting-a-bug-or-an-idea) lists everything the
+report holds.
+
 ## License
 
 [MIT](LICENSE)

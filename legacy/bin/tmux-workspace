@@ -1288,6 +1288,34 @@ DESCRIPTION:
   (Ctrl+a 1..9) follow the order you want."""
     },
     {
+        'id': 'report-bug',
+        'display': 'Ctrl+a F              Report a Bug or an Idea (work bug / work idea)',
+        'title': 'Report a Bug or an Idea',
+        'text': """SHORTCUT: Ctrl+a then F (capital F), or `work bug` / `work idea` from your shell
+
+DESCRIPTION:
+  Builds a report of your setup and, for a bug, of what the doctor and the log of
+  failed commands say. It is shown in full, then you are asked before anything opens.
+  A yes opens GitHub's issue form with the report filled in; you read it there and
+  press Submit. Nothing is sent by tmux-workspace itself.
+
+WHAT IT LEAVES OUT:
+  Workspace, tab and pane label names become workspace-1, tab-1, label-1, and folders
+  under your home become folder-1 (your home is ~). User and host names, e-mail and IP
+  addresses, keys and tokens, and passwords in URLs are removed. Never pane contents,
+  environment variables, shell history or git remotes.
+
+SHELL USAGE:
+  work bug              Report a bug
+  work idea             Suggest an idea
+  work bug --print      Only print the report; open nothing
+  work ./bug            Open a workspace named bug (likewise ./idea)
+
+OVER SSH:
+  The link is shown and the report is copied with tw-clip (OSC 52): paste it into
+  the form if a field is empty."""
+    },
+    {
         'id': 'agent-status',
         'display': 'Topic: Agent Status   What the Marks on Panes, Tabs and the Workspace Name Mean',
         'title': 'Agent Status Marks',

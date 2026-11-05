@@ -1021,3 +1021,170 @@ fn no_run_of_these_tests_can_reach_a_real_opener_or_clipboard() {
         "tw-clip is the fake"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// What ships with it: the issue forms, the guide, the help
+
+fn root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn shipped(relative: &str) -> String {
+    fs::read_to_string(root().join(relative)).unwrap_or_else(|error| panic!("{relative}: {error}"))
+}
+
+/// The ids of the fields of an issue form, by their type: `("textarea", "environment")`. The forms are
+/// read as text, which is all that is needed of YAML laid out as GitHub's own examples are.
+fn form_fields(form: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    let mut kind = String::new();
+    for line in form.lines() {
+        let line = line.trim();
+        if let Some(found) = line.strip_prefix("- type:") {
+            kind = found.trim().to_string();
+        } else if let Some(id) = line.strip_prefix("id:") {
+            fields.push((kind.clone(), id.trim().to_string()));
+        }
+    }
+    fields
+}
+
+fn has_field(form: &str, id: &str) -> bool {
+    form_fields(form)
+        .iter()
+        .any(|(kind, name)| kind == "textarea" && name == id)
+}
+
+#[test]
+fn the_issue_forms_have_the_fields_the_links_fill_in() {
+    use tmux_workspace::anonymize::{Anonymizer, Identity, Names};
+    use tmux_workspace::report::{Diagnostics, Kind, Report};
+    let mut anonymizer = Anonymizer::new(&Identity::default(), &Names::default());
+    for (kind, file) in [(Kind::Bug, "bug.yml"), (Kind::Idea, "idea.yml")] {
+        let form = shipped(&format!(".github/ISSUE_TEMPLATE/{file}"));
+        assert_eq!(kind.template(), file);
+        let report = Report {
+            kind,
+            environment: vec![anonymizer.apply("tmux-workspace 2.1.0")],
+            diagnostics: (kind == Kind::Bug).then(|| Diagnostics {
+                summary: anonymizer.apply("1 pane · 0 warnings · 0 errors"),
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            }),
+        };
+        let url = report.link().url;
+        let query = url.split_once('?').unwrap().1;
+        for pair in query.split('&') {
+            let name = pair.split_once('=').unwrap().0;
+            match name {
+                "template" => {}
+                "title" => assert!(
+                    form.contains(&format!("title: \"{}\"", kind.title())),
+                    "the form starts the title as the link does"
+                ),
+                id => assert!(
+                    has_field(&form, id),
+                    "{file} has no textarea with the id {id}"
+                ),
+            }
+        }
+        for key in ["name:", "description:", "labels:", "body:"] {
+            assert!(
+                form.lines().any(|line| line.starts_with(key)),
+                "{file} has no {key}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_bug_form_asks_what_happened_what_was_expected_and_how_to_reproduce() {
+    let form = shipped(".github/ISSUE_TEMPLATE/bug.yml");
+    assert!(form.contains("\nlabels: [bug]\n"), "{form}");
+    for id in ["environment", "diagnostics"] {
+        assert!(has_field(&form, id), "{id}");
+    }
+    let labels: Vec<&str> = form
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("label:"))
+        .map(str::trim)
+        .collect();
+    for label in [
+        "What happened",
+        "What you expected",
+        "Steps to reproduce",
+        "Environment",
+        "Diagnostics",
+    ] {
+        assert!(labels.contains(&label), "{label} in {labels:?}");
+    }
+    // Both fields keep the lines as they are, in a block, so that the Markdown stays readable.
+    assert_eq!(form.matches("render: markdown").count(), 2, "{form}");
+}
+
+#[test]
+fn the_idea_form_asks_what_and_why() {
+    let form = shipped(".github/ISSUE_TEMPLATE/idea.yml");
+    assert!(form.contains("\nlabels: [enhancement]\n"), "{form}");
+    assert!(has_field(&form, "environment"));
+    assert!(!has_field(&form, "diagnostics"));
+    let labels: Vec<&str> = form
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("label:"))
+        .map(str::trim)
+        .collect();
+    for label in ["What you want", "Why", "Environment"] {
+        assert!(labels.contains(&label), "{label} in {labels:?}");
+    }
+}
+
+#[test]
+fn blank_issues_stay_allowed() {
+    let config = shipped(".github/ISSUE_TEMPLATE/config.yml");
+    assert!(config.contains("blank_issues_enabled: true"), "{config}");
+}
+
+#[test]
+fn the_guide_lists_the_key_and_the_commands() {
+    let guide = shipped("WORKSPACE_GUIDE.md");
+    assert!(
+        guide.contains("| `Ctrl+a` `F` | "),
+        "the cheatsheet has a row for F"
+    );
+    for text in [
+        "work bug",
+        "work idea",
+        "work bug --print",
+        "work ./bug",
+        "errors.log",
+    ] {
+        assert!(guide.contains(text), "{text}");
+    }
+}
+
+#[test]
+fn the_help_has_a_topic_that_names_the_key_and_what_is_left_out() {
+    let home = TempDir::new();
+    let out = quietly({
+        let mut command = Command::new(EXE);
+        command
+            .args(["help-topic", "report-bug"])
+            .env("HOME", home.path());
+        command
+    });
+    let shown = text(&out.stdout);
+    assert!(
+        shown.starts_with("=== Report a Bug or an Idea ===\n"),
+        "{shown}"
+    );
+    for line in [
+        "Ctrl+a then F",
+        "work bug",
+        "work idea",
+        "--print",
+        "folder-1",
+        "Nothing is sent",
+    ] {
+        assert!(shown.contains(line), "{line}\n{shown}");
+    }
+}

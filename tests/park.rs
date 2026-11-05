@@ -432,7 +432,7 @@ fn topic_ids() -> Vec<String> {
 fn every_help_topic_matches_python() {
     let home = TempDir::new();
     let ids = topic_ids();
-    assert_eq!(ids.len(), 33);
+    assert_eq!(ids.len(), 34);
     for id in &ids {
         let out = plain(home.path())
             .args(["help-topic", id])

@@ -161,10 +161,10 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn there_are_33_topics_with_distinct_ids() {
-        assert_eq!(TOPICS.len(), 33);
+    fn there_are_34_topics_with_distinct_ids() {
+        assert_eq!(TOPICS.len(), 34);
         let ids: HashSet<_> = TOPICS.iter().map(|t| t.id).collect();
-        assert_eq!(ids.len(), 33);
+        assert_eq!(ids.len(), 34);
         for topic in TOPICS {
             assert!(!topic.display.is_empty() && !topic.title.is_empty() && !topic.text.is_empty());
             assert!(!topic.id.contains('\t') && !topic.display.contains(['\t', '\n']));
