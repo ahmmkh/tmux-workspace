@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::process::{Spawn, spawn};
+use crate::text::py_strip;
 use std::time::Duration;
 
 /// How long a child process may run before the hook gives up on it and kills it.
@@ -9,7 +10,8 @@ pub const CHILD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Everything the hook asks of the system, so a test can stand in for it.
 pub trait Host {
-    /// Run a command: checked, with a 2 s timeout, stderr discarded, stdout stripped at both ends.
+    /// Run a command: checked, with a 2 s timeout, stderr discarded, stdout stripped at both ends as Python's
+    /// `str.strip()` does.
     fn run(&self, argv: &[String]) -> Result<String>;
     /// The pid of the process that started this one.
     fn parent_pid(&self) -> i32;
@@ -31,7 +33,7 @@ impl Host for RealHost {
                 status: out.status,
             });
         }
-        Ok(out.stdout.trim().to_string())
+        Ok(py_strip(&out.stdout).to_string())
     }
 
     fn parent_pid(&self) -> i32 {
@@ -51,6 +53,14 @@ mod tests {
     fn run_strips_the_output_at_both_ends() {
         let out = RealHost.run(&argv(&["printf", "\n  a b \n\n"])).unwrap();
         assert_eq!(out, "a b");
+    }
+
+    #[test]
+    fn run_strips_like_python_including_the_information_separators() {
+        let out = RealHost
+            .run(&argv(&["printf", "\\037 a\\034b \\037\\n"]))
+            .unwrap();
+        assert_eq!(out, "a\x1cb");
     }
 
     #[test]

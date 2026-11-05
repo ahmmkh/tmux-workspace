@@ -1,6 +1,7 @@
 //! The command line: which command runs, and what a failure looks like.
 
 use crate::error::{Error, Result, fail};
+use crate::hook;
 use crate::onboarding;
 use crate::tmux::Tmux;
 use std::io::Write;
@@ -47,6 +48,8 @@ fn run(args: &[String]) -> Result<i32> {
 fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     // Each command is one arm here, added as it is ported.
     match command {
+        // The hook never fails, and nothing else may write: it is not subject to the error contract.
+        "agent-hook" => Ok(hook::main(args)),
         "setup" => onboarding::setup(args),
         _ => fail(format!("Unknown workspace command: {command}")),
     }

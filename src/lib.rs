@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod error;
+pub mod hook;
 pub mod host;
 pub mod model;
 pub mod onboarding;

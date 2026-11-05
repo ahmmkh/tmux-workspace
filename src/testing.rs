@@ -2,6 +2,11 @@
 //!
 //! Nothing here touches the user's tmux server: every tmux call names a scratch socket with `-L`.
 
+use crate::error::{Error, Result};
+use crate::host::{Host, RealHost};
+use crate::text::py_strip;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -204,6 +209,188 @@ impl Drop for ScratchTmux {
     }
 }
 
+/// One process of a [`FakeHost`]: what `ps` would say about it.
+#[derive(Clone, Debug, Default)]
+pub struct Proc {
+    pub ppid: i32,
+    /// As `ps -o tty=` prints it: `ttys001`, no `/dev/`.
+    pub tty: String,
+    pub comm: String,
+    pub args: String,
+    pub pgid: i32,
+    pub tpgid: i32,
+    pub lstart: String,
+}
+
+impl Proc {
+    /// A process that runs `comm` with no arguments, in no foreground group, with no start time.
+    pub fn new(ppid: i32, tty: &str, comm: &str) -> Proc {
+        Proc {
+            ppid,
+            tty: tty.to_string(),
+            comm: comm.to_string(),
+            args: comm.to_string(),
+            ..Proc::default()
+        }
+    }
+}
+
+/// A stand-in for tmux: it sees the whole command line, tmux prefix included.
+pub type TmuxScript = Box<dyn Fn(&[String]) -> Result<String>>;
+
+/// How a [`FakeHost`] answers a `tmux` command.
+pub enum TmuxMode {
+    /// Run the real tmux. Aim it at a scratch server with `-S`.
+    Real,
+    /// Answer from the test: it sees the whole command line, tmux prefix included.
+    Scripted(TmuxScript),
+}
+
+/// A machine for the hook: a table of processes that `ps` and `lsof` read, a parent pid, and either
+/// the real tmux or a script standing in for it. It records every command it is asked to run.
+pub struct FakeHost {
+    pub procs: BTreeMap<i32, Proc>,
+    pub parent: i32,
+    /// What `lsof -a -p <pid> -Ffan` prints, by pid.
+    pub lsof: BTreeMap<i32, String>,
+    /// Every command line run, in order, tmux and ps included.
+    pub calls: RefCell<Vec<Vec<String>>>,
+    pub tmux: TmuxMode,
+}
+
+impl Default for FakeHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeHost {
+    /// No processes, parent pid 0, the real tmux.
+    pub fn new() -> FakeHost {
+        FakeHost {
+            procs: BTreeMap::new(),
+            parent: 0,
+            lsof: BTreeMap::new(),
+            calls: RefCell::new(Vec::new()),
+            tmux: TmuxMode::Real,
+        }
+    }
+
+    /// No processes, parent pid 0, and `script` in place of tmux.
+    pub fn scripted(script: impl Fn(&[String]) -> Result<String> + 'static) -> FakeHost {
+        FakeHost {
+            tmux: TmuxMode::Scripted(Box::new(script)),
+            ..FakeHost::new()
+        }
+    }
+
+    /// The recorded commands of one program, by its name (`tmux`, `ps`, `lsof`).
+    pub fn calls_to(&self, program: &str) -> Vec<Vec<String>> {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|call| {
+                call.first()
+                    .is_some_and(|first| program_of(first) == program)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The pid's process, or the error `ps -p` ends in.
+    fn proc(&self, pid: &str) -> Result<(i32, &Proc)> {
+        let found = pid
+            .parse::<i32>()
+            .ok()
+            .and_then(|pid| self.procs.get(&pid).map(|proc| (pid, proc)));
+        found.ok_or_else(|| no_such_process(pid))
+    }
+
+    /// The output of `ps` for the forms the hook and `save` use. Like the real one, it fails when
+    /// nothing matches, and for any form it does not know.
+    fn ps(&self, args: &[&str]) -> Result<String> {
+        let table = |proc: (i32, &Proc)| {
+            let (pid, p) = proc;
+            format!("{pid} {} {} {}", p.ppid, p.tty, p.comm)
+        };
+        let lines: Vec<String> = match args {
+            ["-p", pid, "-o", "pid=,ppid=,tty=,comm="] => vec![table(self.proc(pid)?)],
+            ["-axo", "pid=,ppid=,tty=,comm="] => {
+                self.procs.iter().map(|(&pid, p)| table((pid, p))).collect()
+            }
+            ["-t", tty, "-o", "pid=,ppid=,tty=,comm="] => self
+                .procs
+                .iter()
+                .filter(|(_, p)| p.tty == *tty)
+                .map(|(&pid, p)| table((pid, p)))
+                .collect(),
+            ["-ww", "-p", pid, "-o", "args="] => vec![self.proc(pid)?.1.args.clone()],
+            ["-p", pid, "-o", "pgid=,tpgid="] => {
+                let p = self.proc(pid)?.1;
+                vec![format!("{} {}", p.pgid, p.tpgid)]
+            }
+            ["-p", pid, "-o", "lstart="] => vec![self.proc(pid)?.1.lstart.clone()],
+            ["-axo", "pid=,ppid=,pgid=,tpgid=,lstart="] => self
+                .procs
+                .iter()
+                .map(|(pid, p)| format!("{pid} {} {} {} {}", p.ppid, p.pgid, p.tpgid, p.lstart))
+                .collect(),
+            _ => return Err(Error::Msg(format!("FakeHost: unexpected ps {args:?}"))),
+        };
+        if lines.is_empty() {
+            return Err(no_such_process("nothing matched"));
+        }
+        Ok(py_strip(&lines.join("\n")).to_string())
+    }
+
+    fn lsof(&self, args: &[&str]) -> Result<String> {
+        match args {
+            ["-a", "-p", pid, "-Ffan"] => {
+                let found = pid.parse::<i32>().ok().and_then(|pid| self.lsof.get(&pid));
+                found
+                    .map(|out| py_strip(out).to_string())
+                    .ok_or_else(|| no_such_process(pid))
+            }
+            _ => Err(Error::Msg(format!("FakeHost: unexpected lsof {args:?}"))),
+        }
+    }
+}
+
+/// `/bin/ps` -> `ps`.
+fn program_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// What `ps -p` and `lsof -p` end in when there is no such process: a failed, checked command.
+fn no_such_process(what: &str) -> Error {
+    Error::Msg(format!("FakeHost: no such process: {what}"))
+}
+
+impl Host for FakeHost {
+    fn run(&self, argv: &[String]) -> Result<String> {
+        self.calls.borrow_mut().push(argv.to_vec());
+        let Some((program, rest)) = argv.split_first() else {
+            return Err(Error::Msg("FakeHost: empty command".into()));
+        };
+        let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+        match program_of(program) {
+            "tmux" => match &self.tmux {
+                TmuxMode::Real => RealHost.run(argv),
+                TmuxMode::Scripted(script) => script(argv),
+            },
+            "ps" => self.ps(&rest),
+            "lsof" => self.lsof(&rest),
+            _ => Err(Error::Msg(format!(
+                "FakeHost: unexpected command {program}"
+            ))),
+        }
+    }
+
+    fn parent_pid(&self) -> i32 {
+        self.parent
+    }
+}
+
 /// Poll `read` until it gives `expected`, for up to 5 s, then assert that it does.
 pub fn wait_for(read: impl Fn() -> String, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -326,5 +513,152 @@ mod tests {
                 "TMUX_WORKSPACE_TRACE"
             ]
         );
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| p.to_string()).collect()
+    }
+
+    fn tree() -> FakeHost {
+        let mut host = FakeHost::new();
+        host.parent = 30;
+        host.procs.insert(
+            30,
+            Proc {
+                ppid: 20,
+                tty: "ttys001".into(),
+                comm: "/usr/local/bin/claude".into(),
+                args: "claude --resume abc".into(),
+                pgid: 30,
+                tpgid: 30,
+                lstart: "Thu Oct  1 20:23:29 2026".into(),
+            },
+        );
+        host.procs.insert(
+            20,
+            Proc {
+                lstart: "Mon Sep 28 08:00:00 2026".into(),
+                ..Proc::new(1, "ttys001", "-zsh")
+            },
+        );
+        host.procs.insert(
+            10,
+            Proc {
+                lstart: "Mon Sep 28 07:00:00 2026".into(),
+                ..Proc::new(1, "??", "launchd-ish")
+            },
+        );
+        host
+    }
+
+    #[test]
+    fn fake_host_answers_every_ps_form_the_hook_issues() {
+        let host = tree();
+        let ps = |parts: &[&str]| {
+            let mut all = vec!["/bin/ps"];
+            all.extend(parts);
+            host.run(&argv(&all))
+        };
+        assert_eq!(
+            ps(&["-p", "30", "-o", "pid=,ppid=,tty=,comm="]).unwrap(),
+            "30 20 ttys001 /usr/local/bin/claude"
+        );
+        assert_eq!(
+            ps(&["-axo", "pid=,ppid=,tty=,comm="]).unwrap(),
+            "10 1 ?? launchd-ish\n20 1 ttys001 -zsh\n30 20 ttys001 /usr/local/bin/claude"
+        );
+        assert_eq!(
+            ps(&["-t", "ttys001", "-o", "pid=,ppid=,tty=,comm="]).unwrap(),
+            "20 1 ttys001 -zsh\n30 20 ttys001 /usr/local/bin/claude"
+        );
+        assert_eq!(
+            ps(&["-ww", "-p", "30", "-o", "args="]).unwrap(),
+            "claude --resume abc"
+        );
+        assert_eq!(ps(&["-p", "30", "-o", "pgid=,tpgid="]).unwrap(), "30 30");
+        assert_eq!(
+            ps(&["-p", "30", "-o", "lstart="]).unwrap(),
+            "Thu Oct  1 20:23:29 2026"
+        );
+        assert_eq!(
+            ps(&["-axo", "pid=,ppid=,pgid=,tpgid=,lstart="]).unwrap(),
+            "10 1 0 0 Mon Sep 28 07:00:00 2026\n20 1 0 0 Mon Sep 28 08:00:00 2026\n30 20 30 30 Thu Oct  1 20:23:29 2026"
+        );
+    }
+
+    #[test]
+    fn fake_host_fails_like_ps_for_what_it_does_not_know() {
+        let host = tree();
+        for parts in [
+            vec!["-p", "99", "-o", "pid=,ppid=,tty=,comm="],
+            vec!["-ww", "-p", "99", "-o", "args="],
+            vec!["-p", "99", "-o", "pgid=,tpgid="],
+            vec!["-p", "99", "-o", "lstart="],
+            vec!["-t", "ttys999", "-o", "pid=,ppid=,tty=,comm="],
+            vec!["-p", "30", "-o", "nonsense="],
+        ] {
+            let mut all = vec!["/bin/ps"];
+            all.extend(parts.iter());
+            assert!(host.run(&argv(&all)).is_err(), "{parts:?}");
+        }
+        assert!(host.run(&argv(&["/bin/echo", "hi"])).is_err());
+    }
+
+    #[test]
+    fn fake_host_serves_lsof_and_the_parent_pid() {
+        let mut host = tree();
+        host.lsof.insert(30, "fcwd\nn/work".into());
+        assert_eq!(
+            host.run(&argv(&["/usr/sbin/lsof", "-a", "-p", "30", "-Ffan"]))
+                .unwrap(),
+            "fcwd\nn/work"
+        );
+        assert!(
+            host.run(&argv(&["lsof", "-a", "-p", "31", "-Ffan"]))
+                .is_err()
+        );
+        assert_eq!(host.parent_pid(), 30);
+    }
+
+    #[test]
+    fn fake_host_records_every_call_and_filters_them_by_program() {
+        let host = FakeHost::scripted(|argv| Ok(argv.join("|")));
+        let mut with_ps = host;
+        with_ps.procs.insert(5, Proc::new(1, "ttys002", "sh"));
+        assert_eq!(
+            with_ps
+                .run(&argv(&["/opt/homebrew/bin/tmux", "-N", "list-panes"]))
+                .unwrap(),
+            "/opt/homebrew/bin/tmux|-N|list-panes"
+        );
+        with_ps
+            .run(&argv(&["/bin/ps", "-p", "5", "-o", "lstart="]))
+            .unwrap();
+        assert_eq!(with_ps.calls.borrow().len(), 2);
+        assert_eq!(
+            with_ps.calls_to("tmux"),
+            [argv(&["/opt/homebrew/bin/tmux", "-N", "list-panes"])]
+        );
+        assert_eq!(with_ps.calls_to("ps").len(), 1);
+        assert!(with_ps.calls_to("lsof").is_empty());
+    }
+
+    #[test]
+    fn fake_host_passes_tmux_to_the_real_one_in_real_mode() {
+        let scratch = ScratchTmux::new();
+        let host = FakeHost::new();
+        let out = host
+            .run(&argv(&[
+                "tmux",
+                "-N",
+                "-S",
+                scratch.socket(),
+                "display-message",
+                "-p",
+                "#{session_name}",
+            ]))
+            .unwrap();
+        assert_eq!(out, "alpha");
+        assert_eq!(host.calls_to("tmux").len(), 1);
     }
 }

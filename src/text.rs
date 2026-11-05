@@ -254,6 +254,57 @@ pub fn now_ms() -> i64 {
     since_epoch().as_millis() as i64
 }
 
+/// Python's `str.isspace` for one character: Unicode `White_Space`, plus the separators U+001C to U+001F
+/// that Rust leaves out.
+pub fn is_py_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\x1c'..='\x1f')
+}
+
+/// `s.strip()`.
+pub fn py_strip(s: &str) -> &str {
+    s.trim_matches(is_py_space)
+}
+
+/// `s.splitlines()`: lines end at `\n`, `\r`, `\r\n`, `\v`, `\f`, U+001C to U+001E, U+0085, U+2028 and U+2029.
+pub fn py_splitlines(s: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut chars = s.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        if !matches!(
+            c,
+            '\n' | '\r' | '\x0b' | '\x0c' | '\x1c'..='\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        ) {
+            continue;
+        }
+        lines.push(&s[start..at]);
+        start = at + c.len_utf8();
+        if c == '\r' && chars.next_if(|&(_, next)| next == '\n').is_some() {
+            start += 1;
+        }
+    }
+    if start < s.len() {
+        lines.push(&s[start..]);
+    }
+    lines
+}
+
+/// `s.split(None, maxsplit)`: runs of whitespace separate fields, leading whitespace is skipped, and
+/// the rest after `maxsplit` splits is kept as it is.
+pub fn py_split_ws(s: &str, maxsplit: usize) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut rest = s.trim_start_matches(is_py_space);
+    while !rest.is_empty() {
+        let Some(end) = rest.find(is_py_space).filter(|_| fields.len() < maxsplit) else {
+            fields.push(rest);
+            break;
+        };
+        fields.push(&rest[..end]);
+        rest = rest[end..].trim_start_matches(is_py_space);
+    }
+    fields
+}
+
 /// `str.ljust(width)`: pads with spaces, counting characters.
 pub fn ljust(s: &str, width: usize) -> String {
     let len = s.chars().count();
@@ -455,5 +506,55 @@ mod tests {
         assert_eq!(ljust("é😀", 4), "é😀  ");
         assert_eq!(ljust("abcdef", 3), "abcdef");
         assert_eq!(ljust("", 2), "  ");
+    }
+
+    #[test]
+    fn py_strip_also_strips_the_information_separators() {
+        assert_eq!(
+            py_strip(" \t\n\x1c\x1d\x1e\x1f a b \u{85}\u{a0}\u{2003}\x1f"),
+            "a b"
+        );
+        assert_eq!(py_strip("\x1f\x1f"), "");
+        assert_eq!(
+            py_strip("é\u{200b}"),
+            "é\u{200b}",
+            "a zero-width space is not whitespace"
+        );
+        assert!(is_py_space('\x1c') && is_py_space('\x1f') && is_py_space(' '));
+        assert!(!is_py_space('\x1b') && !is_py_space('a') && !is_py_space('\u{200b}'));
+    }
+
+    #[test]
+    fn py_splitlines_matches_python() {
+        assert_eq!(py_splitlines(""), Vec::<&str>::new());
+        assert_eq!(py_splitlines("a"), ["a"]);
+        assert_eq!(py_splitlines("a\nb\n"), ["a", "b"]);
+        assert_eq!(py_splitlines("a\n\nb"), ["a", "", "b"]);
+        assert_eq!(py_splitlines("a\r\nb\rc"), ["a", "b", "c"]);
+        assert_eq!(
+            py_splitlines("1\x0b2\x0c3\x1c4\x1d5\x1e6\u{85}7\u{2028}8\u{2029}9"),
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+        );
+        assert_eq!(
+            py_splitlines("a\x1fb"),
+            ["a\x1fb"],
+            "U+001F does not end a line"
+        );
+        assert_eq!(py_splitlines("\n"), [""]);
+    }
+
+    #[test]
+    fn py_split_ws_matches_python() {
+        assert_eq!(py_split_ws("  a  b  c  ", 1), ["a", "b  c  "]);
+        assert_eq!(
+            py_split_ws("1 2 ttys001 /usr/bin/a b", 3),
+            ["1", "2", "ttys001", "/usr/bin/a b"]
+        );
+        assert_eq!(py_split_ws("a b", 3), ["a", "b"]);
+        assert_eq!(py_split_ws("   ", 3), Vec::<&str>::new());
+        assert_eq!(py_split_ws("", 3), Vec::<&str>::new());
+        assert_eq!(py_split_ws("a  ", 1), ["a"]);
+        assert_eq!(py_split_ws("a\x1fb", 3), ["a", "b"]);
+        assert_eq!(py_split_ws("a b c", 0), ["a b c"]);
     }
 }
