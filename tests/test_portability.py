@@ -191,6 +191,33 @@ class ShellIntegration(unittest.TestCase):
                 self.assertEqual(self.work(shell, './update', 'x')[-1], 'open -- update x')
                 self.assertEqual(self.work(shell, 'update')[-1], 'update')
 
+    def test_work_bug_and_idea_report_in_every_shell(self):
+        for shell in ('bash', 'zsh', 'fish'):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                self.assertEqual(self.work(shell, 'bug'), ['bug'])
+                self.assertEqual(self.work(shell, 'bug', '--print')[-1], 'bug --print')
+                self.assertEqual(self.work(shell, 'idea')[-1], 'idea')
+                self.assertEqual(self.work(shell, 'idea', '--print')[-1], 'idea --print')
+
+    def test_work_dot_slash_bug_and_idea_open_workspaces_of_those_names(self):
+        for shell in ('bash', 'zsh', 'fish'):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                # After --, open takes the name as it is: a bare `open bug` is what a shell from before 2.1 runs
+                # for `work bug`, and open refuses that.
+                self.assertEqual(self.work(shell, './bug'), ['open -- bug'])
+                self.assertEqual(self.work(shell, './bug', 'x')[-1], 'open -- bug x')
+                self.assertEqual(self.work(shell, './idea')[-1], 'open -- idea')
+                self.assertEqual(self.work(shell, './idea', 'x')[-1], 'open -- idea x')
+
+    def test_names_that_only_look_like_bug_and_idea_are_workspaces(self):
+        for shell in ('bash', 'zsh', 'fish'):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                for name in ('bugs', 'idea-box', 'Bug', 'my-bug'):
+                    self.assertEqual(self.work(shell, name)[-1], f'open {name}')
+
     def test_work_sh_puts_local_bin_on_path(self):
         for shell, flag in (('bash', '--norc'), ('zsh', '-f')):
             if not shutil.which(shell):
