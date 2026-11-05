@@ -181,9 +181,21 @@ fn drain(pipe: &mut impl Read) -> Vec<u8> {
     bytes
 }
 
+/// How long to sleep before the next look at a child, after `looks` looks. The children are tmux and
+/// ps calls that end within a few milliseconds, so the first looks come close together: a nap of 1.6 or
+/// 3.2 ms past the end of a 2 ms child would double its cost. A child that takes longer is looked at
+/// less and less often.
+fn nap(looks: u32) -> Duration {
+    match looks {
+        0..100 => Duration::from_micros(100),
+        100..200 => Duration::from_micros(500),
+        _ => Duration::from_millis(2),
+    }
+}
+
 /// Wait for the child until `deadline`; `None` when it is still running by then.
 fn wait_until(child: &mut Child, deadline: Instant) -> Result<Option<ExitStatus>> {
-    let mut nap = Duration::from_micros(200);
+    let mut looks = 0;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
@@ -192,8 +204,8 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Result<Option<ExitStatus>
         if left.is_zero() {
             return Ok(None);
         }
-        thread::sleep(nap.min(left));
-        nap = (nap * 2).min(Duration::from_millis(5));
+        thread::sleep(nap(looks).min(left));
+        looks += 1;
     }
 }
 
@@ -246,6 +258,18 @@ mod tests {
         Spawn {
             argv: argv(&["sh", "-c", script]),
             ..Spawn::default()
+        }
+    }
+
+    #[test]
+    fn a_short_child_is_looked_at_often_and_a_long_one_less_often() {
+        // A tmux or ps call ends within a few milliseconds: no nap may cost a visible part of one.
+        let first_ten_ms: Duration = (0..100).map(nap).sum();
+        assert!(first_ten_ms <= Duration::from_millis(10));
+        assert!(nap(0) <= Duration::from_micros(200));
+        for looks in 0..1000 {
+            assert!(nap(looks) <= nap(looks + 1), "naps only grow: {looks}");
+            assert!(nap(looks) <= Duration::from_millis(2));
         }
     }
 

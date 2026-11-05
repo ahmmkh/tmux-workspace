@@ -239,6 +239,28 @@ fn save_with_five_panes_makes_at_most_nine_tmux_calls_and_two_ps_calls() {
         2,
         "the process table and the Codex scan\n{text}"
     );
+    // The two ps calls read the processes on the ttys of the panes, not every process: `ps -ax` takes
+    // 140 ms on a Mac with a thousand processes, and the save has 60 ms.
+    let mut ttys: Vec<String> = scratch
+        .tmux(&["list-panes", "-a", "-F", "#{pane_tty}"])
+        .lines()
+        .map(|tty| tty.trim_start_matches("/dev/").to_string())
+        .collect();
+    ttys.sort();
+    ttys.dedup();
+    assert_eq!(ttys.len(), 5, "a tty for each pane");
+    let scans: Vec<&str> = text.lines().filter(|l| l.starts_with("ps ")).collect();
+    for (line, columns) in scans
+        .iter()
+        .zip(["pid=,ppid=,pgid=,tpgid=,lstart=", "pid=,ppid=,tty=,comm="])
+    {
+        let words: Vec<&str> = line.split(' ').collect();
+        assert_eq!(&words[..2], ["ps", "-t"], "{text}");
+        assert_eq!(&words[3..], ["-o", columns], "{text}");
+        let mut listed: Vec<&str> = words[2].split(',').collect();
+        listed.sort();
+        assert_eq!(listed, ttys, "{text}");
+    }
     // One capture per pane, and nothing else per pane.
     let captures = text
         .lines()

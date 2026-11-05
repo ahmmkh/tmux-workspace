@@ -99,6 +99,19 @@ pub fn lock_in(root: &Path) -> Result<File> {
     Ok(file)
 }
 
+/// Flush a file to the drive as Python's `os.fsync` does: `fsync(2)`. Rust's `File::sync_all` asks more
+/// on macOS, where it also has the drive empty its cache (`F_FULLFSYNC`). That is 4 ms a file, and a
+/// save writes a file for each pane, 28 ms of the save of five panes.
+fn fsync(file: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor belongs to `file`, which outlives the call.
+    if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Write a file so that a reader sees all of it or none: to a private temporary file in the same
 /// folder, flushed to disk, then renamed over the target.
 pub fn atomic(path: &Path, text: &str) -> Result<()> {
@@ -108,7 +121,7 @@ pub fn atomic(path: &Path, text: &str) -> Result<()> {
     let (mut file, temporary) = create_temporary(dir, &name).map_err(|e| cannot_write(path, e))?;
     let written = file
         .write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
+        .and_then(|()| fsync(&file))
         .and_then(|()| fs::rename(&temporary, path));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -180,9 +193,30 @@ pub type ProcessTable = HashMap<i32, (i32, i32, i32, String)>;
 
 /// Every process, with what tells a running application from an old record of one.
 pub fn process_table(host: &dyn Host) -> Result<ProcessTable> {
-    let listing = host.run(&procs::ps(&["-axo", "pid=,ppid=,pgid=,tpgid=,lstart="]))?;
+    let listing = host.run(&procs::ps(&["-axo", PROCESS_COLUMNS]))?;
+    Ok(read_process_table(&listing))
+}
+
+/// What `process_table` asks `ps` for.
+const PROCESS_COLUMNS: &str = "pid=,ppid=,pgid=,tpgid=,lstart=";
+
+/// The processes on these ttys (as `ps` names them: `ttys001`, `pts/3`), which is all of the table a
+/// save looks at: the processes of the panes, the agents in them, and the processes between. Asking
+/// for them alone is what keeps `save` fast: `ps -ax` takes 20 ms on a Mac with a thousand
+/// processes, `ps -t` 10. When `ps` cannot take the list (a pane whose tty is gone) every process is
+/// read, as before.
+fn process_table_on(host: &dyn Host, ttys: &[String]) -> Result<ProcessTable> {
+    if !ttys.is_empty()
+        && let Ok(listing) = host.run(&procs::ps(&["-t", &ttys.join(","), "-o", PROCESS_COLUMNS]))
+    {
+        return Ok(read_process_table(&listing));
+    }
+    process_table(host)
+}
+
+fn read_process_table(listing: &str) -> ProcessTable {
     let mut table = ProcessTable::new();
-    for line in py_splitlines(&listing) {
+    for line in py_splitlines(listing) {
         let [pid, ppid, group, foreground, started] = py_split_ws(line, 4)[..] else {
             continue;
         };
@@ -199,7 +233,20 @@ pub fn process_table(host: &dyn Host) -> Result<ProcessTable> {
             );
         }
     }
-    Ok(table)
+    table
+}
+
+/// The ttys of the panes as `ps` names them, each once: `/dev/ttys001` is `ttys001`.
+fn pane_ttys(panes: &[Fields]) -> Vec<String> {
+    let mut ttys: Vec<String> = Vec::new();
+    for pane in panes {
+        let tty = pane.get("pane_tty");
+        let tty = tty.strip_prefix("/dev/").unwrap_or(tty);
+        if !tty.is_empty() && !ttys.iter().any(|seen| seen == tty) {
+            ttys.push(tty.to_string());
+        }
+    }
+    ttys
 }
 
 /// Python's `int(value)` of a JSON value: a whole number, a number cut at the point, a bool or a number in text.
@@ -273,7 +320,22 @@ struct Scan {
 struct Codex<'a> {
     host: &'a dyn Host,
     home: PathBuf,
+    /// The ttys of the panes: the table is the processes on them, not every process.
+    ttys: Vec<String>,
     scan: Option<Scan>,
+}
+
+impl Codex<'_> {
+    /// The processes on the ttys of the panes, in the form the Codex lookup reads. When `ps` cannot take
+    /// the list (a pane whose tty is gone), or there is none, every process.
+    fn processes(&self) -> Result<Table> {
+        if !self.ttys.is_empty()
+            && let Ok(table) = procs::process_table(self.host, None, Some(&self.ttys.join(",")))
+        {
+            return Ok(table);
+        }
+        procs::process_table(self.host, None, None)
+    }
 }
 
 impl Codex<'_> {
@@ -281,9 +343,8 @@ impl Codex<'_> {
     /// or with `error`, the reason it cannot be told.
     fn identify(&mut self, pane: &Fields) -> Option<Value> {
         let host = self.host;
-        let scan = self
-            .scan
-            .get_or_insert_with(|| match procs::process_table(host, None, None) {
+        if self.scan.is_none() {
+            self.scan = Some(match self.processes() {
                 Ok(processes) => Scan {
                     processes,
                     error: None,
@@ -293,6 +354,8 @@ impl Codex<'_> {
                     error: Some(e.to_string()),
                 },
             });
+        }
+        let scan = self.scan.as_ref().expect("scanned above");
         if let Some(error) = &scan.error
             && pane.get("pane_current_command") == "codex"
         {
@@ -459,7 +522,8 @@ fn save_locked(root: &Path, tmux: &Tmux, host: &dyn Host, force: bool) -> Result
     if panes.is_empty() {
         return Ok(Saved::Nothing);
     }
-    let table = process_table(host)?;
+    let ttys = pane_ttys(&panes);
+    let table = process_table_on(host, &ttys)?;
 
     // Every pane gets an identity, in one tmux call.
     let kept: Vec<&Fields> = panes
@@ -500,6 +564,7 @@ fn save_locked(root: &Path, tmux: &Tmux, host: &dyn Host, force: bool) -> Result
         codex: Codex {
             host,
             home: codex_home(),
+            ttys,
             scan: None,
         },
     };
@@ -1191,6 +1256,92 @@ mod tests {
         assert!(process_table(&FakeHost::new()).is_err());
     }
 
+    fn pane_on(tty: &str) -> Fields {
+        let mut pane = Fields::default();
+        pane.set("pane_tty", tty);
+        pane
+    }
+
+    #[test]
+    fn the_ttys_of_the_panes_are_named_as_ps_names_them_and_listed_once() {
+        let panes = [
+            pane_on("/dev/ttys001"),
+            pane_on("/dev/ttys002"),
+            pane_on("/dev/ttys001"),
+            pane_on(""),
+            pane_on("/dev/pts/3"),
+            pane_on("ttys009"),
+        ];
+        assert_eq!(
+            pane_ttys(&panes),
+            ["ttys001", "ttys002", "pts/3", "ttys009"]
+        );
+        assert!(pane_ttys(&[]).is_empty());
+    }
+
+    /// Three ttys: 100 and 200 are on the first, 300 on the second, 400 on a tty that has no pane.
+    fn host_with_four_processes() -> FakeHost {
+        let mut host = FakeHost::new();
+        for (pid, tty) in [
+            (100, "ttys001"),
+            (200, "ttys001"),
+            (300, "ttys002"),
+            (400, "ttys003"),
+        ] {
+            host.procs.insert(
+                pid,
+                Proc {
+                    pgid: pid,
+                    tpgid: pid,
+                    lstart: format!("birth {pid}"),
+                    ..Proc::new(1, tty, "sh")
+                },
+            );
+        }
+        host
+    }
+
+    #[test]
+    fn the_table_of_a_save_is_the_processes_on_the_ttys_of_the_panes_from_one_ps_call() {
+        let host = host_with_four_processes();
+        let table = process_table_on(&host, &["ttys001".into(), "ttys002".into()]).unwrap();
+        let mut pids: Vec<_> = table.keys().copied().collect();
+        pids.sort();
+        assert_eq!(pids, [100, 200, 300]);
+        assert_eq!(table[&300], (1, 300, 300, "birth 300".to_string()));
+        let calls = host.calls_to("ps");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0][1..],
+            ["-t", "ttys001,ttys002", "-o", PROCESS_COLUMNS]
+        );
+    }
+
+    #[test]
+    fn the_table_of_a_save_is_every_process_when_ps_refuses_the_list_of_ttys() {
+        // A pane whose tty is gone makes `ps -t` fail for all of them.
+        let host = Failing {
+            host: host_with_four_processes(),
+            program: "ps",
+            word: "-t",
+            error: "ps: no such tty",
+        };
+        let table = process_table_on(&host, &["ttys001".into(), "gone".into()]).unwrap();
+        assert_eq!(table.len(), 4, "nothing is missed for it");
+        let calls = host.host.calls_to("ps");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][1], "-t");
+        assert_eq!(calls[1][1..], ["-axo", PROCESS_COLUMNS]);
+    }
+
+    #[test]
+    fn the_table_of_a_save_is_every_process_when_no_pane_has_a_tty() {
+        let host = host_with_four_processes();
+        assert_eq!(process_table_on(&host, &[]).unwrap().len(), 4);
+        assert_eq!(host.calls_to("ps").len(), 1);
+        assert_eq!(host.calls_to("ps")[0][1], "-axo");
+    }
+
     /// Pane shell 100 > app 200 (foreground) > helper 300 (background job); 600 is below the shell with no
     /// foreground group on its tty. 400, 401 and 500 are not below the pane.
     fn processes() -> ProcessTable {
@@ -1397,6 +1548,7 @@ mod tests {
         Codex {
             host,
             home: PathBuf::from("/nonexistent"),
+            ttys: Vec::new(),
             scan: None,
         }
     }
@@ -1432,6 +1584,62 @@ mod tests {
         // The same failure says nothing about a pane that does not run Codex.
         assert_eq!(codex.identify(&codex_pane("zsh", "")), None);
         assert_eq!(host.calls_to("ps").len(), 1, "the scan is made once");
+    }
+
+    #[test]
+    fn the_codex_scan_reads_the_processes_on_the_ttys_of_the_panes_only() {
+        let mut host = codex_machine();
+        // A process on another tty, which no pane has, is not asked for.
+        host.procs.insert(900, Proc::new(1, "ttys099", "codex"));
+        let mut codex = Codex {
+            ttys: vec!["ttys001".into(), "ttys002".into()],
+            ..lookup(&host)
+        };
+        let pane = codex_pane("codex", "codex | unknown");
+        // Found, as with every process: the shell below the pane's process owns it.
+        let found = codex.identify(&pane).expect("a Codex in the pane");
+        assert_eq!(found["pid"], 200);
+        assert_eq!(found["birth"], "birth");
+        assert_eq!(
+            found["error"],
+            "Codex has not published a current thread-id title"
+        );
+        let calls = host.calls_to("ps");
+        let scans: Vec<_> = calls.iter().filter(|call| call[1] == "-t").collect();
+        assert_eq!(scans.len(), 1, "{calls:?}");
+        assert_eq!(
+            scans[0][1..],
+            ["-t", "ttys001,ttys002", "-o", "pid=,ppid=,tty=,comm="]
+        );
+        assert!(
+            calls.iter().all(|call| call[1] != "-axo"),
+            "no scan of every process: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn the_codex_scan_reads_every_process_when_ps_refuses_the_list_of_ttys() {
+        let host = Failing {
+            host: codex_machine(),
+            program: "ps",
+            word: "-t",
+            error: "ps: no such tty",
+        };
+        let mut codex = Codex {
+            ttys: vec!["ttys001".into(), "gone".into()],
+            ..lookup(&host)
+        };
+        let found = codex
+            .identify(&codex_pane("codex", "codex | unknown"))
+            .expect("a Codex in the pane");
+        assert_eq!(found["pid"], 200);
+        let calls = host.host.calls_to("ps");
+        let scans: Vec<_> = calls
+            .iter()
+            .filter(|call| call[1] == "-t" || call[1] == "-axo")
+            .collect();
+        assert_eq!(scans.len(), 2, "{calls:?}");
+        assert_eq!(scans[1][1..], ["-axo", "pid=,ppid=,tty=,comm="]);
     }
 
     /// A machine whose commands fail on request. Every command is recorded, the failing ones too.
@@ -1761,6 +1969,16 @@ mod tests {
     }
 
     // ---- files
+
+    #[test]
+    fn a_file_is_flushed_with_fsync() {
+        let dir = TempDir::new();
+        let file = File::create(dir.path().join("f")).unwrap();
+        assert!(fsync(&file).is_ok());
+        // The descriptor is the file's own: a file opened for reading only is flushed as well.
+        let read = File::open(dir.path().join("f")).unwrap();
+        assert!(fsync(&read).is_ok());
+    }
 
     #[test]
     fn atomic_replaces_the_file_and_leaves_nothing_behind() {

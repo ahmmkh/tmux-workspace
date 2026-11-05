@@ -391,10 +391,11 @@ impl FakeHost {
             ["-axo", "pid=,ppid=,tty=,comm="] => {
                 self.procs.iter().map(|(&pid, p)| table((pid, p))).collect()
             }
-            ["-t", tty, "-o", "pid=,ppid=,tty=,comm="] => self
+            // One tty, or several separated by commas.
+            ["-t", ttys, "-o", "pid=,ppid=,tty=,comm="] => self
                 .procs
                 .iter()
-                .filter(|(_, p)| p.tty == *tty)
+                .filter(|(_, p)| ttys.split(',').any(|tty| p.tty == tty))
                 .map(|(&pid, p)| table((pid, p)))
                 .collect(),
             ["-ww", "-p", pid, "-o", "args="] => vec![self.proc(pid)?.1.args.clone()],
@@ -406,6 +407,12 @@ impl FakeHost {
             ["-axo", "pid=,ppid=,pgid=,tpgid=,lstart="] => self
                 .procs
                 .iter()
+                .map(|(pid, p)| format!("{pid} {} {} {} {}", p.ppid, p.pgid, p.tpgid, p.lstart))
+                .collect(),
+            ["-t", ttys, "-o", "pid=,ppid=,pgid=,tpgid=,lstart="] => self
+                .procs
+                .iter()
+                .filter(|(_, p)| ttys.split(',').any(|tty| p.tty == tty))
                 .map(|(pid, p)| format!("{pid} {} {} {} {}", p.ppid, p.pgid, p.tpgid, p.lstart))
                 .collect(),
             _ => return Err(Error::Msg(format!("FakeHost: unexpected ps {args:?}"))),
