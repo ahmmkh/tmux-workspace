@@ -1418,10 +1418,9 @@ mod tests {
         host
     }
 
-    /// test_performance.py::Saves, first half: when the process scan fails the history is still saved,
-    /// with an explicit recovery error where Codex ran.
+    /// The scan error of a failed process table, as a pane that runs Codex gets it.
     #[test]
-    fn identity_timeout_still_saves_history_with_explicit_recovery_error() {
+    fn a_failed_codex_scan_marks_only_the_panes_that_run_codex() {
         // The scan fails (a FakeHost without processes answers like a ps that found nothing).
         let host = FakeHost::new();
         let mut codex = lookup(&host);
@@ -1435,38 +1434,218 @@ mod tests {
         assert_eq!(host.calls_to("ps").len(), 1, "the scan is made once");
     }
 
-    #[test]
-    fn a_failing_codex_scan_does_not_stop_the_save() {
-        /// The Codex scan times out; everything else works.
-        struct ScanTimesOut(FakeHost);
-        impl Host for ScanTimesOut {
-            fn run(&self, argv: &[String]) -> Result<String> {
-                if argv.iter().any(|arg| arg == "pid=,ppid=,tty=,comm=") {
-                    self.0.calls.borrow_mut().push(argv.to_vec());
-                    return fail("timed out: ps");
-                }
-                self.0.run(argv)
-            }
+    /// A machine whose commands fail on request. Every command is recorded, the failing ones too.
+    struct Failing {
+        host: FakeHost,
+        /// The program (`lsof`, `ps`) and a word of its arguments that make the command fail.
+        program: &'static str,
+        word: &'static str,
+        error: &'static str,
+    }
 
-            fn parent_pid(&self) -> i32 {
-                0
+    impl Host for Failing {
+        fn run(&self, argv: &[String]) -> Result<String> {
+            let program = argv
+                .first()
+                .map_or("", |p| p.rsplit('/').next().unwrap_or(p));
+            if program == self.program && argv.iter().any(|arg| arg == self.word) {
+                self.host.calls.borrow_mut().push(argv.to_vec());
+                return fail(self.error);
             }
+            self.host.run(argv)
         }
+
+        fn parent_pid(&self) -> i32 {
+            0
+        }
+    }
+
+    /// An executable named `codex` that sleeps. A symlink would show up as `sleep` in tmux on macOS, and a
+    /// plain copy of a system program is killed there, so the copy gets an ad-hoc signature.
+    fn codex_program(dir: &Path) -> PathBuf {
+        let program = dir.join("codex");
+        fs::copy(
+            crate::process::which("sleep").expect("sleep on PATH"),
+            &program,
+        )
+        .unwrap();
+        if cfg!(target_os = "macos") {
+            let signed = std::process::Command::new("codesign")
+                .args(["-s", "-", "-f"])
+                .arg(&program)
+                .output()
+                .expect("codesign");
+            assert!(signed.status.success(), "{signed:?}");
+        }
+        let runs = std::process::Command::new(&program)
+            .arg("0")
+            .status()
+            .unwrap();
+        assert!(
+            runs.success(),
+            "a copy of sleep named codex does not run: {runs}"
+        );
+        program
+    }
+
+    /// Alpha's pane `one` runs `sleep`. A second pane, with identity `aaa...` and label `agent`, shows
+    /// `saved text` and then runs a program that tmux knows as `codex`, under a title that names a thread.
+    /// The machine lists that process on the pane's tty, in the foreground, as Codex.
+    struct CodexPane {
+        scratch: ScratchTmux,
+        tmux: Tmux,
+        root: TempDir,
+        _program: TempDir,
+    }
+
+    const CODEX_PANE_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn codex_pane_world() -> (CodexPane, FakeHost) {
         let scratch = ScratchTmux::new();
-        let root = TempDir::new();
+        let program_dir = TempDir::new();
+        let program = codex_program(program_dir.path());
+        let command = format!("printf 'saved text\\n'; exec '{}' 300", program.display());
+        let pane = scratch.tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "alpha:",
+            "-n",
+            "agent",
+            &command,
+        ]);
+        crate::testing::wait_for(|| scratch.expand(&pane, "#{pane_current_command}"), "codex");
+        crate::testing::wait_for(
+            || {
+                scratch
+                    .tmux(&["capture-pane", "-p", "-t", &pane])
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            },
+            "saved text",
+        );
+        scratch.tmux(&[
+            "select-pane",
+            "-t",
+            &pane,
+            "-T",
+            &format!("codex | {THREAD}"),
+        ]);
+        scratch.tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "@workspace_id",
+            CODEX_PANE_ID,
+        ]);
+        scratch.tmux(&["set-option", "-p", "-t", &pane, "@workspace_label", "agent"]);
+        let pid: i32 = scratch.expand(&pane, "#{pane_pid}").parse().unwrap();
+        let tty = scratch.expand(&pane, "#{pane_tty}");
         let mut host = FakeHost::new();
-        host.procs.insert(1, Proc::new(0, "??", "launchd"));
-        let host = ScanTimesOut(host);
+        host.procs.insert(
+            pid,
+            Proc {
+                args: "codex 300".into(),
+                pgid: pid,
+                tpgid: pid,
+                lstart: "Mon Sep 28 07:00:00 2026".into(),
+                ..Proc::new(1, tty.trim_start_matches("/dev/"), "codex")
+            },
+        );
         let tmux = Tmux::new().socket(scratch.socket());
-        save_in(root.path(), &tmux, &host, true).unwrap();
-        let (_, data) = read_snapshot_in(root.path()).unwrap().unwrap();
-        let pane = &data["panes"][0];
-        assert!(pane["app"].is_null(), "a sleep is no Codex: {pane}");
-        let text = root.path().join("snapshots");
-        let folder = fs::read_dir(&text).unwrap().next().unwrap().unwrap().path();
-        let id = pane["id"].as_str().unwrap();
-        assert!(folder.join(format!("{id}.txt")).is_file());
-        assert_eq!(host.0.calls_to("ps").len(), 2);
+        let world = CodexPane {
+            scratch,
+            tmux,
+            root: TempDir::new(),
+            _program: program_dir,
+        };
+        (world, host)
+    }
+
+    /// The record of the Codex pane in the latest snapshot, and its saved terminal text.
+    fn saved_codex_pane(world: &CodexPane) -> (Value, String) {
+        let (path, data) = read_snapshot_in(world.root.path()).unwrap().unwrap();
+        let record = data["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|pane| pane["id"] == json!(CODEX_PANE_ID))
+            .unwrap_or_else(|| panic!("the Codex pane is not in the snapshot: {data}"))
+            .clone();
+        let text = fs::read_to_string(path.parent().unwrap().join(format!("{CODEX_PANE_ID}.txt")));
+        (record, text.unwrap())
+    }
+
+    /// test_performance.py::Saves, first half. The process table is read, the lookup for the one pane that
+    /// runs Codex then fails (here `lsof` times out, where Python's resolver raised `TimeoutExpired`). The
+    /// save still completes, the record carries the reason, and the pane's terminal text is saved.
+    #[test]
+    fn identity_timeout_still_saves_history_with_explicit_recovery_error() {
+        let (world, machine) = codex_pane_world();
+        let host = Failing {
+            host: machine,
+            program: "lsof",
+            word: "-Ffan",
+            error: "timed out: lsof",
+        };
+        save_in(world.root.path(), &world.tmux, &host, true).unwrap();
+        assert_eq!(
+            host.host.calls_to("lsof").len(),
+            1,
+            "the lookup ran and failed"
+        );
+        let (record, text) = saved_codex_pane(&world);
+        assert_eq!(
+            record["app"],
+            json!({"kind": "codex", "error": "Identity lookup failed: timed out: lsof"})
+        );
+        assert_eq!(text, "saved text\n");
+        // The pane that runs no Codex is saved too, without an application.
+        let (_, data) = read_snapshot_in(world.root.path()).unwrap().unwrap();
+        assert_eq!(data["panes"].as_array().unwrap().len(), 2);
+        assert!(data["panes"][0]["app"].is_null(), "{}", data["panes"][0]);
+        assert_eq!(
+            world
+                .scratch
+                .tmux(&["show-options", "-gqv", "@workspace_save_error"]),
+            ""
+        );
+    }
+
+    /// The process table itself cannot be read: the Codex pane gets that error as its reason, and again
+    /// the pane's text is saved.
+    #[test]
+    fn a_failed_process_scan_still_saves_a_codex_pane_with_the_scan_error() {
+        let (world, machine) = codex_pane_world();
+        let host = Failing {
+            host: machine,
+            program: "ps",
+            word: "pid=,ppid=,tty=,comm=",
+            error: "timed out: ps",
+        };
+        save_in(world.root.path(), &world.tmux, &host, true).unwrap();
+        assert!(
+            host.host.calls_to("lsof").is_empty(),
+            "no lookup after a failed scan"
+        );
+        let (record, text) = saved_codex_pane(&world);
+        assert_eq!(
+            record["app"],
+            json!({"kind": "codex", "error": "timed out: ps"})
+        );
+        assert_eq!(text, "saved text\n");
+        let (_, data) = read_snapshot_in(world.root.path()).unwrap().unwrap();
+        assert!(
+            data["panes"][0]["app"].is_null(),
+            "a sleep is no Codex: {}",
+            data["panes"][0]
+        );
     }
 
     #[test]
