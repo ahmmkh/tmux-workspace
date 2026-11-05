@@ -131,11 +131,21 @@ pub fn run(argv: &[&str]) -> Result<Output> {
 
 /// Replace this process with the command. Returns only when that fails.
 pub fn exec(argv: &[String]) -> Error {
+    exec_with_env(argv, &[])
+}
+
+/// Like `exec`, and the new program sees these variables set as well.
+pub fn exec_with_env(argv: &[String], env: &[(&str, &str)]) -> Error {
     let Some((program, args)) = argv.split_first() else {
         return Error::Msg("empty command".into());
     };
     trace(argv);
-    Error::Io(Command::new(program).args(args).exec())
+    Error::Io(
+        Command::new(program)
+            .args(args)
+            .envs(env.iter().copied())
+            .exec(),
+    )
 }
 
 /// Find an executable the way `shutil.which` does: a name with a slash is checked as it is, any
@@ -157,7 +167,8 @@ fn which_in(name: &str, path: &OsStr) -> Option<PathBuf> {
         .find(|candidate| executable(candidate))
 }
 
-fn executable(path: &Path) -> bool {
+/// A regular file the user may run: Python's `isfile` and `os.access(X_OK)`.
+pub fn executable(path: &Path) -> bool {
     let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };

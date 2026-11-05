@@ -6,10 +6,12 @@ pub mod hook;
 pub mod host;
 pub mod model;
 pub mod onboarding;
+pub mod pane;
 pub mod paths;
 pub mod process;
 pub mod pyjson;
 pub mod sha256;
+pub mod snapshot;
 pub mod text;
 pub mod tmux;
 

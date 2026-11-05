@@ -280,7 +280,8 @@ fn non_empty(value: Option<OsString>) -> Option<OsString> {
     value.filter(|v| !v.is_empty())
 }
 
-fn cannot_read(path: &Path, why: impl Display) -> Error {
+/// The error for a failed read: the path leads, because the bare OS text does not say where.
+pub fn cannot_read(path: &Path, why: impl Display) -> Error {
     Error::Msg(format!("Cannot read {}: {why}", path.display()))
 }
 
@@ -323,8 +324,12 @@ enum Lookup<'a> {
     Name(&'a CStr),
 }
 
-/// The home folder of a user from the password database.
-fn passwd_home(lookup: Lookup) -> Option<PathBuf> {
+/// One text field of a user's password database entry (`pw_dir`, `pw_shell`). `None` when there is
+/// no such user, or the field is missing or empty.
+fn passwd_field(
+    lookup: Lookup,
+    field: fn(&libc::passwd) -> *const libc::c_char,
+) -> Option<OsString> {
     let mut buffer = vec![0u8; 1024];
     loop {
         // SAFETY: an all-zero `passwd` is valid plain data, and `getpw*_r` fills it in. It writes
@@ -353,14 +358,29 @@ fn passwd_home(lookup: Lookup) -> Option<PathBuf> {
             buffer.resize(buffer.len() * 2, 0);
             continue;
         }
-        if status != 0 || found.is_null() || entry.pw_dir.is_null() {
+        let text = field(&entry);
+        if status != 0 || found.is_null() || text.is_null() {
             return None;
         }
-        // SAFETY: `pw_dir` is a NUL-terminated string inside `buffer`.
-        let dir = unsafe { CStr::from_ptr(entry.pw_dir) };
-        return (!dir.to_bytes().is_empty())
-            .then(|| PathBuf::from(OsStr::from_bytes(dir.to_bytes())));
+        // SAFETY: the field is a NUL-terminated string inside `buffer`.
+        let text = unsafe { CStr::from_ptr(text) };
+        return (!text.to_bytes().is_empty())
+            .then(|| OsStr::from_bytes(text.to_bytes()).to_owned());
     }
+}
+
+/// The home folder of a user from the password database.
+fn passwd_home(lookup: Lookup) -> Option<PathBuf> {
+    passwd_field(lookup, |entry| entry.pw_dir).map(PathBuf::from)
+}
+
+/// The login shell the password database gives this account: empty when there is none.
+pub fn account_shell() -> String {
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    passwd_field(Lookup::Uid(uid), |entry| entry.pw_shell)
+        .map(|shell| shell.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn user_home(name: &OsStr) -> Option<PathBuf> {

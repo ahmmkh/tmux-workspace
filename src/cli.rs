@@ -3,6 +3,7 @@
 use crate::error::{Error, Result, fail};
 use crate::hook;
 use crate::onboarding;
+use crate::pane;
 use crate::tmux::Tmux;
 use std::io::Write;
 
@@ -51,6 +52,15 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         // The hook never fails, and nothing else may write: it is not subject to the error contract.
         "agent-hook" => Ok(hook::main(args)),
         "setup" => onboarding::setup(args),
+        // Runs in every new pane before the user's shell, and ends by becoming that shell.
+        "pane-start" => pane::pane_start(
+            &Tmux::new(),
+            args.first().map(String::as_str),
+            args.get(1).map(String::as_str),
+        )
+        .map(|()| 0),
+        "exec-shell" => Err(pane::exec_shell(&Tmux::new())),
+        "label" => pane::label(&Tmux::new(), args.first().map(String::as_str)).map(|()| 0),
         _ => fail(format!("Unknown workspace command: {command}")),
     }
 }
