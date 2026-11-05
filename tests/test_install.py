@@ -436,6 +436,22 @@ class Installer(unittest.TestCase):
         self.install('--deps', '--yes')
         self.assertIn('install fzf zoxide', brew.read_text())
 
+    def test_deps_installs_procps_on_alpine_where_ps_is_busybox(self):
+        apk = self.work / 'apk.log'
+        self.stub('apk', f'echo "$*" >> {apk}')
+        self.stub('sudo', 'exec "$@"')
+        self.stub('zoxide')
+        self.stub('ps', 'exit 1')  # BusyBox's: no -p, -t, lstart or tpgid, which agent status and save use
+        out = self.install('--yes').stdout
+        self.assertIn('procps: agent status and snapshots need its ps (sudo apk add procps)', out)
+        self.install('--deps', '--yes')
+        self.assertEqual(apk.read_text(), 'add -q procps\n')
+        apk.unlink()
+        self.stub('ps', 'exit 0')  # procps
+        out = self.install('--deps', '--yes').stdout
+        self.assertFalse(apk.exists())
+        self.assertNotIn('procps', out)
+
     def test_cancelling_the_projects_question_still_finishes_the_install(self):
         import fcntl
         import pty

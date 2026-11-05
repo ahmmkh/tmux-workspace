@@ -25,6 +25,11 @@ checks() {
     grep -q 'tmux version' "$HOME/doctor.log" || { cat "$HOME/doctor.log"; exit 1; }
     grep WARN "$HOME/doctor.log" || true
 
+    # Agent status and snapshots read processes with procps' ps; on Alpine, --deps installs it.
+    if command -v apk >/dev/null 2>&1; then
+        ps -p $$ -o pid=,tpgid=,lstart= >/dev/null 2>&1 || fail 'ps is not procps: --deps did not install it'
+    fi
+
     # The agent hook says nothing and succeeds, whatever it is given.
     for payload in '{"hook_event_name": "PreToolUse", "tool_name": "Bash"}' '{"session_id": "abc"}' 'not json' ''; do
         out=$(printf '%s' "$payload" | tmux-workspace agent-hook claude 2>&1) || fail "agent-hook failed on: $payload"

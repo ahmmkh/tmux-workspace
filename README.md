@@ -106,7 +106,10 @@ tests on every platform below.
 | Debian 12, Ubuntu 24.04 | `sudo apt-get install tmux fzf zoxide` |
 | Fedora | `sudo dnf install tmux fzf zoxide` |
 | Arch | `sudo pacman -S tmux fzf zoxide` |
-| Alpine | `sudo apk add bash tmux fzf zoxide` |
+| Alpine | `sudo apk add bash tmux fzf zoxide procps` |
+
+On Alpine, agent status and snapshots need procps: they read processes with its `ps`, and BusyBox's
+lacks the options they use. `install.sh --deps` installs it.
 
 **Python 3.9 or newer** is needed only for the dashboard (`Ctrl+a A`), the AI tools (`Ctrl+a a`) and
 the clean-up (`Ctrl+a C`), until they are ported to Rust. Without it the installer warns, everything
@@ -248,6 +251,10 @@ Your snapshots and `~/.config/tmux-workspace` stay, and so does the folder `~/.l
 - **Something looks wrong:** run `tmux-workspace doctor` (or `Ctrl+a D`). It checks the tmux
   version, the links, the clipboard and sound tools, the hooks and the last autosave.
 - **Marks show as `_`:** your locale is not UTF-8. Set `LANG=en_US.UTF-8` (or `C.UTF-8`).
+- **On tmux 3.3, save, park and the pickers fail with `A workspace name or directory contains
+  unsupported control characters`:** the tmux server started without a UTF-8 locale, and then tmux
+  3.3 prints the field separator of its formats as `_`. Set `LANG=C.UTF-8` (or `en_US.UTF-8`) in
+  your shell profile, then restart tmux (`tmux kill-server`) from a new shell.
 - **Copy does not reach the clipboard on Linux:** install `wl-clipboard` (Wayland) or `xclip`
   (X11). Over SSH, your terminal must allow OSC 52.
 - **No sound on Linux:** install PipeWire (`pw-play`) or PulseAudio (`paplay`) and the freedesktop

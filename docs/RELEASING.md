@@ -20,6 +20,13 @@ For the maintainer: how a release is cut, and how the install and traffic number
    git push origin v2.0.0
    ```
 
+   **The first release after merging `rust-core` (v2.0.0) is tagged right after the merge.** The
+   one-line install runs `install.sh` from `main`, which downloads
+   `releases/latest/download/tmux-workspace-<target>.tar.gz`. Until the publish job has attached the
+   v2.0.0 archives, there is no such file and every one-line install fails. So merge, wait for CI on
+   `main`, tag at once, and then install the release as a stranger would (the scratch-home check
+   at the end of "If a release goes wrong").
+
 A tag with a hyphen (`v2.1.0-rc1`) makes a prerelease, which `releases/latest` never points at, so the
 one-line install and `work update` ignore it.
 

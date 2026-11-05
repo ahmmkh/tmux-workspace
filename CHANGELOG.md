@@ -27,6 +27,8 @@ with 5 panes:
   clone's version when there is no cargo.
 - Python 3.9 or newer is needed only for `dash`, `ai` and `cleanup` until they are ported. Without
   it the installer warns and goes on; `--deps` no longer installs Python.
+- On Alpine, `--deps` installs procps: agent status and snapshots read processes with its `ps`, and
+  BusyBox's lacks the options they use.
 
 ### Added
 
@@ -70,6 +72,18 @@ with 5 panes:
   instead of giving up on the whole save.
 - Ctrl-C at the label prompt of a new pane keeps the pane, and Ctrl-C while an app is being reopened
   goes to the app.
+- `work update` updates tmux-workspace, so a workspace named `update` opens with `work ./update`.
+- A config or settings file that is not valid JSON is reported in the words of Rust's JSON library
+  (`key must be a string at line 1 column 2`) instead of Python's (`Expecting property name enclosed
+  in double quotes: line 1 column 2 (char 1)`).
+
+### Known issues
+
+- On tmux 3.4, a label, session or window name that contains `$` gains a backslash each time it is
+  restored, because tmux 3.4 prints `$` as `\$`. 1.x does the same; the fix is planned for 2.0.1.
+- On tmux 3.3, the tmux server needs a UTF-8 locale (for example `LANG=C.UTF-8`). Without one, save,
+  park and the pickers fail with `A workspace name or directory contains unsupported control
+  characters`. 1.x does the same; see Troubleshooting in the README.
 
 ## 1.0.0 — 2026-11-05
 

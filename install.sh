@@ -823,6 +823,11 @@ check_requirements() {
     for tool in fzf zoxide; do
         has "$tool" || recommended="$recommended $tool"
     done
+    # Alpine's ps is BusyBox's, which lacks the options agent status and snapshots read processes with.
+    if [ "$PM" = apk ] && ! ps -p $$ -o pid=,tpgid=,lstart= >/dev/null 2>&1; then
+        optional="$optional procps"
+        recommended="$recommended procps"
+    fi
     [ -z "$old" ] || upgrade=" tmux"
 
     if [ "$DEPS" = 1 ] && [ "$DRY" = 0 ] && [ -n "$missing$upgrade$recommended" ]; then
@@ -845,6 +850,7 @@ check_requirements() {
             git) say optional "git: lazygit and updating a clone use it" ;;
             sesh) say optional "sesh: picker fallback without fzf" ;;
             lazygit) say optional "lazygit: Ctrl+a g opens it in a popup" ;;
+            procps) say optional "procps: agent status and snapshots need its ps ($(install_command procps))" ;;
         esac
     done
 }

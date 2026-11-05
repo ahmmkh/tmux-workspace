@@ -561,25 +561,28 @@ The Claude Code status has two limits.
 
 ### Repeatable verification
 
-From the project root, run the deterministic suite without provider access:
+From the project root, run the checks that CI runs. None of them needs provider access:
 
 ```sh
-python3 -W error::ResourceWarning -m unittest discover -s tests -q
+make lint          # shellcheck, bash -n, a Python compile check, clippy, rustfmt, actionlint (when installed)
+make test          # cargo test --features testing, then the Python suite
+make test-install  # install.sh in fresh Ubuntu, Debian, Fedora, Arch and Alpine containers (needs Docker)
+make bench         # the five hot paths against the Python of 1.0.0 (needs hyperfine)
 ```
 
-The suite includes `tests/test_agent_status_tmux.py`, which checks the agent status marks
-on a scratch tmux server. That server uses its own socket and never loads `~/.tmux.conf`,
-so the test cannot touch the running workspaces. Run it alone with this command:
+A test that needs tmux starts a scratch server on its own socket that never loads
+`~/.tmux.conf`, with a temporary state folder, so the tests cannot touch the running
+workspaces. `make test` leaves `bin/tmux-workspace` as it is: it tests the debug build in
+`target/`.
+
+How the agent hook maps the state of Claude Code, Codex and omp to a status is tested in
+Rust (`tests/hook_tmux.rs` and the unit tests in `src/hook/`), and so are the roll-up and the
+rows of the pickers (`src/model.rs`, `src/pick.rs`, `tests/pickers.rs`). The marks themselves,
+from `agent-status.conf`, are checked by `tests/test_agent_status_tmux.py`. Run it alone with
+this command:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_agent_status_tmux.py'
-```
-
-`tests/test_agent_status.py` checks how the helper maps the state of Claude Code to a
-status. It also checks the roll-up and the rows of the pickers. The hooks run the helper under `/usr/bin/python3`, so run that test under it too:
-
-```sh
-/usr/bin/python3 -B -m unittest discover -s tests -p 'test_agent_status.py'
 ```
 
 The opt-in live suite uses the configured OpenRouter key and consumes API credit.
