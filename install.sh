@@ -29,6 +29,9 @@ Usage: install.sh [options]
   --no-tmux-conf    do not link ~/.tmux.conf
   --yes, -y         answer yes: replace an existing ~/.tmux.conf (a backup is kept)
   --version vX.Y.Z  install that release instead of the latest
+  --update          update an install to the latest release (a clone: git pull), keeping
+                    its choices; `tmux-workspace update` runs this
+  --check           with --update: only say whether there is an update
   --dry-run         print what would change and change nothing
   --uninstall       remove the links and shell lines, and restore the backups
   -h, --help        show this help
@@ -43,7 +46,7 @@ EOF
 say() { printf '%-8s %s\n' "$1" "$2"; }
 die() { printf 'error    %s\n' "$1" >&2; exit "${2:-1}"; }
 
-DEPS=0 AGENTS=0 SHELLS=1 TMUXCONF=1 DRY=0 YES=0 UNINSTALL=0 PROJECTS='' WANTED=''
+DEPS=0 AGENTS=0 SHELLS=1 TMUXCONF=1 DRY=0 YES=0 UNINSTALL=0 UPDATE=0 CHECK=0 PROJECTS='' WANTED=''
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do
     case $1 in
@@ -58,11 +61,21 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY=1 ;;
         --yes|-y) YES=1 ;;
         --uninstall) UNINSTALL=1 ;;
+        --update) UPDATE=1 ;;
+        --check) CHECK=1 ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
+if { [ "$CHECK" = 1 ] && [ "$UPDATE" = 0 ]; } || { [ "$UPDATE" = 1 ] && [ "$UNINSTALL" = 1 ]; }; then
+    printf '%s\n\n' '--check goes with --update, and --update not with --uninstall' >&2
+    usage >&2
+    exit 2
+fi
+# An update hands over to the installer of the new version; this names the version it came from.
+UPDATE_FROM=${TMUX_WORKSPACE_UPDATE_FROM:-}
+unset TMUX_WORKSPACE_UPDATE_FROM
 if [ -n "$WANTED" ]; then
     if printf '%s\n' "$WANTED" | grep -Eq '^v?[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$'; then
         WANTED=v${WANTED#v}
@@ -88,6 +101,8 @@ HOME_SHARE=''   # for a release: the folder of the unpacked versions and the `cu
 OWN=''          # links that lead under this folder belong to the installation
 STAGE=''        # a temporary folder with a download; removed on exit
 STAGED=''       # the release unpacked in it
+UPDATED_FROM='' # what git_update updated from: nothing when the clone was up to date
+NEW_BINARY='' NEW_STAMP=''  # the binary git_update had for the new version, and its release
 
 # ---------------------------------------------------------------------------------------------
 # Helpers
@@ -153,6 +168,25 @@ release_version() { head -n 1 "$1/VERSION" | tr -d '[:space:]'; }  # of an unpac
 
 tree_version() {  # of a clone: the package version in Cargo.toml
     sed -n 's/^version = "\([^"]*\)".*/\1/p' "$1/Cargo.toml" | head -n 1
+}
+
+version_lt() {  # version_lt 2.0.0 2.0.1: the first X.Y.Z is older
+    awk -v a="${1%%[-+]*}" -v b="${2%%[-+]*}" 'BEGIN {
+        split(a, x, "."); split(b, y, ".")
+        for (i = 1; i <= 3; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 }
+        exit 1
+    }'
+}
+
+# clone_label ROOT REF: the version of the clone at REF and its commit, as in "2.0.1 1a2b3c4". Before
+# the Rust port there was no Cargo.toml: the newest CHANGELOG heading names the version then.
+clone_label() {
+    local version
+    version=$({ git -C "$1" show "$2:Cargo.toml" 2>/dev/null || true; } | awk -F'"' '/^version = "/ { print $2; exit }')
+    if [ -z "$version" ]; then
+        version=$({ git -C "$1" show "$2:CHANGELOG.md" 2>/dev/null || true; } | awk '/^## [0-9]/ { print $2; exit }')
+    fi
+    printf '%s %s\n' "${version:-unknown}" "$(git -C "$1" rev-parse --short "$2")"
 }
 
 # Remove the temporary folder of a download. Every exit runs it.
@@ -354,7 +388,7 @@ settle_release() {
         unset TMUX_WORKSPACE_STAGE
     elif [ -L "$parent/current" ]; then
         HOME_SHARE=$parent
-        if [ -n "$WANTED" ] && [ "${WANTED#v}" != "$(release_version "$REPO")" ] && [ "$UNINSTALL" = 0 ]; then
+        if [ -n "$WANTED" ] && [ "${WANTED#v}" != "$(release_version "$REPO")" ] && [ "$UNINSTALL$UPDATE" = 00 ]; then
             stage_archive "$WANTED"
             run_staged
         fi
@@ -422,6 +456,143 @@ prune_releases() {  # prune_releases HOME KEEP...: remove the other unpacked ver
 }
 
 # ---------------------------------------------------------------------------------------------
+# Updates (--update): the installer of the new version does the install, so its fixes apply too.
+
+latest_version() {  # sets LATEST, the version of the latest release, from the VERSION file it carries
+    remove_stage
+    STAGE=$(mktemp -d)
+    fetch "$(dist_base latest)/VERSION" "$STAGE/VERSION"
+    LATEST=$(head -n 1 "$STAGE/VERSION" | tr -d '[:space:]')
+    remove_stage
+    case $LATEST in
+        [0-9]*.[0-9]*.[0-9]*) ;;
+        *) die "could not tell the latest version from $(dist_base latest)/VERSION" 3 ;;
+    esac
+}
+
+# --update of an installed release: when the wanted release (the latest, or --version) is not the
+# current one, download it and hand over to its installer, which installs it with the choices made
+# before. The latest release only ever replaces an older one. --check only says.
+update_release() {
+    local parent own wanted
+    parent=$(dirname "$REPO")
+    if [ ! -L "$parent/current" ]; then
+        die "$REPO is not an installed release; run its install.sh without --update to install it" 1
+    fi
+    HOME_SHARE=$parent
+    own=$(release_version "$parent/current")
+    if [ -n "$WANTED" ]; then
+        wanted=${WANTED#v}
+    else
+        latest_version
+        wanted=$LATEST
+        version_lt "$own" "$wanted" || wanted=$own
+    fi
+    if [ "$wanted" = "$own" ]; then
+        say "done" "already up to date ($own)"
+        exit 0
+    fi
+    if [ "$CHECK" = 1 ]; then
+        say update "update available: $own → $wanted"
+        exit 0
+    fi
+    stage_archive "v$wanted"
+    TMUX_WORKSPACE_UPDATE_FROM=$own
+    export TMUX_WORKSPACE_UPDATE_FROM
+    run_staged
+}
+
+# --update of a clone: fast-forward it to its upstream, then hand over to the installer that came
+# with the pull, with the choices made before.
+update_clone() {
+    [ -e "$REPO/.git" ] || die "$REPO is neither a git clone nor an installed release; there is nothing to update" 1
+    git_update "$REPO"
+    if [ -z "$UPDATED_FROM" ]; then
+        say "done" "already up to date ($(clone_label "$REPO" HEAD))"
+        exit 0
+    fi
+    TMUX_WORKSPACE_UPDATE_FROM=$UPDATED_FROM
+    export TMUX_WORKSPACE_UPDATE_FROM
+    exec bash "$REPO/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+}
+
+# git_update ROOT: fast-forward the clone at ROOT to its upstream. A clone with uncommitted changes, on
+# another branch than the default one, or with commits of its own is left alone. The binary of the
+# new version is had before the pull and moved into bin/ right after it, so that
+# ~/.local/bin/tmux-workspace never leads to a missing file. Sets UPDATED_FROM to the version it
+# updated from, or to nothing when the clone was up to date. --check only says.
+git_update() {
+    local root=$1 branch default from to
+    UPDATED_FROM=''
+    has git || die "git is needed to update the clone in $root" 3
+    if [ -n "$(git -C "$root" status --porcelain --untracked-files=no)" ]; then
+        die "$root has uncommitted changes; commit or stash them, then update again" 1
+    fi
+    branch=$(git -C "$root" symbolic-ref --quiet --short HEAD || true)
+    default=$(git -C "$root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    default=${default#origin/}
+    default=${default:-main}
+    if [ "$branch" != "$default" ]; then
+        die "$root is on ${branch:-a detached HEAD}, not $default; switch to $default to update it" 1
+    fi
+    git -C "$root" fetch --quiet || die "could not fetch the updates of $root" 3
+    if ! git -C "$root" rev-parse --verify --quiet '@{upstream}' >/dev/null; then
+        die "$default in $root follows no remote branch; there is nothing to update from" 1
+    fi
+    from=$(clone_label "$root" HEAD)
+    [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse '@{upstream}')" ] || return 0
+    if ! git -C "$root" merge-base --is-ancestor HEAD '@{upstream}'; then
+        die "$root has commits that are not upstream; push or drop them, then update again" 1
+    fi
+    to=$(clone_label "$root" '@{upstream}')
+    if [ "$CHECK" = 1 ]; then
+        say update "update available: $from → $to"
+        exit 0
+    fi
+    UPDATED_FROM=$from
+    if [ "$DRY" = 1 ]; then
+        say would "update $root from $from to $to"
+        return 0
+    fi
+    upstream_binary "$root"
+    git -C "$root" merge --ff-only --quiet '@{upstream}' || die "could not fast-forward $root" 1
+    place_binary "$NEW_BINARY" "$root/bin/tmux-workspace" "$root/bin/tmux-workspace.version" "$NEW_STAMP"
+    remove_stage
+    say update "$root from $from to $to"
+    TMUX_WORKSPACE_BINARY=$root/bin/tmux-workspace
+    export TMUX_WORKSPACE_BINARY
+}
+
+# upstream_binary ROOT: the binary of the upstream version of the clone at ROOT, had without touching
+# the clone's files: TMUX_WORKSPACE_BINARY, else built with cargo from `git archive`, else that
+# version's release. Sets NEW_BINARY, and NEW_STAMP to the release it came from.
+upstream_binary() {
+    local root=$1 version target_dir
+    NEW_STAMP=''
+    if [ -n "${TMUX_WORKSPACE_BINARY:-}" ]; then
+        [ -f "$TMUX_WORKSPACE_BINARY" ] || die "TMUX_WORKSPACE_BINARY is not a file: $TMUX_WORKSPACE_BINARY" 3
+        NEW_BINARY=$TMUX_WORKSPACE_BINARY
+    elif has cargo; then
+        remove_stage
+        STAGE=$(mktemp -d)
+        mkdir "$STAGE/src"
+        git -C "$root" archive '@{upstream}' | tar -x -C "$STAGE/src" || die "could not read the new version of $root" 3
+        target_dir=${CARGO_TARGET_DIR:-$root/target}
+        say build "cargo build --release --locked, for the new version"
+        (cd "$STAGE/src" && CARGO_TARGET_DIR=$target_dir cargo build --release --locked) ||
+            die "cargo build failed; $root is unchanged" 3
+        cp "$target_dir/release/tmux-workspace" "$STAGE/tmux-workspace"
+        NEW_BINARY=$STAGE/tmux-workspace
+    else
+        version=$({ git -C "$root" show '@{upstream}:Cargo.toml' 2>/dev/null || true; } | awk -F'"' '/^version = "/ { print $2; exit }')
+        [ -n "$version" ] || die "the new version of $root has no Cargo.toml to name its release" 3
+        stage_archive "v$version"
+        NEW_BINARY=$STAGED/bin/tmux-workspace
+        NEW_STAMP=$version
+    fi
+}
+
+# ---------------------------------------------------------------------------------------------
 # The binary of a clone: given, built with cargo, or downloaded
 
 # place_binary SOURCE DEST STAMP VERSION: copy SOURCE to DEST through a new file, so a running DEST
@@ -467,6 +638,8 @@ install_binary() {
 # ---------------------------------------------------------------------------------------------
 # Requirements
 
+ok() { [ "$UPDATE" = 1 ] || say ok "$1"; }
+
 check_requirements() {
     [ "$CHECKED" = 0 ] || return 0
     CHECKED=1
@@ -476,20 +649,20 @@ check_requirements() {
         if [ -n "$version" ] && ! version_ge "$version" "$TMUX_MIN"; then
             old="tmux $version is older than $TMUX_MIN"
         fi
-        say ok "tmux $(tmux -V 2>/dev/null | sed 's/^tmux //')"
+        ok "tmux $(tmux -V 2>/dev/null | sed 's/^tmux //')"
     else
         missing="$missing tmux"
     fi
     # Only the commands not ported from Python yet need it (stages 2 and 3 of the Rust port).
     version=$(python_version)
     if [ -n "$version" ] && version_ge "$version" "$PYTHON_MIN"; then
-        say ok "python3 $version"
+        ok "python3 $version"
     else
         say warn "python3 $PYTHON_MIN+ not found: dash, ai and cleanup need it until they are ported"
     fi
     local optional='' recommended='' upgrade=''
     for tool in fzf zoxide git sesh lazygit; do
-        if has "$tool"; then say ok "$tool"; else optional="$optional $tool"; fi
+        if has "$tool"; then ok "$tool"; else optional="$optional $tool"; fi
     done
     for tool in fzf zoxide; do
         has "$tool" || recommended="$recommended $tool"
@@ -508,6 +681,7 @@ check_requirements() {
         [ -z "$missing" ] || say missing "$(install_command $missing)"
         die "tmux-workspace needs tmux $TMUX_MIN+; rerun with --deps to install it" 3
     fi
+    [ "$UPDATE" = 0 ] || optional=''  # an update says only what is wrong
     for tool in $optional; do
         case $tool in
             fzf) say optional "fzf: fuzzy workspace and tab pickers ($(install_command fzf))" ;;
@@ -642,23 +816,32 @@ do_install() {
     link "$REPO/bin/tw-clip" "$BIN_DIR/tw-clip"
     link "$REPO/bin/tw-sound" "$BIN_DIR/tw-sound"
     link "$REPO/agent-status.conf" "$STATUS_CONF"
-    [ "$TMUXCONF" = 0 ] || link_asking "$REPO/tmux.conf" "$HOME/.tmux.conf"
-    if has sesh; then link_asking "$REPO/sesh.toml" "$HOME_CONFIG/sesh/sesh.toml"; fi
-    if [ "$SHELLS" = 1 ]; then
-        shell_rc "${ZDOTDIR:-$HOME}/.zshrc" zsh
-        shell_rc "$HOME/.bashrc" bash
-        if has fish || [ -d "$HOME_CONFIG/fish" ]; then
-            link_asking "$REPO/shell/work.fish" "$HOME_CONFIG/fish/functions/work.fish"
+    # An update keeps what the install chose: the links and the shell block lead through REPO, which
+    # now holds the new version, and what the install left out (--no-shell, --no-tmux-conf, a file
+    # the user kept) stays out.
+    if [ "$UPDATE" = 0 ]; then
+        [ "$TMUXCONF" = 0 ] || link_asking "$REPO/tmux.conf" "$HOME/.tmux.conf"
+        if has sesh; then link_asking "$REPO/sesh.toml" "$HOME_CONFIG/sesh/sesh.toml"; fi
+        if [ "$SHELLS" = 1 ]; then
+            shell_rc "${ZDOTDIR:-$HOME}/.zshrc" zsh
+            shell_rc "$HOME/.bashrc" bash
+            if has fish || [ -d "$HOME_CONFIG/fish" ]; then
+                link_asking "$REPO/shell/work.fish" "$HOME_CONFIG/fish/functions/work.fish"
+            fi
         fi
     fi
     migrate_config
-    if [ "$AGENTS" = 1 ]; then
+    if [ "$AGENTS" = 1 ] || { [ "$UPDATE" = 1 ] && integrations_installed; }; then
         act agents "Claude Code, Codex, omp and Neovim where installed" \
             env TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations install
     fi
     if [ "$DRY" = 1 ]; then
         say would "ask for your projects folder unless it is set"
         say "done" "dry run: nothing changed"
+        return 0
+    fi
+    if [ "$UPDATE" = 1 ]; then
+        finish_update
         return 0
     fi
     onboard
@@ -676,6 +859,29 @@ do_install() {
     esac
     say "done" "tmux-workspace installed"
     say next "open a new terminal, then: work my-project   (Ctrl+a ? lists every shortcut)"
+}
+
+# Whether the agent integrations are installed: an update registers them again only then.
+integrations_installed() {
+    [ "$(TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations status 2>/dev/null || true)" = installed ]
+}
+
+installed_label() {  # the version REPO holds, as the update messages name it
+    if [ "$KIND" = release ]; then
+        release_version "$REPO"
+    elif [ -e "$REPO/.git" ] && has git; then
+        clone_label "$REPO" HEAD
+    else
+        tree_version "$REPO"
+    fi
+}
+
+finish_update() {
+    if ours "$HOME/.tmux.conf" "$REPO/tmux.conf" && has tmux && tmux info >/dev/null 2>&1; then
+        tmux source-file "$HOME/.tmux.conf" && say reload "the running tmux server"
+    fi
+    "$BIN_DIR/tmux-workspace" doctor >/dev/null 2>&1 || true
+    say "done" "updated ${UPDATE_FROM:-an earlier version} → $(installed_label)"
 }
 
 stop_server_hooks() {
@@ -734,8 +940,10 @@ main() {
         KIND=clone
         OWN=$REPO
         if [ -n "$WANTED" ]; then say note "--version is for release installs; in a clone, check out $WANTED instead"; fi
+        if [ "$UPDATE" = 1 ] && [ -z "$UPDATE_FROM" ]; then update_clone; fi
     else
         KIND=release
+        if [ "$UPDATE" = 1 ] && [ -z "$UPDATE_FROM" ] && ! staged_here; then update_release; fi
         settle_release
         OWN=$(cd "$HOME_SHARE" 2>/dev/null && pwd -P || printf '%s' "$HOME_SHARE")
     fi

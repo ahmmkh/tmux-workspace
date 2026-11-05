@@ -70,6 +70,14 @@ pub fn hook_commands(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether this project's hook runs from Claude Code's settings or Codex's hooks: what `install.sh
+/// --update` asks before it registers the integrations again, so that an update keeps that choice.
+pub fn installed_on(target: &Target) -> bool {
+    [target.claude_settings(), target.codex_hooks()]
+        .iter()
+        .any(|path| hook_commands(path).iter().any(|command| ours(command)))
+}
+
 /// An `integrations/*-hooks.json` template with `{{BIN}}` filled in: the installed binary of this
 /// `home`, quoted for the shell, so a home folder with a space still makes a working command.
 pub fn render(template: &Path, home: &Path) -> Result<Value> {
@@ -604,10 +612,20 @@ pub fn system_name() -> &'static str {
     }
 }
 
-/// `integrations install` and `integrations uninstall`.
+/// `integrations install`, `integrations uninstall` and `integrations status`, which prints
+/// `installed` or `not installed`.
 pub fn main(args: &[String]) -> Result<i32> {
     let home = home();
     let actions = match args.first().map(String::as_str) {
+        Some("status") => {
+            let installed = installed_on(&Target::current(&home, system_name()));
+            let status = if installed {
+                "installed"
+            } else {
+                "not installed"
+            };
+            vec![status.to_string()]
+        }
         Some("install") => {
             let done = install(&home, system_name())?;
             if done.is_empty() {
@@ -619,7 +637,7 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("uninstall") => uninstall(&home)?,
         _ => {
             return Err(Error::Msg(
-                "Usage: tmux-workspace integrations install|uninstall".into(),
+                "Usage: tmux-workspace integrations install|uninstall|status".into(),
             ));
         }
     };

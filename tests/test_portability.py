@@ -179,6 +179,15 @@ class ShellIntegration(unittest.TestCase):
                 self.assertEqual(self.work(shell, 'api'), ['open api'])
                 self.assertEqual(self.work(shell, 'rm', 'api'), ['open api', 'kill-workspace api'])
 
+    def test_work_update_updates_in_every_shell(self):
+        for shell in ('bash', 'zsh', 'fish'):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                self.assertEqual(self.work(shell, 'update'), ['update'])
+                self.assertEqual(self.work(shell, 'update', '--check')[-1], 'update --check')
+                # A workspace named update opens through the path form.
+                self.assertEqual(self.work(shell, './update')[-1], 'open update')
+
     def test_work_sh_puts_local_bin_on_path(self):
         for shell, flag in (('bash', '--norc'), ('zsh', '-f')):
             if not shutil.which(shell):

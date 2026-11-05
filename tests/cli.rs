@@ -391,6 +391,121 @@ exit 7"#,
     }
 }
 
+/// `update [--check]` hands over to the installer that came with the binary,
+/// `bash <share>/install.sh --update`: the binary has no HTTP client, the installer has curl or wget.
+mod update {
+    use super::*;
+    use std::path::Path;
+
+    /// A share folder whose install.sh writes down how it ran, and under which umask.
+    fn share() -> TempDir {
+        let share = TempDir::new();
+        std::fs::write(share.path().join("agent-status.conf"), "").unwrap();
+        tmux_workspace::testing::write_script(
+            &share.path().join("install.sh"),
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > \"${0%/*}/ran\"\numask > \"${0%/*}/umask\"\necho checked\nexit 4\n",
+        );
+        share
+    }
+
+    fn ran(share: &Path) -> String {
+        std::fs::read_to_string(share.join("ran")).unwrap_or_default()
+    }
+
+    #[test]
+    fn update_runs_the_installer_next_to_the_binary() {
+        let scratch = ScratchTmux::new();
+        let share = share();
+        let out = scratch
+            .bin(EXE)
+            .arg("update")
+            .env("TMUX_WORKSPACE_SHARE", share.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            ran(share.path()),
+            format!("{}/install.sh\n--update\n", share.path().display())
+        );
+        // The installer's output and status are the command's own: it replaced the binary.
+        assert_eq!(common::text(&out.stdout), "checked\n");
+        assert_eq!(out.stderr, b"");
+        assert_eq!(out.status.code(), Some(4));
+    }
+
+    #[test]
+    fn update_check_only_asks() {
+        let scratch = ScratchTmux::new();
+        let share = share();
+        scratch
+            .bin(EXE)
+            .args(["update", "--check"])
+            .env("TMUX_WORKSPACE_SHARE", share.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            ran(share.path()),
+            format!("{}/install.sh\n--update\n--check\n", share.path().display())
+        );
+    }
+
+    #[test]
+    fn the_installer_runs_with_the_callers_umask() {
+        // Every other command makes its files private; the installer's links and folders are the
+        // user's, as when they run install.sh themselves.
+        let scratch = ScratchTmux::new();
+        let share = share();
+        let mut command = scratch.bin("/bin/sh");
+        command
+            .args(["-c", "umask 022; exec \"$0\" update", EXE])
+            .env("TMUX_WORKSPACE_SHARE", share.path());
+        command.output().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(share.path().join("umask"))
+                .unwrap()
+                .trim(),
+            "0022"
+        );
+    }
+
+    #[test]
+    fn another_argument_is_a_usage_error() {
+        let scratch = ScratchTmux::new();
+        let share = share();
+        let out = scratch
+            .bin(EXE)
+            .args(["update", "--now"])
+            .env("TMUX_WORKSPACE_SHARE", share.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            common::text(&out.stderr),
+            "Workspace error: Usage: tmux-workspace update [--check]\n"
+        );
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(ran(share.path()), "", "the installer does not run");
+    }
+
+    #[test]
+    fn without_the_installer_it_says_what_is_missing() {
+        let scratch = ScratchTmux::new();
+        let share = TempDir::new();
+        let out = scratch
+            .bin(EXE)
+            .arg("update")
+            .env("TMUX_WORKSPACE_SHARE", share.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            common::text(&out.stderr),
+            format!(
+                "Workspace error: update needs {}/install.sh, which is missing\n",
+                share.path().display()
+            )
+        );
+        assert_eq!(out.status.code(), Some(1));
+    }
+}
+
 /// `integrations/agent-hook.py` is a shim now: v1 hook entries still run
 /// `python3 ~/.local/lib/tmux-workspace/agent-hook.py <kind>`, a link to it, until
 /// `install.sh --agents` replaces them.

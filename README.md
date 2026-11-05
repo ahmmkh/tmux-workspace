@@ -155,6 +155,19 @@ first. Restart running agents afterwards.
 
 Snapshots and backups live in `~/.local/state/tmux-workspace`, readable only by you.
 
+## Update
+
+```sh
+work update            # or: tmux-workspace update
+work update --check    # only say whether there is a newer release
+```
+
+An install from a release downloads the newer one, checks it against the release's `SHA256SUMS`,
+and keeps the choices you made: the shell lines, `~/.tmux.conf` and the agent integrations stay as
+they are, and the version before stays next to it. A clone updates with a fast-forward `git pull`
+and leaves a clone with local changes alone. Nothing checks for updates in the background. A
+workspace named `update` opens with `work ./update`.
+
 ## Uninstall
 
 ```sh

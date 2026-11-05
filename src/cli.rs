@@ -37,10 +37,11 @@ pub fn main() -> i32 {
 }
 
 /// Whether a command runs with umask 077, so that what it creates, and what its children create,
-/// is private: the state, the config and the folders `setup` makes. The agent hook is the exception.
-/// It was always a separate program that set no umask, and it writes no files.
+/// is private: the state, the config and the folders `setup` makes. The agent hook is an exception:
+/// it was always a separate program that set no umask, and it writes no files. So is `update`: it
+/// becomes the installer, whose links and folders are the user's, as when they run it themselves.
 fn makes_private_files(command: &str) -> bool {
-    command != "agent-hook"
+    command != "agent-hook" && command != "update"
 }
 
 /// Whether this runs inside tmux, where a message goes on the status line.
@@ -80,6 +81,7 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "setup" => onboarding::setup(args),
         "integrations" => integrations::main(args),
         "doctor" => doctor::doctor(&Tmux::new()),
+        "update" => Err(update(args)),
         // Runs in every new pane before the user's shell, and ends by becoming that shell.
         "pane-start" => pane::pane_start(
             &Tmux::new(),
@@ -174,6 +176,33 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     process::exec(&argv)
 }
 
+/// `update [--check]`: become `bash <share>/install.sh --update [--check]`, the installer that came
+/// with this binary. It downloads with curl or wget, so the binary needs no HTTP client of its own.
+/// Returns only when the installer cannot be started.
+fn update(args: &[String]) -> Error {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => return Error::Msg("Usage: tmux-workspace update [--check]".into()),
+    };
+    let script = share_root().join("install.sh");
+    if !script.is_file() {
+        return Error::Msg(format!(
+            "update needs {}, which is missing",
+            script.display()
+        ));
+    }
+    let mut argv = vec![
+        "bash".to_string(),
+        script.to_string_lossy().into_owned(),
+        "--update".to_string(),
+    ];
+    if check {
+        argv.push("--check".to_string());
+    }
+    process::exec(&argv)
+}
+
 /// The `python3` on `PATH`, when it is version 3.9 or later. One `python3 -c` call.
 fn python3_9() -> Option<std::path::PathBuf> {
     let python = process::which("python3")?;
@@ -233,11 +262,12 @@ mod tests {
     }
 
     #[test]
-    fn every_command_but_the_hook_runs_with_a_private_umask() {
+    fn every_command_but_the_hook_and_update_runs_with_a_private_umask() {
         for command in ["open", "setup", "save", "pane-start", "exec-shell", "nope"] {
             assert!(makes_private_files(command), "{command}");
         }
         assert!(!makes_private_files("agent-hook"));
+        assert!(!makes_private_files("update"));
     }
 
     #[test]

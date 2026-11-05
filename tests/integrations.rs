@@ -7,8 +7,10 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tmux_workspace::integrations::{Target, install_on, merge_hooks, ours, render, uninstall_on};
-use tmux_workspace::testing::TempDir;
+use tmux_workspace::integrations::{
+    Target, install_on, installed_on, merge_hooks, ours, render, uninstall_on,
+};
+use tmux_workspace::testing::{ScratchTmux, TempDir};
 use tmux_workspace::text::shlex_quote;
 
 const EXE: &str = env!("CARGO_BIN_EXE_tmux-workspace");
@@ -872,19 +874,68 @@ fn the_command_reads_codex_home() {
 }
 
 #[test]
-fn the_command_needs_install_or_uninstall() {
+fn the_command_needs_install_uninstall_or_status() {
     let world = World::new();
     for args in [vec!["integrations"], vec!["integrations", "sideways"]] {
         let out = run(&world, &args, None);
         assert_eq!(out.status.code(), Some(1));
         assert_eq!(
             text(&out.stderr),
-            "Workspace error: Usage: tmux-workspace integrations install|uninstall\n"
+            "Workspace error: Usage: tmux-workspace integrations install|uninstall|status\n"
         );
         // Outside tmux the error contract's message goes to stdout.
         assert_eq!(
             text(&out.stdout),
-            "Workspace: Usage: tmux-workspace integrations install|uninstall\n"
+            "Workspace: Usage: tmux-workspace integrations install|uninstall|status\n"
         );
     }
+}
+
+/// `install.sh --update` registers the integrations again only where they were: this is how it asks.
+#[test]
+fn installed_on_sees_this_projects_hook_in_claude_or_codex() {
+    let world = World::new();
+    let target = world.target("Linux");
+    assert!(!installed_on(&target), "nothing is installed");
+    world.mkdir(".claude");
+    let own = json!({"type": "command", "command": "my-agent-hook run"});
+    world.write_json(
+        ".claude/settings.json",
+        &json!({"hooks": {"Stop": [{"hooks": [own]}]}}),
+    );
+    assert!(!installed_on(&target), "a user's own hook is not ours");
+    world.install("Linux");
+    assert!(installed_on(&target));
+    world.uninstall();
+    assert!(!installed_on(&target));
+    // Codex alone counts, and so does the form before the Rust rewrite.
+    world.mkdir(".codex");
+    let old = "/usr/bin/python3 /h/.local/lib/tmux-workspace/agent-hook.py codex";
+    world.write_json(
+        ".codex/hooks.json",
+        &json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": old}]}]}}),
+    );
+    assert!(installed_on(&target));
+}
+
+#[test]
+fn status_prints_whether_the_integrations_are_installed() {
+    let scratch = ScratchTmux::new();
+    let status = || {
+        let out = scratch
+            .bin(EXE)
+            .args(["integrations", "status"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.stderr, b"");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(status(), "not installed\n");
+    let claude = scratch.home().join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    let ours = json!({"statusLine": {"type": "command",
+        "command": "/h/.local/bin/tmux-workspace agent-hook claude-status"}});
+    fs::write(claude.join("settings.json"), ours.to_string()).unwrap();
+    assert_eq!(status(), "installed\n");
 }

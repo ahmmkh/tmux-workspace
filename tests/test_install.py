@@ -616,6 +616,194 @@ class Installer(unittest.TestCase):
         self.assertEqual((self.work / 'cargo.log').read_text(), f'{clone} build --release --locked\n')
         self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), built.read_bytes())
 
+    # -- Updates: `tmux-workspace update` runs install.sh --update next to the binary. ----------------------
+
+    def release(self, version, *flags):
+        """A piped install of release VERSION."""
+        dist = self.work / version
+        if not dist.exists():
+            renumbered_dist(version, dist)
+        return self.piped('--yes', *flags, TMUX_WORKSPACE_DIST=str(dist))
+
+    def update(self, *args, check=True, dist=None, **extra):
+        """`tmux-workspace update ARGS`, with the releases of DIST."""
+        extra.setdefault('TMUX_WORKSPACE_DIST', str(dist or release_dist()))
+        result = self.tool('update', *args, **extra)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def newer(self, version='2.0.1'):
+        dist = self.work / version
+        return dist if dist.exists() else renumbered_dist(version, dist)
+
+    def test_update_installs_the_newer_release(self):
+        self.release('2.0.0')
+        out = self.update(dist=self.newer('2.0.1')).stdout
+        self.assertIn('updated 2.0.0 → 2.0.1', out)
+        self.assertEqual(os.readlink(self.share / 'current'), '2.0.1')
+        self.assertEqual(sorted(path.name for path in self.share.iterdir()), ['2.0.0', '2.0.1', 'current'])
+        self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve(), self.share / '2.0.1/bin/tmux-workspace')
+        self.assertEqual((self.home / '.tmux.conf').resolve(), self.share / '2.0.1/tmux.conf')
+        self.assertEqual(self.tool('help-topic', 'park').returncode, 0)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_update_when_already_up_to_date_changes_nothing(self):
+        self.release('2.0.1')
+        before = self.tree()
+        out = self.update(dist=self.newer('2.0.1')).stdout
+        self.assertIn('already up to date (2.0.1)', out)
+        self.assertEqual(self.tree(), before)
+
+    def test_update_does_not_go_back_to_an_older_latest(self):
+        self.release('2.0.2')
+        out = self.update(dist=self.newer('2.0.1')).stdout
+        self.assertIn('already up to date (2.0.2)', out)
+        self.assertEqual(os.readlink(self.share / 'current'), '2.0.2')
+
+    def test_update_check_changes_nothing(self):
+        self.release('2.0.0')
+        before = self.tree()
+        out = self.update('--check', dist=self.newer('2.0.1')).stdout
+        self.assertIn('update available: 2.0.0 → 2.0.1', out)
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_update_check_reads_the_latest_version_from_the_release(self):
+        self.release('2.0.0')
+        log = self.recording_curl()
+        result = self.update('--check', check=False, TMUX_WORKSPACE_DIST=None)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.urls(log), ['https://github.com/ahmmkh/tmux-workspace/releases/latest/download/VERSION'])
+
+    def test_update_keeps_the_choices_made_at_install(self):
+        self.release('2.0.0', '--no-shell', '--no-tmux-conf')
+        (self.home / '.config/fish').mkdir(parents=True)  # fish appeared since
+        out = self.update(dist=self.newer('2.0.1')).stdout
+        self.assertFalse(os.path.lexists(self.home / '.zshrc'))
+        self.assertFalse(os.path.lexists(self.home / '.tmux.conf'))
+        self.assertFalse(os.path.lexists(self.home / '.config/fish/functions/work.fish'))
+        self.assertNotIn('projects folder', out, 'onboarding is not asked again')
+
+    def test_update_registers_the_integrations_again_only_where_they_were(self):
+        (self.home / '.claude').mkdir()
+        self.release('2.0.0')
+        self.update(dist=self.newer('2.0.1'))
+        self.assertFalse((self.home / '.claude/settings.json').exists())
+
+        self.release('2.0.1', '--agents')
+        settings = self.home / '.claude/settings.json'
+        data = json.loads(settings.read_text())
+        del data['statusLine']
+        settings.write_text(json.dumps(data))
+        out = self.update(dist=self.newer('2.0.2')).stdout
+        self.assertIn('agents', out)
+        self.assertIn(' agent-hook claude-status', json.loads(settings.read_text())['statusLine']['command'])
+
+    def test_update_reloads_a_running_server_that_uses_its_tmux_conf(self):
+        self.release('2.0.0')
+        self.logging_tmux()
+        out = self.update(dist=self.newer('2.0.1')).stdout
+        self.assertIn(f'source-file {self.home}/.tmux.conf', self.tmux_log.read_text())
+        self.assertIn('reload', out)
+
+    def test_update_leaves_a_tmux_conf_of_the_users_alone(self):
+        self.release('2.0.0', '--no-tmux-conf')
+        (self.home / '.tmux.conf').write_text('mine\n')
+        self.logging_tmux()
+        self.update(dist=self.newer('2.0.1'))
+        self.assertNotIn('source-file', self.tmux_log.read_text())
+
+    def test_update_flags_are_checked(self):
+        self.assertEqual(self.install('--check', check=False).returncode, 2)
+        self.assertEqual(self.install('--update', '--uninstall', check=False).returncode, 2)
+
+    # -- A clone updates with git: fast-forward only, and the new binary first. ----------------------------
+
+    def real_git(self):
+        (self.bin / 'git').unlink()
+        (self.bin / 'git').symlink_to(shutil.which('git'))
+
+    def git(self, cwd, *args):
+        env = {'HOME': str(self.work), 'PATH': os.environ['PATH'], 'LANG': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
+               'GIT_AUTHOR_NAME': 'Test', 'GIT_AUTHOR_EMAIL': 'test@example.com',
+               'GIT_COMMITTER_NAME': 'Test', 'GIT_COMMITTER_EMAIL': 'test@example.com'}
+        return subprocess.run(['git', '-C', str(cwd), *args], env=env, capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    def commit(self, repo, fill, message):
+        """Replace the files of REPO with what FILL(folder) writes, and commit them."""
+        for child in repo.iterdir():
+            if child.name != '.git':
+                shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+        fill(repo)
+        self.git(repo, 'add', '-A')
+        self.git(repo, 'commit', '-q', '-m', message)
+        return self.git(repo, 'rev-parse', 'HEAD')
+
+    @staticmethod
+    def v2(version):
+        def fill(folder):
+            copy_tree(folder)
+            cargo = folder / 'Cargo.toml'
+            cargo.write_text(re.sub(r'^version = ".*"$', f'version = "{version}"', cargo.read_text(), count=1,
+                                    flags=re.M))
+        return fill
+
+    @staticmethod
+    def v1(folder):
+        """The Python version, 1.0.0, as a v1 clone has it."""
+        archive = subprocess.run(['git', '-C', str(ROOT), 'archive', '30b1401'], capture_output=True, check=True)
+        subprocess.run(['tar', '-x', '-C', str(folder)], input=archive.stdout, check=True)
+
+    def upstream_and_clone(self, first, clone):
+        """An upstream repository whose main has commit FIRST, and a shallow clone of it at CLONE."""
+        self.real_git()
+        upstream = self.work / 'upstream'
+        upstream.mkdir()
+        self.git(upstream, 'init', '-q', '-b', 'main')
+        self.commit(upstream, first, 'first')
+        clone.parent.mkdir(parents=True, exist_ok=True)
+        self.git(self.work, 'clone', '-q', '--depth', '1', f'file://{upstream}', str(clone))
+        return upstream
+
+    def clone_env(self, **extra):
+        return dict(GIT_CONFIG_NOSYSTEM='1', **extra)
+
+    def test_update_of_a_clone_pulls_and_installs_the_new_version(self):
+        clone = self.work / 'checkout'
+        upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
+        self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, **self.clone_env())
+        head = self.commit(upstream, self.v2('2.0.1'), 'second')
+        check = self.tool('update', '--check', **self.clone_env())
+        self.assertIn(f'update available: 2.0.0 {self.git(clone, "rev-parse", "--short", "HEAD")} → 2.0.1 {head[:7]}',
+                      check.stdout, check.stderr)
+        out = self.tool('update', **self.clone_env())
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), head)
+        self.assertIn('updated 2.0.0', out.stdout)
+        self.assertIn(f'→ 2.0.1 {head[:7]}', out.stdout)
+        self.assertEqual((clone / 'bin/tmux-workspace').read_bytes(), BINARY.read_bytes())
+        again = self.tool('update', **self.clone_env())
+        self.assertIn(f'already up to date (2.0.1 {head[:7]})', again.stdout)
+
+    def test_update_refuses_a_clone_with_changes_or_on_another_branch(self):
+        clone = self.work / 'checkout'
+        upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
+        self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, **self.clone_env())
+        self.commit(upstream, self.v2('2.0.1'), 'second')
+        head = self.git(clone, 'rev-parse', 'HEAD')
+        (clone / 'tmux.conf').write_text('changed\n')
+        result = self.tool('update', **self.clone_env())
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('has uncommitted changes; commit or stash them', result.stderr)
+        self.git(clone, 'checkout', '-q', '--', 'tmux.conf')
+        self.git(clone, 'checkout', '-q', '-b', 'mine')
+        result = self.tool('update', **self.clone_env())
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('is on mine, not main', result.stderr)
+        self.assertEqual(self.git(clone, 'rev-parse', 'HEAD'), head)
+
     def test_script_is_valid_bash_32_syntax(self):
         subprocess.run(['/bin/bash', '-n', str(ROOT / 'install.sh')], check=True)
 
