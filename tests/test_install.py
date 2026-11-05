@@ -534,7 +534,8 @@ class Installer(unittest.TestCase):
         if not folder.exists():
             folder.mkdir()
             with tarfile.open(self.newer(version) / ARCHIVE) as tar:
-                tar.extractall(folder, filter='tar')
+                # Extraction filters came with Python 3.12 and security releases of 3.9 to 3.11; Debian 12's 3.11.2 has none.
+                tar.extractall(folder, **({'filter': 'tar'} if hasattr(tarfile, 'tar_filter') else {}))
         return folder / f'tmux-workspace-{version}'
 
     def test_unpacking_restores_no_owners(self):
