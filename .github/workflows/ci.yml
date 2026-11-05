@@ -36,6 +36,25 @@ jobs:
       - run: rustup component add clippy rustfmt
       - run: cargo --version
       - run: make lint test
+      # Report only: a runner is a shared machine, so its numbers vary and a slow run is no failure.
+      # The Python column of the claude-status row says n/a on Linux: agent-hook.py of v1 only looks for
+      # tmux in /opt/homebrew/bin, so it publishes nothing there.
+      - name: Bench (report only)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq hyperfine
+          status=0
+          make -s bench >"$RUNNER_TEMP/bench.md" 2>"$RUNNER_TEMP/bench.log" || status=$?
+          {
+            echo '### make bench'
+            echo
+            cat "$RUNNER_TEMP/bench.md"
+            echo
+            grep '^bench:' "$RUNNER_TEMP/bench.log" | grep -v 'building\|timing' || true
+          } >>"$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/bench.md"
+          if [ "$status" != 0 ]; then cat "$RUNNER_TEMP/bench.log"; fi
 
   python39:
     # macOS still ships Python 3.9 as /usr/bin/python3. setup-python has no 3.9 for new

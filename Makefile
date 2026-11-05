@@ -1,10 +1,10 @@
 PYTHON ?= python3
 RUNTIME := legacy/bin/tmux-workspace $(wildcard legacy/lib/*.py) legacy/integrations/agent-hook.py integrations/agent-hook.py $(wildcard scripts/*.py)
-SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh scripts/package.sh tests/install/smoke.sh tests/install/matrix.sh
+SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh scripts/package.sh scripts/bench.sh tests/install/smoke.sh tests/install/matrix.sh
 # The release target of this machine: Linux releases are static musl builds.
 TARGET ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p' | sed 's/-gnu$$/-musl/')
 
-.PHONY: build test lint dist test-install screenshots stats
+.PHONY: build test lint dist test-install screenshots stats bench
 
 # bin/tmux-workspace is the debug build, copied there (it is gitignored): install.sh links it, and the
 # Python tests and the demo run it from that path. The old file goes first: macOS can kill a signed
@@ -35,6 +35,10 @@ test-install:
 
 screenshots: build
 	$(PYTHON) scripts/demo.py
+
+# The five paths this program made fast, timed against the Python they replaced (needs hyperfine).
+bench:
+	scripts/bench.sh
 
 # Downloads by version, clones, views and stars. Reads GitHub with your `gh auth login`; the history
 # is what .github/workflows/stats.yml records daily into the private ahmmkh/tmux-workspace-stats.
