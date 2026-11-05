@@ -776,6 +776,26 @@ class Installer(unittest.TestCase):
         self.assertIn('agents', out)
         self.assertIn(' agent-hook claude-status', json.loads(settings.read_text())['statusLine']['command'])
 
+    def test_integration_links_keep_working_through_two_updates_and_uninstall_removes_them(self):
+        # Neovim and omp only: no Claude or Codex hook for the update to notice.
+        (self.home / '.config/nvim').mkdir(parents=True)
+        (self.home / '.omp').mkdir()
+        links = [self.home / '.config/nvim/lua/custom/tmux_workspace.lua',
+                 self.home / '.omp/agent/extensions/tmux-workspace.ts']
+        if platform.system() == 'Darwin':
+            links.append(self.home / 'Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json')
+        self.release('2.0.0', '--agents')
+        for version in ['2.0.1', '2.0.2']:
+            self.update(dist=self.newer(version))
+            self.assertEqual(os.readlink(self.share / 'current'), version)
+            for link in links:
+                self.assertTrue(link.is_file(), f'{link} after the update to {version}')
+                self.assertTrue(os.readlink(link).startswith(f'{self.share}/current/'), os.readlink(link))
+        self.assertFalse((self.share / '2.0.0').exists(), 'the second update removed the first version')
+        self.run_script(['/bin/bash', str(self.share / 'current/install.sh'), '--uninstall'], True)
+        for link in links:
+            self.assertFalse(os.path.lexists(link), link)
+
     def test_update_reloads_a_running_server_that_uses_its_tmux_conf(self):
         self.release('2.0.0')
         self.logging_tmux()

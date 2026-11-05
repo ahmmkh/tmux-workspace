@@ -70,12 +70,14 @@ pub fn hook_commands(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Whether this project's hook runs from Claude Code's settings or Codex's hooks: what `install.sh
-/// --update` asks before it registers the integrations again, so that an update keeps that choice.
+/// Whether this project's hook runs from Claude Code's settings or Codex's hooks, or one of its links
+/// (omp, Neovim, iTerm2) is in place: what `install.sh --update` asks before it registers the
+/// integrations again, so that an update keeps that choice.
 pub fn installed_on(target: &Target) -> bool {
-    [target.claude_settings(), target.codex_hooks()]
+    let hooks = [target.claude_settings(), target.codex_hooks()]
         .iter()
-        .any(|path| hook_commands(path).iter().any(|command| ours(command)))
+        .any(|path| hook_commands(path).iter().any(|command| ours(command)));
+    hooks || target.links().iter().any(|link| target.made(link))
 }
 
 /// An `integrations/*-hooks.json` template with `{{BIN}}` filled in: the installed binary of this
@@ -235,6 +237,41 @@ fn leads_to(link: &Path) -> PathBuf {
     }
 }
 
+/// The folder of a release install's versions, when `share` is the version that its `current` link
+/// leads to (or that link itself): `<home>/<version>` beside `<home>/current`. A clone has none.
+fn release_home(share: &Path) -> Option<PathBuf> {
+    let real = resolve(share);
+    let home = real.parent()?;
+    let current = home.join("current");
+    (is_symlink(&current) && resolve(&current) == real).then(|| home.to_path_buf())
+}
+
+/// The share folder as the links name it: `<home>/current` for a release install, so that they outlive
+/// updates (the version folder they would name otherwise goes with the update after next), else the
+/// folder itself.
+fn link_share(share: &Path) -> PathBuf {
+    release_home(share).map_or_else(|| resolve(share), |home| home.join("current"))
+}
+
+/// A version folder's name, as install.sh's `VERSION_RE` has it: `1.2.3`, maybe with `-pre` or `+build`.
+fn is_version(name: &str) -> bool {
+    let (core, suffix) = match name.find(['-', '+']) {
+        Some(at) => (&name[..at], Some(&name[at + 1..])),
+        None => (name, None),
+    };
+    let numbers: Vec<&str> = core.split('.').collect();
+    numbers.len() == 3
+        && numbers
+            .iter()
+            .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        && suffix.is_none_or(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        })
+}
+
 /// The link the Python version made for its hook: it leads to `integrations/agent-hook.py` of some clone.
 fn old_hook_link(link: &Path) -> bool {
     is_symlink(link)
@@ -254,7 +291,8 @@ fn make_dir(dir: &Path) -> Result<()> {
 #[derive(Clone, Debug)]
 pub struct Target {
     pub home: PathBuf,
-    /// The folder with `integrations/`: what the links lead to and the templates come from.
+    /// The folder with `integrations/`: what the links lead to and the templates come from. For a
+    /// release install it is `<home>/current` (see [`link_share`]).
     pub share: PathBuf,
     /// Where Codex keeps `hooks.json`, when not at `~/.codex`.
     pub codex_home: Option<PathBuf>,
@@ -267,7 +305,7 @@ impl Target {
     pub fn current(home: &Path, system: &str) -> Target {
         Target {
             home: home.to_path_buf(),
-            share: resolve(&share_root()),
+            share: link_share(&share_root()),
             codex_home: Some(codex_dir(home)),
             system: system.to_string(),
         }
@@ -307,6 +345,38 @@ impl Target {
     /// The link of the Python version's hook, which nothing uses any more.
     fn old_hook_link(&self) -> PathBuf {
         self.home.join(".local/lib/tmux-workspace/agent-hook.py")
+    }
+
+    /// Where install puts its links.
+    fn links(&self) -> [PathBuf; 3] {
+        [
+            self.omp_extension(),
+            self.neovim_helper(),
+            self.iterm_profile(),
+        ]
+    }
+
+    /// Whether `link` is a link install made: it leads into the share folder, or, for a release
+    /// install, into `current` or any version folder beside it. An update moves `current` on and
+    /// prunes the older versions, so a link may name one that is gone.
+    fn made(&self, link: &Path) -> bool {
+        if !is_symlink(link) {
+            return false;
+        }
+        let leads = leads_to(link);
+        let share = resolve(&self.share);
+        if leads != share && leads.starts_with(&share) {
+            return true;
+        }
+        let Some(home) = release_home(&self.share) else {
+            return false;
+        };
+        let mut parts = leads
+            .strip_prefix(&home)
+            .into_iter()
+            .flat_map(Path::components);
+        let first = parts.next().map(|part| part.as_os_str().to_string_lossy());
+        parts.next().is_some() && first.is_some_and(|name| name == "current" || is_version(&name))
     }
 }
 
@@ -509,7 +579,7 @@ impl<'a> Installer<'a> {
         Ok(self.actions)
     }
 
-    /// Undo `run`: drop this project's hook entries and status line, and the links into the share folder.
+    /// Undo `run`: drop this project's hook entries and status line, and the links it made.
     fn remove(mut self) -> Result<Vec<String>> {
         let target = self.target;
         for (path, name) in [
@@ -536,18 +606,9 @@ impl<'a> Installer<'a> {
                     .push(format!("{name} hooks removed from {}", path.display()));
             }
         }
-        let share = resolve(&target.share);
-        for link in [
-            target.old_hook_link(),
-            target.omp_extension(),
-            target.neovim_helper(),
-            target.iterm_profile(),
-        ] {
-            let ours_to_remove = is_symlink(&link) && {
-                let leads = leads_to(&link);
-                (leads != share && leads.starts_with(&share)) || old_hook_link(&link)
-            };
-            if ours_to_remove {
+        let old = target.old_hook_link();
+        for link in std::iter::once(old).chain(target.links()) {
+            if target.made(&link) || old_hook_link(&link) {
                 fs::remove_file(&link).map_err(|e| cannot_write(&link, e))?;
                 self.actions.push(format!("link {}", link.display()));
             }
@@ -801,6 +862,25 @@ mod tests {
         let group = data["hooks"]["PreToolUse"][0].as_object().unwrap();
         let keys: Vec<&String> = group.keys().collect();
         assert_eq!(keys, ["matcher", "hooks", "extra"]);
+    }
+
+    #[test]
+    fn version_folders_are_named_as_install_sh_names_them() {
+        for name in ["2.0.0", "10.20.30", "2.0.1-rc.1", "2.0.0+build-7"] {
+            assert!(is_version(name), "{name}");
+        }
+        for name in [
+            "current",
+            "2.0",
+            "2.0.0.1",
+            "v2.0.0",
+            "2.x.0",
+            "2.0.0-",
+            "2.0.0-a_b",
+            ".incoming-1",
+        ] {
+            assert!(!is_version(name), "{name}");
+        }
     }
 
     #[test]

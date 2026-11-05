@@ -939,3 +939,188 @@ fn status_prints_whether_the_integrations_are_installed() {
     fs::write(claude.join("settings.json"), ours.to_string()).unwrap();
     assert_eq!(status(), "installed\n");
 }
+
+/// A release install in `world`, as install.sh lays it out: a folder per version under
+/// `.local/share/tmux-workspace`, each with this checkout's integration files, and `current` leading
+/// to `current`. Gives that folder.
+fn release_home(world: &World, versions: &[&str], current: &str) -> PathBuf {
+    let home = world.path(".local/share/tmux-workspace");
+    for version in versions {
+        let dir = home.join(version).join("integrations");
+        fs::create_dir_all(&dir).unwrap();
+        for entry in fs::read_dir(root().join("integrations")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(entry.path(), dir.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+    move_current(&home, current);
+    home
+}
+
+/// What an update does to a release install: `current` leads to `version` now.
+fn move_current(home: &Path, version: &str) {
+    let _ = fs::remove_file(home.join("current"));
+    symlink(version, home.join("current")).unwrap();
+}
+
+/// `integrations ARGS` with `TMUX_WORKSPACE_SHARE` at `share`.
+fn run_in(world: &World, share: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(EXE)
+        .env_clear()
+        .env("HOME", &world.home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("TMUX_WORKSPACE_SHARE", share)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+const LINKS: [(&str, &str); 3] = [
+    (
+        ".config/nvim/lua/custom/tmux_workspace.lua",
+        "tmux_workspace.lua",
+    ),
+    (
+        ".omp/agent/extensions/tmux-workspace.ts",
+        "tmux-workspace.ts",
+    ),
+    (
+        "Library/Application Support/iTerm2/DynamicProfiles/tmux-workspace.json",
+        "iterm2-profile.json",
+    ),
+];
+
+/// install.sh runs it with the share at `<home>/current`, and run without it the binary finds its own
+/// version folder: either way the links go through `current`, so they outlive the updates that prune
+/// the version they were made in.
+#[test]
+fn a_release_install_links_through_current_and_the_links_outlive_updates() {
+    for given in ["current", "2.0.0"] {
+        let world = World::new();
+        world.mkdir(".config/nvim");
+        world.mkdir(".omp");
+        let home = release_home(&world, &["2.0.0"], "2.0.0");
+
+        let out = run_in(&world, &home.join(given), &["integrations", "install"]);
+
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let linked: Vec<_> = if cfg!(target_os = "macos") {
+            &LINKS[..]
+        } else {
+            &LINKS[..2]
+        }
+        .to_vec();
+        for (link, name) in &linked {
+            assert_eq!(
+                fs::read_link(world.path(link)).unwrap(),
+                home.join("current/integrations").join(name),
+                "{given}: {link}"
+            );
+        }
+        release_home(&world, &["2.0.1", "2.0.2"], "2.0.2");
+        fs::remove_dir_all(home.join("2.0.0")).unwrap();
+        fs::remove_dir_all(home.join("2.0.1")).unwrap();
+        for (link, _) in &linked {
+            assert!(
+                world.path(link).is_file(),
+                "{given}: {link} after two updates"
+            );
+        }
+        // The binary of the new version finds its own folder.
+        let now = if given == "current" { given } else { "2.0.2" };
+        let again = run_in(&world, &home.join(now), &["integrations", "install"]);
+        assert_eq!(text(&again.stdout), "Integrations already installed.\n");
+    }
+}
+
+/// An update registers the integrations again when any of them is installed: the links count, not
+/// only the hooks of Claude and Codex.
+#[test]
+fn installed_on_counts_the_links_of_omp_neovim_and_iterm() {
+    for (dir, system) in [
+        (".config/nvim", "Linux"),
+        (".omp", "Linux"),
+        ("Library", "Darwin"),
+    ] {
+        let world = World::new();
+        let target = world.target(system);
+        world.mkdir(dir);
+        assert!(!installed_on(&target), "{dir}: nothing is installed");
+        world.install(system);
+        assert!(installed_on(&target), "{dir}");
+        uninstall_on(&target).unwrap();
+        assert!(!installed_on(&target), "{dir}: uninstalled");
+    }
+    // A link of the user's own at one of those paths is not ours.
+    let world = World::new();
+    world.mkdir(".config/nvim/lua/custom");
+    fs::write(world.path("mine.lua"), "mine").unwrap();
+    symlink(world.path("mine.lua"), world.path(LINKS[0].0)).unwrap();
+    assert!(!installed_on(&world.target("Linux")));
+}
+
+/// A link made before the version it names was pruned, or through `current`, is ours to report and to
+/// remove; a link into another install's folder, or into a folder of the install home that is not a
+/// version, is not.
+#[test]
+fn links_into_any_version_of_the_release_home_are_ours() {
+    let world = World::new();
+    let home = release_home(&world, &["2.0.2"], "2.0.2");
+    let other = world.path("elsewhere");
+    for dir in [
+        ".config/nvim/lua/custom",
+        ".omp/agent/extensions",
+        "Library/Application Support/iTerm2/DynamicProfiles",
+    ] {
+        world.mkdir(dir);
+    }
+    let target = Target {
+        home: world.home.clone(),
+        share: home.join("current"),
+        codex_home: None,
+        system: "Darwin".into(),
+    };
+    // Pruned: 2.0.0 is gone.
+    symlink(
+        home.join("2.0.0/integrations/tmux_workspace.lua"),
+        world.path(LINKS[0].0),
+    )
+    .unwrap();
+    assert!(installed_on(&target), "a link into a pruned version");
+    symlink(
+        other.join("2.0.0/integrations/tmux-workspace.ts"),
+        world.path(LINKS[1].0),
+    )
+    .unwrap();
+    world.mkdir(".local/share/tmux-workspace/notes");
+    symlink(
+        home.join("notes/iterm2-profile.json"),
+        world.path(LINKS[2].0),
+    )
+    .unwrap();
+
+    let actions = uninstall_on(&target).unwrap();
+
+    assert_eq!(
+        actions,
+        [format!("link {}", world.path(LINKS[0].0).display())]
+    );
+    assert!(fs::symlink_metadata(world.path(LINKS[1].0)).is_ok());
+    assert!(fs::symlink_metadata(world.path(LINKS[2].0)).is_ok());
+    assert!(!installed_on(&target));
+
+    // Through `current`, as install now makes them.
+    fs::remove_file(world.path(LINKS[1].0)).unwrap();
+    symlink(
+        home.join("current/integrations/tmux-workspace.ts"),
+        world.path(LINKS[1].0),
+    )
+    .unwrap();
+    assert!(installed_on(&target));
+    assert_eq!(
+        uninstall_on(&target).unwrap(),
+        [format!("link {}", world.path(LINKS[1].0).display())]
+    );
+}
