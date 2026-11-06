@@ -15,6 +15,7 @@ import platform
 import pty
 import re
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -2054,29 +2055,75 @@ exec "$@"
         term.expect('What should I set up?', timeout=30)
         term.press('\x1c')  # Ctrl+\
         self.assertEqual(term.finish(timeout=20), 131, term.text)
+        self.assertIn('Cancelled. Nothing was changed.', term.text)
         modes = termios.ECHO | termios.ICANON
         self.assertEqual(term.after[3] & modes, term.before[3] & modes)
         self.assertGreater(term.raw.rfind(b'\x1b[?25h'), term.raw.rfind(b'\x1b[?25l'))
         self.assertEqual(self.tree(), {'.claude': 'dir'})
 
-    def test_ctrl_z_in_the_checklist_gives_the_terminal_back_until_it_continues(self):
-        import signal
+    def test_ctrl_backslash_in_a_step_stops_there_without_a_report(self):
+        (self.bin / 'fzf').unlink()
+        self.brew('sleep 30')
+        self.projects_set()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('\r')
+        term.expect(' fzf ')
+        term.idle(0.5)
+        term.press('\x1c')  # Ctrl+\
+        self.assertEqual(term.finish(timeout=20), 131, term.text)
+        self.assertRegex(term.line('✗ '), r'^  ✗ fzf +brew install fzf$')
+        self.assertIn('Stopped. What was done so far stays; run the installer again to finish', term.text)
+        self.assertNotIn('Report it', term.text)
+        self.assertNotIn('could not install', term.text)
+
+    def test_ctrl_z_at_a_shell_prompt_gives_the_terminal_back_until_fg(self):
+        self.machine()
+        self.terminal_tools()
+        # An interactive shell, as at a prompt: Ctrl+Z stops the installer and the shell gets the terminal;
+        # fg continues it.
+        term = Terminal(['/bin/bash', '--norc', '--noprofile', '-i'],
+                        self.env(TERM='xterm-256color', LANG=UTF8, PS1='prompt$ ', BASH_SILENCE_DEPRECATION_WARNING='1',
+                                 HISTFILE=str(self.work / 'history')))
+        self.addCleanup(term.close)
+        term.expect('prompt$ ', timeout=30)
+        term.press(f'/bin/bash {shlex.quote(str(checkout() / "install.sh"))}\r')
+        term.expect('What should I set up?', timeout=30)
+        term.expect('sesh')
+        term.press('\x1a')  # Ctrl+Z
+        term.expect('Stopped', timeout=10)
+        term.expect('prompt$ ')
+        self.assertGreater(term.raw.rfind(b'\x1b[?25h'), term.raw.rfind(b'\x1b[?25l'), 'cursor shown')
+        term.press('fg\r')
+        term.expect('What should I set up?', timeout=10)  # the list again
+        term.expect('sesh')
+        term.press('j', ' ')
+        term.expect('[ ] zoxide')
+        term.press('q')
+        term.expect('Nothing was changed.')
+        term.expect('prompt$ ')
+        term.press('exit\r')
+        self.assertEqual(term.finish(timeout=20), 0, term.text)
+        self.assertEqual(self.tree(), {'.claude': 'dir'})
+
+    def test_ctrl_z_where_nothing_could_resume_the_installer_does_not_stop_it(self):
+        # The installer is the session's only process group (ssh -t host ./install.sh, a tmux window or popup,
+        # exec ./install.sh): nothing could continue it, so the system drops a terminal stop there.
         self.machine()
         term = self.guided()
         term.expect('What should I set up?', timeout=30)
         term.expect('sesh')
         term.press('\x1a')  # Ctrl+Z
-        time.sleep(1)
-        term.pump(0.2)
-        modes = termios.ECHO | termios.ICANON
-        self.assertEqual(termios.tcgetattr(term.master)[3] & modes, term.before[3] & modes, 'stopped: as it was')
-        self.assertGreater(term.raw.rfind(b'\x1b[?25h'), term.raw.rfind(b'\x1b[?25l'), 'cursor shown')
-        os.killpg(term.proc.pid, signal.SIGCONT)
-        term.expect('What should I set up?', timeout=10)  # the list again
-        term.press('j', ' ')
-        term.expect('[ ] zoxide')
+        term.idle(1)
+        state = subprocess.run(['ps', '-o', 'stat=', '-p', str(term.proc.pid)], capture_output=True,
+                               text=True).stdout.strip()
+        self.assertNotIn('T', state, 'stopped, with nothing to continue it')
         term.press('q')
         self.assertEqual(term.finish(timeout=20), 0, term.text)
+        modes = termios.ECHO | termios.ICANON
+        self.assertEqual(term.after[3] & modes, term.before[3] & modes)
+        self.assertGreater(term.raw.rfind(b'\x1b[?25h'), term.raw.rfind(b'\x1b[?25l'))
+        self.assertEqual(self.tree(), {'.claude': 'dir'})
 
     def test_a_terminal_too_short_for_the_checklist_gets_the_plain_installer(self):
         self.machine()

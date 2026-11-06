@@ -430,7 +430,7 @@ ui_exit() {
     if [ "$UI_OPEN" = 1 ]; then
         if [ "$1" = 0 ]; then step_end; else progress_fail "$1"; fi
     else
-        case $1 in 129 | 130 | 143) printf '\n%s\n' 'Cancelled. Nothing was changed.' >/dev/tty ;; esac
+        case $1 in 129 | 130 | 131 | 143) printf '\n%s\n' 'Cancelled. Nothing was changed.' >/dev/tty ;; esac
     fi
     if [ -n "$PENDING_LOG" ]; then rm -f "$PENDING_LOG"; fi
 }
@@ -441,7 +441,7 @@ progress_fail() {  # progress_fail STATUS: the run stopped in the middle of a st
     mark_step "$C_RED$G_FAIL$C_OFF" "${STEP:-${DIE_MSG:-the installer stopped (exit status $status)}}"
     STEP=''
     case $status in
-        129 | 130 | 143)
+        129 | 130 | 131 | 143)
             ui "  Stopped. What was done so far stays; run the installer again to finish: $(ui_rerun)"
             return 0
             ;;
@@ -1375,7 +1375,7 @@ agent_names() {  # the agents that `integrations install` registers here
 
 # The rows: R_KIND need, rec or opt; R_ON ticked; R_PKG the package a row installs; R_AGENT 1 for the
 # agent rows. One `integrations install` registers every agent, so those go on and off together.
-NROWS=0 NAGENTS=0 CURSOR=-1 ANSWERED=0 DRAWN=0 FOUND='' NOTFOUND='' HEADER=''
+NROWS=0 NAGENTS=0 CURSOR=-1 ANSWERED=0 DRAWN=0 FOUND='' NOTFOUND='' HEADER='' SUSPEND=0
 R_KIND=() R_NAME=() R_HINT=() R_ON=() R_PKG=() R_AGENT=() SCREEN=()
 
 add_row() {  # add_row KIND NAME HINT [ON [PACKAGE [AGENT]]]
@@ -1609,11 +1609,18 @@ raw_keys() {  # a key at a time, without echo or cursor; a read gives up after 0
     CURSOR_HIDDEN=1
 }
 
-# Ctrl+Z in the checklist: the terminal as it was while the installer is stopped, the list again after.
+# Ctrl+Z in the checklist (the TSTP trap asks for it, the key loop does it): the terminal as it was while
+# the installer is stopped, the list again after. The stop is SIGTSTP's own, not SIGSTOP: where no shell
+# could continue the installer (the session's only process group: ssh -t host ./install.sh, a tmux window,
+# exec ./install.sh), the system drops it, and the list stays. It is sent from here, not from the trap:
+# bash 3.2 does not stop for a SIGTSTP that its own trap sends.
 suspend_checklist() {
+    SUSPEND=0
     stty "$TTY_SAVED" <&5
     printf '\033[?25h'
-    kill -STOP $$
+    trap - TSTP
+    kill -TSTP $$
+    trap 'SUSPEND=1' TSTP
     raw_keys
     DRAWN=0
     draw
@@ -1635,11 +1642,12 @@ checklist() {
     TTY_SAVED=$(stty -g <&5)
     raw_keys
     drain_tty
-    trap suspend_checklist TSTP
+    trap 'SUSPEND=1' TSTP
     draw
     while :; do
         keys='' enter=0
         if IFS= read -r keys <&5; then enter=1; fi  # a read that ends with a newline: Enter
+        if [ "$SUSPEND" = 1 ]; then suspend_checklist; fi
         if [ -z "$keys" ] && [ "$enter" = 0 ]; then
             # Nothing typed. A terminal that is gone returns at once instead, again and again.
             if [ "$SECONDS" = "$second" ]; then idle=$((idle + 1)); else idle=0 second=$SECONDS; fi
