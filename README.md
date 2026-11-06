@@ -80,7 +80,7 @@ Projects folder [~/Projects]: ~/code
 
 The needed rows are always set up (tmux too, with your package manager, when it is missing or older
 than 3.3); recommended rows start ticked, optional ones do not, and what you have already is on the
-`found` line. `q` or `Esc` quits without changing anything. Then the installer unpacks the release to
+`found` line. `q` quits without changing anything. Then the installer unpacks the release to
 `~/.local/share/tmux-workspace/<version>` (`current` there points at the version in use), links
 `tmux-workspace`, `tw-clip` and `tw-sound` into `~/.local/bin`, `agent-status.conf` into
 `~/.config/tmux-workspace` and `tmux.conf` to `~/.tmux.conf`, adds the `work` command to your shell,
@@ -91,8 +91,10 @@ What the commands print goes to `~/.local/state/tmux-workspace/install.log`. Whe
 installer shows the end of that log, what to do, and a link to a new GitHub issue with your system and
 the end of the log filled in: your home folder, user and host names, e-mail and IP addresses and
 anything that looks like a token are taken out first, and nothing is sent until you open the link and
-submit it. Without a terminal (a script, CI), or with `--yes` or `--dry-run`, there is no checklist:
-the options below decide, and the output is the plain one line per change it always was.
+submit it. The checklist is only for a run without options in a terminal. With any of `--deps`,
+`--projects`, `--agents`, `--no-shell`, `--no-tmux-conf`, `--yes` or `--dry-run`, or without a terminal
+(a script, CI), there is none: the options decide, and the output is the plain one line per change it
+always was.
 
 Releases are built for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). The Linux
 binaries are static, so any distribution works. Options go after `bash -s --`, and `--version` picks a
@@ -119,9 +121,8 @@ below.
 | `--uninstall` | Remove the links and the shell lines, and restore the backups |
 
 tmux-workspace is a complete tmux configuration with `Ctrl+a` as the prefix. If you already have a
-`~/.tmux.conf`, the checklist says it moves to a backup (without a terminal, `--yes` replaces it), and
-`--uninstall` puts yours back. `--no-shell`, `--no-tmux-conf` and `--projects` take their rows or the
-question out of the checklist.
+`~/.tmux.conf`, the checklist says it moves to a backup (without the checklist, the installer asks
+first, and `--yes` replaces it), and `--uninstall` puts yours back.
 
 ### From a clone
 
