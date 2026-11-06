@@ -39,6 +39,9 @@ Usage: install.sh [options]
   --uninstall       remove the links and shell lines, and restore the backups
   -h, --help        show this help
 
+On a terminal, without --deps, --projects, --agents, --no-shell, --no-tmux-conf, --yes or --dry-run, the
+installer asks what to set up in a checklist; with any of them, the options decide.
+
 Environment:
   TMUX_WORKSPACE_HOME    where releases are unpacked (~/.local/share/tmux-workspace)
   TMUX_WORKSPACE_DIST    a URL or folder holding the release archives and SHA256SUMS
@@ -51,17 +54,18 @@ die() { DIE_MSG=$1; printf 'error    %s\n' "$1" >&2; exit "${2:-1}"; }
 DIE_MSG=''  # what die said: on a terminal, the failure says it again as what to do
 
 DEPS=0 AGENTS=0 SHELLS=1 TMUXCONF=1 DRY=0 YES=0 UNINSTALL=0 UPDATE=0 CHECK=0 PROJECTS='' WANTED=''
+CHOSEN=0  # an option that chooses what to set up was given: then nobody is asked (see choose_ui)
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do
     case $1 in
-        --deps) DEPS=1 ;;
-        --agents) AGENTS=1 ;;
-        --projects) [ $# -ge 2 ] || { usage >&2; exit 2; }; PROJECTS=$2; shift ;;
-        --projects=*) PROJECTS=${1#*=} ;;
+        --deps) DEPS=1 CHOSEN=1 ;;
+        --agents) AGENTS=1 CHOSEN=1 ;;
+        --projects) [ $# -ge 2 ] || { usage >&2; exit 2; }; PROJECTS=$2 CHOSEN=1; shift ;;
+        --projects=*) PROJECTS=${1#*=} CHOSEN=1 ;;
         --version) [ $# -ge 2 ] || { usage >&2; exit 2; }; WANTED=$2; shift ;;
         --version=*) WANTED=${1#*=} ;;
-        --no-shell) SHELLS=0 ;;
-        --no-tmux-conf) TMUXCONF=0 ;;
+        --no-shell) SHELLS=0 CHOSEN=1 ;;
+        --no-tmux-conf) TMUXCONF=0 CHOSEN=1 ;;
         --dry-run) DRY=1 ;;
         --yes|-y) YES=1 ;;
         --uninstall) UNINSTALL=1 ;;
@@ -112,6 +116,7 @@ NEW_BINARY='' NEW_STAMP=''  # the binary git_update had for the new version, and
 CHANGES=0       # how many changes were made so far: a progress line says when its step made none
 TMUXCONF_AGREED=$YES  # 1: replace a ~/.tmux.conf of the user's (moved to a backup) without asking
 PIPED=0         # this run started as `curl … | bash`
+SUDO_ASKS=0     # sudo asks for a password at every command here
 
 # How this run talks to the person. plain: the `say` lines above, which tests and scripts parse. guided:
 # a checklist of what to set up, then a line per step and a summary. styled: the lines per step and the
@@ -128,7 +133,7 @@ CURSOR_HIDDEN=0
 DONE_NAMES=''   # the steps that changed something, for the summary
 KEPT=''         # files of the user's that were left in place, a line each
 CODEX_CHANGED=0 # the agent step changed Codex's hooks, which Codex asks to review
-COLS=80
+COLS=80 ROWS=0
 G_LOCK='#' G_CURSOR='>' G_OK='ok' G_FAIL='x' G_DOT='-' G_UPDOWN='up/down' G_MORE='...'
 SPIN_FRAMES=('|' '/' '-' "\\")
 C_BOLD='' C_DIM='' C_GREEN='' C_RED='' C_CYAN='' C_OFF=''
@@ -248,11 +253,18 @@ terminal_ok() {
     case ${TERM:-dumb} in dumb | unknown) return 1 ;; esac
 }
 
-# The checklist for an install on a terminal; the lines per step for an update or an uninstall there (and
-# for the installer a pull or a download handed over to). --yes, --dry-run and --check stay plain.
+# The checklist for an install on a terminal without options; the lines per step for an update or an
+# uninstall there (and for the installer a pull handed over to). --yes, --dry-run and --check stay plain,
+# and so does an install with an option that chooses what to set up: whoever gave it has decided, and a
+# script that runs on a terminal nobody watches must not wait for a key.
 choose_ui() {
     [ "$DRY$YES$CHECK" = 000 ] && terminal_ok || return 0
-    if [ "$UPDATE$UNINSTALL" = 00 ] && [ -z "$UPDATE_FROM" ]; then UI=guided; else UI=styled; fi
+    if [ "$UPDATE$UNINSTALL" = 00 ] && [ -z "$UPDATE_FROM" ]; then
+        [ "$CHOSEN" = 0 ] || return 0
+        UI=guided
+    else
+        UI=styled
+    fi
     if [ "$UPDATE" = 1 ]; then SAME_NOTE=unchanged; fi
     case ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} in
         *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*)
@@ -263,10 +275,15 @@ choose_ui() {
     if [ -z "${NO_COLOR:-}" ]; then
         C_BOLD=$'\033[1m' C_DIM=$'\033[2m' C_GREEN=$'\033[32m' C_RED=$'\033[31m' C_CYAN=$'\033[36m' C_OFF=$'\033[0m'
     fi
-    COLS=$(stty size </dev/tty 2>/dev/null | awk '{ print $2 }')
+    local size
+    size=$(stty size </dev/tty 2>/dev/null || true)
+    ROWS=${size%% *} COLS=${size##* }
     case $COLS in '' | 0 | *[!0-9]*) COLS=80 ;; esac
+    case $ROWS in '' | 0 | *[!0-9]*) ROWS=0 ;; esac  # 0: not known
+    # Every way out runs on_exit, which gives the terminal back its settings and its cursor.
     trap 'exit 129' HUP
     trap 'exit 130' INT
+    trap 'exit 131' QUIT
     trap 'exit 143' TERM
 }
 
@@ -341,8 +358,9 @@ progress_close() {  # the terminal back on stdout and stderr: before handing ove
 
 # step NAME [DETAIL] [MODE]: the line of what runs next, marked done (ok) by the next step or step_end,
 # or failed (x) when the installer stops first. NAME is also what a bug report names. MODE slow spins
-# meanwhile; quick is a step that changes nothing the installer counts; otherwise, a step that changed
-# nothing says so. Nothing in the plain UI.
+# meanwhile; ask is a slow step that may ask something on the terminal (sudo, ssh, git), so it shows its
+# line and no spinner; quick is a step that changes nothing the installer counts; otherwise, a step that
+# changed nothing says so. Nothing in the plain UI.
 step() {
     [ "$UI" != plain ] || return 0
     progress_open
@@ -353,6 +371,8 @@ step() {
     printf -- '--- %s\n' "$STEP"
     if [ "$STEP_MODE" = slow ] && has sleep; then
         spin_start
+    elif [ "$STEP_MODE" = ask ]; then
+        printf '  %s %s\n' "$G_DOT" "$STEP" >&3
     else
         printf '  %s %s' "${SPIN_FRAMES[0]}" "$STEP" >&3
     fi
@@ -362,7 +382,7 @@ step_end() {  # the step that runs is done
     [ -n "$STEP" ] || return 0
     spin_stop
     local note=$STEP_NOTE
-    if [ "$STEP_MODE" = slow ] || [ "$CHANGES" != "$STEP_CHANGES" ]; then
+    if [ "$STEP_MODE" = slow ] || [ "$STEP_MODE" = ask ] || [ "$CHANGES" != "$STEP_CHANGES" ]; then
         DONE_NAMES="${DONE_NAMES:+$DONE_NAMES, }$STEP_NAME"
     elif [ "$STEP_MODE" != quick ] && [ -z "$note" ]; then
         note=$SAME_NOTE
@@ -400,7 +420,10 @@ spin_stop() {
 # cursor, and a run that stops in a step says why, what to do, and how to report it.
 ui_exit() {
     spin_stop
-    if [ -n "$TTY_SAVED" ]; then stty "$TTY_SAVED" </dev/tty 2>/dev/null; fi
+    if [ -n "$TTY_SAVED" ]; then
+        drain_tty 2>/dev/null
+        stty "$TTY_SAVED" </dev/tty 2>/dev/null
+    fi
     TTY_SAVED=''
     if [ "$CURSOR_HIDDEN" = 1 ]; then printf '\033[?25h' >/dev/tty; fi
     CURSOR_HIDDEN=0
@@ -514,7 +537,7 @@ urlencode() (
             [A-Za-z0-9._~-]) out=$out$c ;;
             *)
                 printf -v n '%d' "'$c"
-                if [ "$n" -lt 0 ]; then n=$((n + 256)); fi  # bash 3.2 reads bytes over 127 as signed
+                n=$((n & 255))  # bash 3.2 reads bytes over 127 as negative, musl as U+DF80 and up
                 printf -v c '%%%02X' "$n"
                 out=$out$c
                 ;;
@@ -616,14 +639,24 @@ install_packages() {
 }
 
 pm_install() {  # pm_install PACKAGE...: the package manager installs them
+    local sudo
+    sudo=$(pm_sudo)
     case $PM in
         brew) brew install "$@" ;;
-        apt-get) DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq "$@" ;;
-        dnf) $SUDO dnf install -y -q "$@" ;;
-        pacman) $SUDO pacman -S --needed --noconfirm "$@" ;;
-        apk) $SUDO apk add -q "$@" ;;
-        zypper) $SUDO zypper install -y "$@" ;;
+        apt-get) DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y -qq "$@" ;;
+        dnf) $sudo dnf install -y -q "$@" ;;
+        pacman) $sudo pacman -S --needed --noconfirm "$@" ;;
+        apk) $sudo apk add -q "$@" ;;
+        zypper) $sudo zypper install -y "$@" ;;
     esac
+}
+
+pm_update() { if [ "$PM" = apt-get ]; then $(pm_sudo) apt-get update -qq; fi; }  # the package lists
+
+# How to run the package manager: with SUDO, or under a spinner with sudo -n, which fails instead of
+# asking where nobody would see the question (sudo_ready and sudo_fresh asked first).
+pm_sudo() {
+    if [ -n "$SUDO" ] && [ "$UI" != plain ] && [ "$SUDO_ASKS" = 0 ]; then echo "$SUDO -n"; else echo "$SUDO"; fi
 }
 
 pm_usable() { [ -n "$PM" ] && { [ -z "$SUDO" ] || has sudo; }; }  # packages can be installed here
@@ -1040,7 +1073,7 @@ git_update() {
             die "$root is on ${branch:-a detached HEAD}, not $default; switch to $default to update it" 1
         fi
     fi
-    step updates "fetching them for $(ui_path "$root")" slow
+    step updates "fetching them for $(ui_path "$root")" ask
     git -C "$root" fetch --quiet || die "could not fetch the updates of $root" 3
     upstream='@{upstream}'
     [ "$elsewhere" = 0 ] || upstream=origin/$default  # --check only: what an update on $default would get
@@ -1215,8 +1248,13 @@ check_requirements() {
     [ "$CHECKED" = 0 ] || return 0
     CHECKED=1
     if [ "$UI" = guided ]; then
-        guided_setup
-        return 0
+        survey
+        if checklist_fits; then
+            guided_setup
+            return 0
+        fi
+        UI=plain  # a terminal too short for the checklist: the installer as it is without one
+        trap - HUP INT QUIT TERM
     fi
     if [ "$UI" != plain ]; then step requirements "tmux $(tmux -V 2>/dev/null | sed 's/^tmux //')" quick; fi
     local missing='' old='' tool version
@@ -1556,17 +1594,48 @@ toggle() {  # tick or untick the row of the cursor: every agent row at once
     fi
 }
 
-# checklist: until Enter. q, Esc and Ctrl+D quit without a change; Ctrl+C too (the INT trap of choose_ui).
-# The keys come from /dev/tty, never from standard input, which is the script itself when it is piped.
-checklist() {
-    local keys enter idle=0 second=$SECONDS
-    exec 5</dev/tty
-    TTY_SAVED=$(stty -g <&5)
-    # Not canonical: a key at a time, without echo. A read gives up after 0.1 s, so that it returns the
-    # bytes of an arrow key together and tells Esc from them. Ctrl+C still interrupts (isig).
+# Throw away what was typed ahead, so that no key pressed before a question showed answers it.
+drain_tty() {
+    local saved keys
+    saved=$(stty -g </dev/tty)
+    stty -icanon min 0 time 0 </dev/tty
+    while IFS= read -r keys </dev/tty; do :; done
+    stty "$saved" </dev/tty
+}
+
+raw_keys() {  # a key at a time, without echo or cursor; a read gives up after 0.1 s; Ctrl+C still works
     stty -icanon -echo min 0 time 1 <&5
     printf '\033[?25l'
     CURSOR_HIDDEN=1
+}
+
+# Ctrl+Z in the checklist: the terminal as it was while the installer is stopped, the list again after.
+suspend_checklist() {
+    stty "$TTY_SAVED" <&5
+    printf '\033[?25h'
+    kill -STOP $$
+    raw_keys
+    DRAWN=0
+    draw
+}
+
+quit_checklist() {
+    drain_tty
+    printf '\n%s\n' 'Nothing was changed.'
+    exit 0
+}
+
+# checklist: until Enter. q and Ctrl+D quit without a change, and so does Ctrl+C (the INT trap of
+# choose_ui). Esc alone does nothing: over a slow link the bytes of an arrow key can come apart, and the
+# rest of them must not end up in the shell. The keys come from /dev/tty, never from standard input, which
+# is the script itself when it is piped.
+checklist() {
+    local keys enter carry='' idle=0 second=$SECONDS
+    exec 5</dev/tty
+    TTY_SAVED=$(stty -g <&5)
+    raw_keys
+    drain_tty
+    trap suspend_checklist TSTP
     draw
     while :; do
         keys='' enter=0
@@ -1577,15 +1646,26 @@ checklist() {
             [ "$idle" -lt 200 ] || die "lost the terminal; nothing was changed" 1
             continue
         fi
+        keys=$carry$keys carry=''
         while [ -n "$keys" ]; do
+            # The start of an escape sequence whose end has not come yet: it may come with the next read.
+            case $keys in
+                $'\033')
+                    carry=$keys
+                    break
+                    ;;
+                $'\033'[[O]*)
+                    case ${keys:2} in *[A-Za-z~]*) ;; *)
+                        carry=$keys
+                        break
+                        ;;
+                    esac
+                    ;;
+            esac
             case $keys in
                 $'\033[A'* | $'\033OA'* | k*) move -1 ;;
                 $'\033[B'* | $'\033OB'* | j*) move 1 ;;
-                $'\033'[[O]*) ;;  # another key's escape sequence: ignored
-                $'\033'* | q* | Q* | $'\004'*)
-                    printf '\n%s\n' 'Nothing was changed.'
-                    exit 0
-                    ;;
+                q* | Q* | $'\004'*) quit_checklist ;;
                 ' '*) toggle ;;
             esac
             case $keys in
@@ -1594,12 +1674,13 @@ checklist() {
                     keys=${keys:2}
                     keys=${keys#*[A-Za-z~]}
                     ;;
-                *) keys=${keys:1} ;;
+                *) keys=${keys:1} ;;  # a key, or an Esc on its own
             esac
         done
         [ "$enter" = 0 ] || break
         draw
     done
+    trap - TSTP
     CURSOR=-1 ANSWERED=1
     draw
     stty "$TTY_SAVED" <&5
@@ -1609,19 +1690,52 @@ checklist() {
     exec 5<&-
 }
 
-# The projects folder, inline, unless --projects or the config names it. Ctrl+D leaves it to the first
-# `work`, as `tmux-workspace setup` does.
+checklist_fits() {  # the checklist fits on the terminal, which its redraws need (rows not known: it does)
+    [ "$ROWS" -gt 0 ] || return 0
+    checklist_lines
+    [ "${#SCREEN[@]}" -lt "$ROWS" ]
+}
+
+# folder_problem PATH: why PATH cannot be the projects folder, as tmux-workspace setup would find; nothing
+# when it can.
+folder_problem() {
+    local path=$1 parent
+    [ -n "$path" ] || return 0
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        if [ ! -d "$path" ]; then printf '%s is a file, not a folder.\n' "$(ui_path "$path")"; fi
+        return 0
+    fi
+    parent=$(dirname "$path")
+    while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do parent=$(dirname "$parent"); done
+    if [ ! -d "$parent" ] || [ ! -w "$parent" ]; then
+        printf '%s cannot be made: %s is not a folder you can write to.\n' "$(ui_path "$path")" "$(ui_path "$parent")"
+    fi
+}
+
+# The projects folder, inline, unless --projects or the config names it, with line editing (readline).
+# It is checked as `tmux-workspace setup` will check it, and asked again until it can be. Ctrl+D leaves it
+# to the first `work`, as `tmux-workspace setup` does.
 ask_projects() {
-    local answer path
+    local answer path problem prompt
     [ -z "$PROJECTS" ] || return 0
     if grep -q '"projects_dir"' "$CONFIG_DIR/config.json" 2>/dev/null; then return 0; fi
+    # \001 and \002 tell readline which bytes of the prompt take no room on the screen.
+    prompt=$'\001'$C_BOLD$'\002''Projects folder'$'\001'$C_OFF$'\002'' [~/Projects]: '
+    drain_tty
     printf '\n'
     while :; do
-        printf '%sProjects folder%s [~/Projects]: ' "$C_BOLD" "$C_OFF"
-        if ! IFS= read -r answer </dev/tty; then
+        if ! IFS= read -e -r -p "$prompt" answer </dev/tty; then
             printf '\n'
             return 0
         fi
+        answer=${answer#"${answer%%[![:space:]]*}"}  # setup trims the spaces around it
+        answer=${answer%"${answer##*[![:space:]]}"}
+        case $answer in
+            *[[:cntrl:]]*)
+                printf '%s\n' 'That holds keys that are not characters. Type the path of a folder.'
+                continue
+                ;;
+        esac
         [ -n "$answer" ] || answer=$HOME/Projects
         # shellcheck disable=SC2088 # the ~ the person typed
         case $answer in
@@ -1631,8 +1745,9 @@ ask_projects() {
             /*) path=$answer ;;
             *) path=$HOME/$answer ;;
         esac
-        if [ -n "$path" ] && [ -e "$path" ] && [ ! -d "$path" ]; then
-            printf '%s is a file, not a folder. Choose another folder.\n' "$(ui_path "$path")"
+        problem=$(folder_problem "$path")
+        if [ -n "$problem" ]; then
+            printf '%s Choose another folder.\n' "$problem"
             continue
         fi
         PROJECTS=$answer
@@ -1648,32 +1763,48 @@ chosen_packages() {  # the packages of the ticked rows
     printf '%s\n' "$list"
 }
 
-sudo_ready() {  # sudo asks for the password now, before a spinner covers its prompt
+# sudo asks for the password now, where its question shows. A sudo that keeps no password (it asks at
+# every command, timestamp_timeout=0) makes the package steps run without a spinner, which would cover
+# its question; otherwise each step gets sudo -v first and runs with sudo -n, which never asks.
+sudo_ready() {
     local packages
     packages=$(chosen_packages)
     [ -n "$SUDO" ] && [ -n "$packages" ] || return 0
+    drain_tty
     printf '\nInstalling %s takes sudo.\n' "$packages"
     sudo -v || die "sudo did not run; nothing was changed" 1
+    sudo -n true 2>/dev/null || SUDO_ASKS=1
+}
+
+sudo_fresh() {  # before a package step: a sudo whose password ran out asks again here, not under a spinner
+    [ -n "$SUDO" ] && [ "$SUDO_ASKS" = 0 ] || return 0
+    step_end
+    sudo -v || die "sudo did not run; run the installer again to finish: $(ui_rerun)" 1
 }
 
 install_chosen() {  # a step for each ticked package row; tmux is checked again once it is installed
-    local i first=1 what
+    local i what mode=slow
+    if [ "$SUDO_ASKS" = 1 ]; then mode=ask; fi
+    if [ "$PM" = apt-get ] && [ -n "$(chosen_packages)" ]; then
+        sudo_fresh
+        step 'package lists' "${SUDO:+$SUDO }apt-get update" "$mode"
+        pm_update </dev/null
+    fi
     for ((i = 0; i < NROWS; i++)); do
         [ -n "${R_PKG[i]}" ] && [ "${R_ON[i]}" = 1 ] || continue
-        step "${R_NAME[i]}" "$(install_command "${R_PKG[i]}")" slow
+        sudo_fresh
+        step "${R_NAME[i]}" "$(install_command "${R_PKG[i]}")" "$mode"
         what="leave ${R_NAME[i]} unticked"
         [ "${R_KIND[i]}" != need ] || what="install it yourself"
         STEP_FIX="$PM could not install ${R_PKG[i]}. Fix what the log says (or $what), then run the installer again: $(ui_rerun)"
-        if [ "$first" = 1 ] && [ "$PM" = apt-get ]; then $SUDO apt-get update -qq </dev/null; fi
-        first=0
         pm_install "${R_PKG[i]}" </dev/null
+        changed
         if [ "${R_PKG[i]}" = tmux ]; then check_requirements_again; fi
     done
 }
 
-guided_setup() {  # the checklist, the projects folder, and the tools it asked for
+guided_setup() {  # after survey: the checklist, the projects folder, and the tools it asked for
     local i
-    survey
     checklist
     ask_projects
     TMUXCONF_AGREED=1  # the tmux config row said a file of the user's moves to a backup
@@ -1786,7 +1917,15 @@ onboard() {
     if [ -n "$PROJECTS" ]; then
         if [ "$DRY" = 1 ]; then say would "set the projects folder to $PROJECTS"; return 0; fi
         step 'projects folder' "$(ui_path "$PROJECTS")"
-        "$tool" setup --projects "$PROJECTS" >/dev/null
+        if [ "$UI" = plain ]; then
+            "$tool" setup --projects "$PROJECTS" >/dev/null
+        elif ! "$tool" setup --projects "$PROJECTS" >/dev/null; then
+            # The prompt checked it as setup does; should setup refuse it anyway, the install still
+            # finishes, and the first `work` asks, as it did when setup asked.
+            STEP_NOTE="setup refused it; the first \`work\` asks"
+            say later "projects folder: the first \`work\` asks (or rerun with --projects DIR)"
+            return 0
+        fi
         say setup "projects folder $PROJECTS"
         changed
     elif grep -q '"projects_dir"' "$CONFIG_DIR/config.json" 2>/dev/null; then
@@ -1951,6 +2090,7 @@ ui_done() {  # ui_done TEXT: the last step is done, and TEXT says how it ended
 }
 
 confirm_uninstall() {  # one question before an uninstall on a terminal
+    drain_tty
     printf '%s\n' "${C_BOLD}tmux-workspace $(ui_version)$C_OFF"
     if ! ask "${C_BOLD}Remove tmux-workspace?$C_OFF Its links, the work command and the agent hooks go, and what it replaced comes back."; then
         printf '%s\n' 'Nothing was changed.'

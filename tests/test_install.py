@@ -256,6 +256,12 @@ class Terminal:
                 raise AssertionError(f'{wanted!r} never showed. The terminal showed:\n{self.text[self.seen:]}')
             self.pump(0.1)
 
+    def idle(self, seconds):
+        """Wait SECONDS, reading what the terminal shows meanwhile."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.pump(0.05)
+
     def press(self, *keys):
         for key in keys:
             os.write(self.master, key.encode())
@@ -1351,6 +1357,19 @@ class Installer(unittest.TestCase):
         (self.home / '.claude').mkdir()
         return self.brew()
 
+    def projects_set(self):
+        """A config that names the projects folder already, so the checklist does not ask for it."""
+        config = self.home / '.config/tmux-workspace/config.json'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('{"projects_dir": "~/code"}\n')
+
+    @staticmethod
+    def install_from_list(term, projects=''):
+        """Enter in the checklist, then PROJECTS for the projects folder (Enter alone takes ~/Projects)."""
+        term.press('\r')
+        term.expect('Projects folder [~/Projects]: ')
+        term.press(projects + '\r')
+
     def test_the_checklist_shows_what_is_needed_recommended_and_optional(self):
         self.machine()
         term = self.guided()
@@ -1386,17 +1405,33 @@ class Installer(unittest.TestCase):
         term.press('q')
         self.assertEqual(term.finish(), 0, term.text)
 
-    def test_q_or_esc_quits_and_changes_nothing(self):
+    def test_q_quits_and_changes_nothing(self):
         brew = self.machine()
-        for key in ('q', '\x1b'):
-            with self.subTest(key=key):
-                term = self.guided()
-                term.expect('What should I set up?', timeout=30)
-                term.press(key)
-                self.assertEqual(term.finish(), 0, term.text)
-                self.assertIn('Nothing was changed.', term.text)
-                self.assertEqual(self.tree(), {'.claude': 'dir'})
-                self.assertFalse(brew.exists())
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('q')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn('Nothing was changed.', term.text)
+        self.assertEqual(self.tree(), {'.claude': 'dir'})
+        self.assertFalse(brew.exists())
+
+    def test_esc_alone_does_not_quit_and_a_split_arrow_key_still_moves(self):
+        self.machine()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.expect('sesh')
+        term.press('\x1b')
+        time.sleep(0.4)  # the rest of the key, late, as over a slow ssh link
+        term.press('[B')
+        term.expect('› [x] zoxide')
+        time.sleep(0.5)
+        self.assertIsNone(term.proc.poll(), 'still asking')
+        term.press('\x1b')
+        time.sleep(0.4)
+        self.assertIsNone(term.proc.poll(), 'Esc alone does not quit')
+        term.press('q')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual(self.tree(), {'.claude': 'dir'})
 
     @staticmethod
     def installed(log):
@@ -1405,7 +1440,8 @@ class Installer(unittest.TestCase):
 
     def test_the_cursor_never_stops_on_a_needed_row(self):
         brew = self.machine()
-        term = self.guided('--projects', str(self.home / 'code'))
+        self.projects_set()
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
         term.press('k', 'k', '\x1b[A', ' ')  # up from the first row it can tick, then space
         term.expect('[ ] fzf')
@@ -1418,7 +1454,8 @@ class Installer(unittest.TestCase):
 
     def test_ticking_an_optional_row_installs_it(self):
         brew = self.machine()
-        term = self.guided('--projects', str(self.home / 'code'))
+        self.projects_set()
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
         term.press(*'jjjjjjjjjj', ' ')  # down to the last row, sesh
         term.expect('[x] sesh')
@@ -1430,7 +1467,8 @@ class Installer(unittest.TestCase):
 
     def test_unticking_an_agent_row_skips_the_integrations(self):
         self.machine()
-        term = self.guided('--projects', str(self.home / 'code'))
+        self.projects_set()
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
         term.press('j', 'j', ' ')  # fzf, zoxide, then Claude Code
         term.expect('[ ] Claude Code status')
@@ -1452,9 +1490,9 @@ class Installer(unittest.TestCase):
         self.home.mkdir()
         (self.home / '.claude').mkdir()
         brew.unlink()
-        term = self.guided('--projects', str(code))
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
-        term.press('\r')
+        self.install_from_list(term, '~/code')
         self.assertEqual(term.finish(), 0, term.text)
         guided = self.tree()
         # The one difference: the log of the guided run, and the folders made for it.
@@ -1500,9 +1538,9 @@ class Installer(unittest.TestCase):
     def test_a_failing_step_shows_the_end_of_the_log_and_installs_nothing(self):
         (self.bin / 'fzf').unlink()
         self.failing_brew('pats-mbp.example.lan', 'ghp_' + 'A1b2C3d4' * 5, 'pat@example.com')
-        term = self.guided('--projects', str(self.home / 'code'))
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
-        term.press('\r')
+        self.install_from_list(term)
         self.assertEqual(term.finish(), 1, term.text)
         self.assertRegex(term.line('✗ '), r'^  ✗ fzf +brew install fzf$')
         self.assertIn('    Error: fzf: no bottle for this machine', term.text, 'the end of the log, as it is')
@@ -1529,9 +1567,9 @@ class Installer(unittest.TestCase):
         log = self.home / '.local/state/tmux-workspace/install.log'
         log.parent.mkdir(parents=True)
         log.write_text('an earlier run\n' * 50)
-        term = self.guided('--projects', str(self.home / 'code'), USER='tester', LOGNAME='tester')
+        term = self.guided(USER='tester', LOGNAME='tester')
         term.expect('What should I set up?', timeout=30)
-        term.press('\r')
+        self.install_from_list(term)
         self.assertEqual(term.finish(), 1, term.text)
         link = term.line('Report it: ').split('Report it: ', 1)[1]
         self.assertTrue(link.startswith('https://github.com/ahmmkh/tmux-workspace/issues/new?template=bug.yml&title='),
@@ -1585,7 +1623,8 @@ class Installer(unittest.TestCase):
 
     def test_without_utf8_the_screen_is_ascii(self):
         self.machine()
-        term = self.guided('--projects', str(self.home / 'code'), utf8=False)
+        self.projects_set()
+        term = self.guided(utf8=False)
         term.expect('What should I set up?', timeout=30)
         term.press('\r')
         self.assertEqual(term.finish(), 0, term.text)
@@ -1598,7 +1637,8 @@ class Installer(unittest.TestCase):
 
     def test_no_color_leaves_the_colour_out(self):
         self.machine()
-        term = self.guided('--projects', str(self.home / 'code'), NO_COLOR='1')
+        self.projects_set()
+        term = self.guided(NO_COLOR='1')
         term.expect('What should I set up?', timeout=30)
         term.press('\r')
         self.assertEqual(term.finish(), 0, term.text)
@@ -1627,7 +1667,8 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.tree(), {'.claude': 'dir'}, 'q after the download: nothing, not even a log')
         self.assertEqual(list(self.tmp.iterdir()), [])
 
-        term = self.guided('--projects', str(self.home / 'code'), **piped)
+        self.projects_set()
+        term = self.guided(**piped)
         term.expect(f'tmux-workspace {VERSION} installer', timeout=60)
         term.press('\r')
         self.assertEqual(term.finish(), 0, term.text)
@@ -1699,7 +1740,8 @@ class Installer(unittest.TestCase):
         sesh = self.home / '.config/sesh/sesh.toml'
         sesh.parent.mkdir(parents=True)
         sesh.write_text('mine too\n')
-        term = self.guided('--projects', str(self.home / 'code'))
+        self.projects_set()
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
         term.expect('] work command')
         self.assertRegex(term.line('] tmux config'), r'^  \[■\] tmux config +~/\.tmux\.conf \(yours moves to a backup\)$')
@@ -1715,16 +1757,21 @@ class Installer(unittest.TestCase):
         self.install('--uninstall')
         self.assertEqual((self.home / '.tmux.conf').read_text(), 'mine\n')
 
-    def test_flags_take_rows_out_of_the_checklist(self):
-        term = self.guided('--no-shell', '--no-tmux-conf', '--projects', str(self.home / 'code'))
-        term.expect('What should I set up?', timeout=30)
-        term.press('\r')
-        self.assertEqual(term.finish(), 0, term.text)
-        self.assertNotIn('] tmux config', term.text)
-        self.assertNotIn('] work command', term.text)
-        self.assertNotIn('Projects folder [', term.text)
-        self.assertFalse(os.path.lexists(self.home / '.tmux.conf'))
-        self.assertFalse(os.path.lexists(self.home / '.zshrc'))
+    def test_a_choice_flag_on_a_terminal_gets_the_plain_installer(self):
+        # Whoever gives one has decided: a script on a terminal nobody watches must not wait for keys.
+        brew = self.machine()
+        for flags in (['--deps'], ['--agents'], ['--no-shell'], ['--no-tmux-conf'],
+                      ['--projects', str(self.home / 'code')]):
+            with self.subTest(flags=flags):
+                term = self.guided(*flags)
+                if '--projects' not in flags:
+                    term.expect('Where do you keep your projects?', timeout=30)
+                    term.press('\x04')  # Ctrl+D: the first `work` asks
+                self.assertEqual(term.finish(), 0, term.text)
+                self.assertNotIn('What should I set up?', term.text)
+                self.assertRegex(term.text, r'(?m)^done     tmux-workspace (already )?installed$')
+        self.assertIn('fzf', self.installed(brew))
+        self.assertTrue((self.home / '.claude/settings.json').exists())
 
     def test_without_a_package_manager_missing_tools_are_on_a_not_found_line(self):
         (self.bin / 'fzf').unlink()
@@ -1745,7 +1792,8 @@ class Installer(unittest.TestCase):
     def test_a_missing_python_is_a_recommended_row(self):
         brew = self.brew()
         (self.bin / 'python3').unlink()
-        term = self.guided('--projects', str(self.home / 'code'))
+        self.projects_set()
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
         term.expect('sesh')
         self.assertRegex(term.line('] python3'), r'^  \[x\] python3 3\.9\+ +dash, ai and cleanup need it · brew install python3$')
@@ -1773,7 +1821,8 @@ class Installer(unittest.TestCase):
         self.stub('cargo', 'sleep 1\nmkdir -p target/release\n'
                            f'cp "{BINARY}" target/release/tmux-workspace')
         self.terminal_tools()
-        term = Terminal(['/bin/bash', str(clone / 'install.sh'), '--projects', str(self.home / 'code')],
+        self.projects_set()
+        term = Terminal(['/bin/bash', str(clone / 'install.sh')],
                         self.env(TERM='xterm-256color', LANG=UTF8, TMUX_WORKSPACE_BINARY=None))
         self.addCleanup(term.close)
         term.expect('What should I set up?', timeout=30)
@@ -1790,9 +1839,9 @@ class Installer(unittest.TestCase):
     def test_ctrl_c_in_a_step_stops_there_and_restores_the_terminal(self):
         (self.bin / 'fzf').unlink()
         self.brew('sleep 30')
-        term = self.guided('--projects', str(self.home / 'code'))
+        term = self.guided()
         term.expect('What should I set up?', timeout=30)
-        term.press('\r')
+        self.install_from_list(term)
         term.expect(' fzf ')
         time.sleep(0.5)
         term.press('\x03')
@@ -1820,6 +1869,227 @@ class Installer(unittest.TestCase):
                                                '.local/state/tmux-workspace/install.log'])
         self.assertEqual(list(self.tmp.iterdir()), [])
 
+    def test_keys_typed_before_the_checklist_never_answer_it(self):
+        brew = self.machine()
+        (self.home / '.tmux.conf').write_text('mine\n')
+        term = self.guided()
+        term.press('\r\r')  # ./install.sh, Enter, Enter: typed before the list is drawn
+        term.expect('What should I set up?', timeout=30)
+        term.expect('sesh')
+        time.sleep(1)
+        self.assertIsNone(term.proc.poll(), 'the checklist waits for a key pressed after it showed')
+        self.assertNotIn('Projects folder [', term.text)
+        term.press('q')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual((self.home / '.tmux.conf').read_text(), 'mine\n')
+        self.assertFalse(brew.exists())
+
+    def test_enter_during_a_piped_download_does_not_answer_the_checklist(self):
+        self.machine()
+        dist = release_dist()
+        # A download that takes a while, as a real one does; the files come from the release folder.
+        self.stub('curl', f'sleep 1\nfor a; do before=$last; last=$a; done\ncp "{dist}/${{last##*/}}" "$before"')
+        term = self.guided(script=(ROOT / 'install.sh').read_text(), TMUX_WORKSPACE_BINARY=None,
+                           TMUX_WORKSPACE_DIST='https://example.invalid/download')
+        term.expect('download', timeout=30)
+        term.press('\r')
+        term.expect('What should I set up?', timeout=30)
+        term.expect('sesh')
+        time.sleep(1)
+        self.assertIsNone(term.proc.poll())
+        self.assertNotIn('Projects folder [', term.text, 'the Enter did not answer the checklist')
+        term.press('q')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual(self.tree(), {'.claude': 'dir'})
+
+    def test_the_projects_folder_is_checked_as_setup_will(self):
+        (self.home / 'notes').write_text('a file\n')
+        locked = self.work / 'locked'
+        locked.mkdir()
+        locked.chmod(0o555)
+        self.addCleanup(locked.chmod, 0o755)
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('\r')
+        term.expect('Projects folder [~/Projects]: ')
+        term.press(' ~/notes \r')  # spaces around it, as setup trims them
+        term.expect('~/notes is a file, not a folder. Choose another folder.')
+        term.expect('Projects folder [~/Projects]: ')
+        term.press('~/notes/projects\r')
+        term.expect('~/notes/projects cannot be made: ~/notes is not a folder you can write to. '
+                    'Choose another folder.')
+        term.expect('Projects folder [~/Projects]: ')
+        if os.geteuid() != 0:  # root may write into any folder
+            term.press(f'{locked}/projects\r')
+            term.expect(f'{locked}/projects cannot be made: {locked} is not a folder you can write to. '
+                        'Choose another folder.')
+            term.expect('Projects folder [~/Projects]: ')
+        term.press('  ~/code\r')
+        self.assertEqual(term.finish(), 0, term.text)
+        config = json.loads((self.home / '.config/tmux-workspace/config.json').read_text())
+        self.assertEqual(config['projects_dir'], '~/code')
+        self.assertTrue((self.home / 'code').is_dir())
+
+    def test_a_projects_folder_setup_refuses_is_left_to_the_first_work(self):
+        # A setup that fails anyway (a folder that went away, a disk that filled up) fails no install.
+        clone = self.clone()
+        binary = self.work / 'refusing-setup'
+        binary.write_text(f'#!/bin/sh\nif [ "$1" = setup ]; then echo "Workspace error: no" >&2; exit 1; fi\n'
+                          f'exec "{BINARY}" "$@"\n')
+        binary.chmod(0o755)
+        self.terminal_tools()
+        term = Terminal(['/bin/bash', str(clone / 'install.sh')],
+                        self.env(TERM='xterm-256color', LANG=UTF8, TMUX_WORKSPACE_BINARY=str(binary)))
+        self.addCleanup(term.close)
+        term.expect('What should I set up?', timeout=30)
+        self.install_from_list(term, '~/code')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertRegex(term.line('✓ projects folder'), r'^  ✓ projects folder +~/code \(setup refused it; '
+                                                         r'the first `work` asks\)$')
+        self.assertNotIn('✗', term.text)
+        self.assertNotIn('Report it', term.text)
+        self.assertIn(f'tmux-workspace {VERSION} is installed.', term.text)
+
+    def test_the_projects_prompt_edits_the_line_with_the_arrow_keys(self):
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('\r')
+        term.expect('Projects folder [~/Projects]: ')
+        term.press('~/cde', '\x1b[D', '\x1b[D', 'o', '\r')  # back past e and d, then the missing o
+        self.assertEqual(term.finish(), 0, term.text)
+        config = json.loads((self.home / '.config/tmux-workspace/config.json').read_text())
+        self.assertEqual(config['projects_dir'], '~/code')
+
+    def fake_sudo(self, remembers):
+        """A sudo that asks for a password on the terminal unless it remembers one (sudo -v); REMEMBERS False
+        forgets it after each command, as timestamp_timeout=0 does."""
+        stamp = self.work / 'sudo.stamp'
+        forget = '' if remembers else f'rm -f "{stamp}"'
+        self.stub('sudo', f"""stamp="{stamp}"
+ask() {{ printf 'Password: ' >/dev/tty; read -r secret </dev/tty; : >"$stamp"; }}
+if [ "$1" = -v ]; then [ -f "$stamp" ] || ask; exit 0; fi
+if [ "$1" = -n ]; then
+    shift
+    [ -f "$stamp" ] || {{ echo 'sudo: a password is required' >&2; exit 1; }}
+else
+    [ -f "$stamp" ] || ask
+fi
+{forget}
+exec "$@"
+""")
+        log = self.work / 'apt.log'
+        self.stub('apt-get', f'echo "$*" >> "{log}"')
+        (self.bin / 'fzf').unlink()
+        return log
+
+    def test_a_sudo_password_prompt_is_never_under_a_spinner(self):
+        if os.geteuid() == 0:
+            self.skipTest('root needs no sudo')
+        apt = self.fake_sudo(remembers=False)
+        self.projects_set()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('\r')
+        for _ in range(4):  # once before the steps, then the package lists, fzf and zoxide
+            term.expect('Password: ', timeout=20)
+            term.idle(0.5)  # long enough for a spinner to write over it
+            self.assertTrue(term.text.rstrip().endswith('Password:'), repr(term.text[-200:]))
+            term.press('secret\r')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual(apt.read_text().splitlines(),
+                         ['update -qq', 'install -y -qq fzf', 'install -y -qq zoxide'])
+
+    def test_sudo_asks_once_when_it_remembers_the_password(self):
+        if os.geteuid() == 0:
+            self.skipTest('root needs no sudo')
+        apt = self.fake_sudo(remembers=True)
+        self.projects_set()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('\r')
+        term.expect('Installing fzf zoxide takes sudo.')
+        term.expect('Password: ', timeout=20)
+        term.press('secret\r')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual(term.raw.count(b'Password: '), 1)
+        self.assertRegex(term.line('✓ fzf'), r'^  ✓ fzf +sudo apt-get install -y fzf$')
+        self.assertIn('install -y -qq zoxide', apt.read_text())
+
+    def test_a_git_prompt_in_an_update_is_never_under_a_spinner(self):
+        clone = self.work / 'checkout'
+        upstream = self.upstream_and_clone(self.v2('2.0.0'), clone)
+        self.run_script(['/bin/bash', str(clone / 'install.sh'), '--yes'], True, **self.clone_env())
+        self.commit(upstream, self.v2('2.0.1'), 'second')
+        real = shutil.which('git')
+        (self.bin / 'git').unlink()
+        # What ssh does for a key with a passphrase, or git for credentials: ask on the terminal.
+        self.stub('git', 'case " $* " in *" fetch "*) printf "Enter passphrase for key: " >/dev/tty; '
+                         f'read -r secret </dev/tty ;; esac\nexec "{real}" "$@"')
+        term = self.on_terminal('/bin/bash', str(clone / 'install.sh'), '--update', **self.clone_env())
+        term.expect('Enter passphrase for key: ', timeout=30)
+        term.idle(0.5)
+        self.assertTrue(term.text.rstrip().endswith('Enter passphrase for key:'), repr(term.text[-200:]))
+        term.press('secret\r')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertIn('Updated 2.0.0', term.text)
+
+    def test_the_summary_counts_packages_installed(self):
+        self.install('--yes', '--projects', str(self.home / 'code'))
+        brew = self.brew()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.expect('sesh')
+        # Untick zoxide (and the iTerm2 profile on macOS), tick lazygit.
+        term.press(*([' ', 'j', ' ', 'j', ' '] if platform.system() == 'Darwin' else [' ', 'j', ' ']))
+        term.expect('[x] lazygit')
+        term.press('\r')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertEqual(self.installed(brew), ['lazygit'])
+        self.assertIn(f'tmux-workspace {VERSION} is installed.', term.text)
+        self.assertRegex(term.line('Changed '), r'^  Changed +lazygit$')
+
+    def test_ctrl_backslash_in_the_checklist_restores_the_terminal(self):
+        self.machine()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.press('\x1c')  # Ctrl+\
+        self.assertEqual(term.finish(timeout=20), 131, term.text)
+        modes = termios.ECHO | termios.ICANON
+        self.assertEqual(term.after[3] & modes, term.before[3] & modes)
+        self.assertGreater(term.raw.rfind(b'\x1b[?25h'), term.raw.rfind(b'\x1b[?25l'))
+        self.assertEqual(self.tree(), {'.claude': 'dir'})
+
+    def test_ctrl_z_in_the_checklist_gives_the_terminal_back_until_it_continues(self):
+        import signal
+        self.machine()
+        term = self.guided()
+        term.expect('What should I set up?', timeout=30)
+        term.expect('sesh')
+        term.press('\x1a')  # Ctrl+Z
+        time.sleep(1)
+        term.pump(0.2)
+        modes = termios.ECHO | termios.ICANON
+        self.assertEqual(termios.tcgetattr(term.master)[3] & modes, term.before[3] & modes, 'stopped: as it was')
+        self.assertGreater(term.raw.rfind(b'\x1b[?25h'), term.raw.rfind(b'\x1b[?25l'), 'cursor shown')
+        os.killpg(term.proc.pid, signal.SIGCONT)
+        term.expect('What should I set up?', timeout=10)  # the list again
+        term.press('j', ' ')
+        term.expect('[ ] zoxide')
+        term.press('q')
+        self.assertEqual(term.finish(timeout=20), 0, term.text)
+
+    def test_a_terminal_too_short_for_the_checklist_gets_the_plain_installer(self):
+        self.machine()
+        self.terminal_tools()
+        term = Terminal(['/bin/bash', str(checkout() / 'install.sh')],
+                        self.env(TERM='xterm-256color', LANG=UTF8), size=(12, 100))
+        self.addCleanup(term.close)
+        term.expect('Where do you keep your projects?', timeout=30)
+        term.press('\x04')
+        self.assertEqual(term.finish(), 0, term.text)
+        self.assertNotIn('What should I set up?', term.text)
+        self.assertIn('done     tmux-workspace installed', term.text)
+
     def test_a_dumb_terminal_gets_the_plain_installer(self):
         term = self.guided(TERM='dumb')
         term.expect('Where do you keep your projects?', timeout=30)
@@ -1827,6 +2097,20 @@ class Installer(unittest.TestCase):
         self.assertEqual(term.finish(), 0, term.text)
         self.assertNotIn('What should I set up?', term.text)
         self.assertIn('done     tmux-workspace installed', term.text)
+
+
+class Report(unittest.TestCase):
+    """The pieces of a bug report link, run from install.sh as they are."""
+
+    def run_function(self, name, *args):
+        text = (ROOT / 'install.sh').read_text()
+        body = re.search(rf'^{name}\(\) \($.*?^\)$', text, re.M | re.S).group(0)
+        return subprocess.run(['bash', '-c', body + f'\n{name} "$@"', name, *args], capture_output=True,
+                              env={'PATH': os.environ['PATH'], 'LANG': 'C.UTF-8'}, check=True).stdout
+
+    def test_urlencode_gives_the_utf8_bytes(self):
+        # musl's C locale reads bytes over 127 as U+DF80 and up; bash 3.2 as negative numbers.
+        self.assertEqual(self.run_function('urlencode', 'a→b é ~-_.'), b'a%E2%86%92b%20%C3%A9%20~-_.')
 
 
 if __name__ == '__main__':
