@@ -36,7 +36,7 @@ pub fn main() -> i32 {
         // SAFETY: `umask` only sets this process's file-creation mask; it cannot fail.
         unsafe { libc::umask(0o077) };
     }
-    exit_code(command(&args), run(&args))
+    exit_code(command(&args), &args, run(&args))
 }
 
 /// Whether a command runs with umask 077, so that what it creates, and what its children create,
@@ -304,14 +304,60 @@ fn failure_text(command: &str, error: &Error) -> String {
     text
 }
 
+/// The commands that `dispatch` runs.
+const KNOWN: [&str; 31] = [
+    "agent-hook",
+    "setup",
+    "integrations",
+    "doctor",
+    "bug",
+    "idea",
+    "update",
+    "pane-start",
+    "exec-shell",
+    "label",
+    "init",
+    "tick",
+    "save",
+    "restore",
+    "history",
+    "park",
+    "unpark",
+    "choose-park",
+    "open",
+    "pick-window",
+    "window-preview",
+    "new-tab",
+    "kill-workspace",
+    "delete",
+    "rm",
+    "help",
+    "help-topic",
+    "dash",
+    "dashboard",
+    "ai",
+    "cleanup",
+];
+
+/// What a command is called in the log, and which of its arguments may have been put into the message: all
+/// of them, the command's own name apart.
+fn logged<'a>(command: &'a str, args: &[String]) -> (&'a str, Vec<String>) {
+    if KNOWN.contains(&command) {
+        (command, args.iter().skip(1).cloned().collect())
+    } else {
+        ("unknown", args.to_vec())
+    }
+}
+
 /// The error contract: a command's own status is passed on, end of input is not a failure, and any
 /// other error is logged (see `errorlog`), reported and exits 1.
-fn exit_code(command: &str, result: Result<i32>) -> i32 {
+fn exit_code(command: &str, args: &[String], result: Result<i32>) -> i32 {
     match result {
         Ok(status) => status,
         Err(Error::Eof) => 0,
         Err(error) => {
-            errorlog::record(command, &error);
+            let (name, arguments) = logged(command, args);
+            errorlog::record(name, &arguments, &error);
             let _ = write!(std::io::stderr(), "{}", failure_text(command, &error));
             message(&format!("Workspace: {error}"));
             1
@@ -336,8 +382,8 @@ mod tests {
 
     #[test]
     fn eof_and_success_exit_zero_without_output() {
-        assert_eq!(exit_code("open", Ok(0)), 0);
-        assert_eq!(exit_code("open", Err(Error::Eof)), 0);
+        assert_eq!(exit_code("open", &[], Ok(0)), 0);
+        assert_eq!(exit_code("open", &[], Err(Error::Eof)), 0);
     }
 
     #[test]
@@ -368,9 +414,58 @@ mod tests {
         }
     }
 
+    /// The words of the arms of `dispatch`.
+    fn dispatched() -> Vec<String> {
+        let source = include_str!("cli.rs");
+        let body = source
+            .split("fn dispatch(")
+            .nth(1)
+            .and_then(|rest| rest.split("_ => fail(").next())
+            .unwrap();
+        let mut words = Vec::new();
+        for line in body.lines() {
+            // The arms are `"a" | "b" => ...`; whatever is after the arrow is not a command.
+            let Some((pattern, _)) = line.split_once("=>") else {
+                continue;
+            };
+            let pattern = pattern.trim();
+            if pattern.starts_with('"') {
+                words.extend(
+                    pattern
+                        .split('|')
+                        .map(|word| word.trim().trim_matches('"').to_string()),
+                );
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn the_known_commands_are_the_ones_dispatch_runs() {
+        let mut known: Vec<String> = KNOWN.iter().map(|word| word.to_string()).collect();
+        let mut run = dispatched();
+        known.sort();
+        run.sort();
+        assert_eq!(known, run);
+    }
+
+    #[test]
+    fn an_argument_is_not_logged_as_a_command_and_a_command_is_not_one_of_the_arguments() {
+        assert_eq!(
+            logged("open", &args(&["open", "acme"])),
+            ("open", args(&["acme"]))
+        );
+        // Something typed that is no command is "unknown", and is an argument like the rest.
+        assert_eq!(
+            logged("globex-merger", &args(&["globex-merger", "x"])),
+            ("unknown", args(&["globex-merger", "x"]))
+        );
+        assert_eq!(logged("open", &args(&[])), ("open", args(&[])));
+    }
+
     #[test]
     fn a_commands_own_status_is_the_exit_status() {
-        assert_eq!(exit_code("open", Ok(2)), 2);
+        assert_eq!(exit_code("open", &[], Ok(2)), 2);
     }
 
     #[test]
