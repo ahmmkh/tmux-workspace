@@ -3,7 +3,7 @@
 //! the error message, and nothing else: never the arguments, never anything of a screen.
 
 use crate::error::Error;
-use crate::paths::{make_private_dir, state_dir};
+use crate::paths::{expand_user, make_private_dir, state_dir};
 use crate::text::now;
 use std::fs;
 use std::io::{self, Write};
@@ -133,9 +133,67 @@ pub fn record_in(state: &Path, secs: i64, command: &str, message: &str) {
     let _ = append(state, &line);
 }
 
-/// Add a line for `error` to the log of the state folder, now. A failure is ignored.
-pub fn record(command: &str, error: &Error) {
-    record_in(&state_dir(), now() as i64, command, &describe(error));
+/// `message` without the arguments of the command that failed, and without the names that it made of
+/// them: each is `<arg>`. A flag, and an argument of one character, say nothing and stay.
+pub fn redact(message: &str, arguments: &[String]) -> String {
+    let mut needles: Vec<String> = Vec::new();
+    for argument in arguments
+        .iter()
+        .filter(|argument| !argument.starts_with('-'))
+    {
+        for name in names_of(argument) {
+            if name.chars().count() >= 2 && !needles.contains(&name) {
+                needles.push(name);
+            }
+        }
+    }
+    // The longest first, so that `acme-secret` is not cut short by `acme`.
+    needles.sort_by_key(|needle| std::cmp::Reverse(needle.len()));
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(message.len());
+    let mut at = 0;
+    while at < message.len() {
+        let found = needles.iter().find(|needle| {
+            let end = at + needle.len();
+            message[at..].starts_with(needle.as_str())
+                && !(needle.starts_with(word) && message[..at].ends_with(word))
+                && !(needle.ends_with(word) && message[end..].starts_with(word))
+        });
+        if let Some(needle) = found {
+            out.push_str("<arg>");
+            at += needle.len();
+            continue;
+        }
+        let c = message[at..].chars().next().unwrap_or(' ');
+        out.push(c);
+        at += c.len_utf8();
+    }
+    out
+}
+
+/// An argument, and what the program makes of it: where it leads as a path, and the name of the folder
+/// (`work .` is a workspace named after the folder it is run in).
+fn names_of(argument: &str) -> Vec<String> {
+    let mut names = vec![argument.to_string()];
+    let expanded = expand_user(argument);
+    let mut paths = vec![expanded.clone()];
+    if let Ok(real) = expanded.canonicalize() {
+        paths.push(real);
+    }
+    for path in paths {
+        names.push(path.to_string_lossy().into_owned());
+        if let Some(name) = path.file_name() {
+            names.push(name.to_string_lossy().into_owned());
+        }
+    }
+    names
+}
+
+/// Add a line for `error` to the log of the state folder, now. The arguments of the command, which the
+/// message may have in it, are taken out. A failure is ignored.
+pub fn record(command: &str, arguments: &[String], error: &Error) {
+    let message = redact(&describe(error), arguments);
+    record_in(&state_dir(), now() as i64, command, &message);
 }
 
 /// The last `count` lines of the log in `state`, the oldest first.
@@ -267,6 +325,83 @@ mod tests {
         assert_eq!(mode(&path(dir.path())), 0o600);
         let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1, "no temporary file is left");
+    }
+
+    fn args(arguments: &[&str]) -> Vec<String> {
+        arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn an_argument_is_not_in_what_the_log_says() {
+        assert_eq!(
+            redact("No such pane: initech-layoffs", &args(&["initech-layoffs"])),
+            "No such pane: <arg>"
+        );
+        assert_eq!(
+            redact(
+                "Cannot write /home/x/Projects/Globex Corp: Permission denied",
+                &args(&["Globex Corp"])
+            ),
+            "Cannot write /home/x/Projects/<arg>: Permission denied"
+        );
+        // Every place, and the longest argument first.
+        assert_eq!(
+            redact(
+                "acme-secret and acme and acme-secret",
+                &args(&["acme", "acme-secret"])
+            ),
+            "<arg> and <arg> and <arg>"
+        );
+        // Whole words only, so that the message stays a message.
+        assert_eq!(
+            redact("nopeness is not nope", &args(&["nope"])),
+            "nopeness is not <arg>"
+        );
+    }
+
+    #[test]
+    fn flags_and_one_letter_arguments_and_empty_ones_stay() {
+        let message = "Usage: tmux-workspace update [--check] x";
+        assert_eq!(redact(message, &args(&["--check", "-x", "x", ""])), message);
+        assert_eq!(redact(message, &[]), message);
+    }
+
+    #[test]
+    fn the_name_an_argument_resolves_to_is_not_in_it_either() {
+        let dir = TempDir::new();
+        let folder = dir.path().join("Globex Corp");
+        fs::create_dir(&folder).unwrap();
+        let argument = folder.to_string_lossy().into_owned();
+        let real = folder.canonicalize().unwrap();
+        // The folder's own name, as the program makes a workspace of it, and its full path as it resolves.
+        assert_eq!(
+            redact(
+                "Cannot write /x/Projects/Globex Corp: no",
+                &args(&[&argument])
+            ),
+            "Cannot write /x/Projects/<arg>: no"
+        );
+        assert_eq!(
+            redact(
+                &format!("Cannot read {}: no", real.display()),
+                &args(&[&argument])
+            ),
+            "Cannot read <arg>: no"
+        );
+    }
+
+    #[test]
+    fn the_log_line_is_made_with_the_arguments_taken_out() {
+        let dir = TempDir::new();
+        let message = redact("No such pane: initech-layoffs", &args(&["initech-layoffs"]));
+        record_in(dir.path(), 0, "park", &message);
+        assert_eq!(
+            log_lines(dir.path()),
+            ["1970-01-01 00:00 park: No such pane: <arg>"]
+        );
     }
 
     #[test]

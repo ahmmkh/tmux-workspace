@@ -18,6 +18,7 @@ use crate::report::Kind;
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 /// How long the check of the Python version may take.
@@ -36,7 +37,7 @@ pub fn main() -> i32 {
         // SAFETY: `umask` only sets this process's file-creation mask; it cannot fail.
         unsafe { libc::umask(0o077) };
     }
-    exit_code(command(&args), run(&args))
+    exit_code(command(&args), &args, run(&args))
 }
 
 /// Whether a command runs with umask 077, so that what it creates, and what its children create,
@@ -214,10 +215,7 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     };
     let script = share_root().join("legacy/bin/tmux-workspace");
     if !script.is_file() {
-        return Error::Msg(format!(
-            "{command} needs {}, which is missing",
-            script.display()
-        ));
+        return missing(command, &script);
     }
     let mut argv = vec![
         python.to_string_lossy().into_owned(),
@@ -226,6 +224,11 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     ];
     argv.extend(args.iter().cloned());
     process::exec(&argv)
+}
+
+/// The error of a command whose script is not there: its path, then what needs it.
+fn missing(command: &str, script: &Path) -> Error {
+    Error::Msg(format!("Missing {}: {command} needs it", script.display()))
 }
 
 /// `update [--check]`: become `bash <share>/install.sh --update [--check]`, the installer that came
@@ -239,10 +242,7 @@ fn update(args: &[String]) -> Error {
     };
     let script = share_root().join("install.sh");
     if !script.is_file() {
-        return Error::Msg(format!(
-            "update needs {}, which is missing",
-            script.display()
-        ));
+        return missing("update", &script);
     }
     let mut argv = vec![
         "bash".to_string(),
@@ -304,14 +304,60 @@ fn failure_text(command: &str, error: &Error) -> String {
     text
 }
 
+/// The commands that `dispatch` runs.
+const KNOWN: [&str; 31] = [
+    "agent-hook",
+    "setup",
+    "integrations",
+    "doctor",
+    "bug",
+    "idea",
+    "update",
+    "pane-start",
+    "exec-shell",
+    "label",
+    "init",
+    "tick",
+    "save",
+    "restore",
+    "history",
+    "park",
+    "unpark",
+    "choose-park",
+    "open",
+    "pick-window",
+    "window-preview",
+    "new-tab",
+    "kill-workspace",
+    "delete",
+    "rm",
+    "help",
+    "help-topic",
+    "dash",
+    "dashboard",
+    "ai",
+    "cleanup",
+];
+
+/// What a command is called in the log, and which of its arguments may have been put into the message: all
+/// of them, the command's own name apart.
+fn logged<'a>(command: &'a str, args: &[String]) -> (&'a str, Vec<String>) {
+    if KNOWN.contains(&command) {
+        (command, args.iter().skip(1).cloned().collect())
+    } else {
+        ("unknown", args.to_vec())
+    }
+}
+
 /// The error contract: a command's own status is passed on, end of input is not a failure, and any
 /// other error is logged (see `errorlog`), reported and exits 1.
-fn exit_code(command: &str, result: Result<i32>) -> i32 {
+fn exit_code(command: &str, args: &[String], result: Result<i32>) -> i32 {
     match result {
         Ok(status) => status,
         Err(Error::Eof) => 0,
         Err(error) => {
-            errorlog::record(command, &error);
+            let (name, arguments) = logged(command, args);
+            errorlog::record(name, &arguments, &error);
             let _ = write!(std::io::stderr(), "{}", failure_text(command, &error));
             message(&format!("Workspace: {error}"));
             1
@@ -336,8 +382,8 @@ mod tests {
 
     #[test]
     fn eof_and_success_exit_zero_without_output() {
-        assert_eq!(exit_code("open", Ok(0)), 0);
-        assert_eq!(exit_code("open", Err(Error::Eof)), 0);
+        assert_eq!(exit_code("open", &[], Ok(0)), 0);
+        assert_eq!(exit_code("open", &[], Err(Error::Eof)), 0);
     }
 
     #[test]
@@ -368,9 +414,74 @@ mod tests {
         }
     }
 
+    /// The words of the arms of `dispatch`.
+    fn dispatched() -> Vec<String> {
+        let source = include_str!("cli.rs");
+        let body = source
+            .split("fn dispatch(")
+            .nth(1)
+            .and_then(|rest| rest.split("_ => fail(").next())
+            .unwrap();
+        let mut words = Vec::new();
+        for line in body.lines() {
+            // The arms are `"a" | "b" => ...`; whatever is after the arrow is not a command.
+            let Some((pattern, _)) = line.split_once("=>") else {
+                continue;
+            };
+            let pattern = pattern.trim();
+            if pattern.starts_with('"') {
+                words.extend(
+                    pattern
+                        .split('|')
+                        .map(|word| word.trim().trim_matches('"').to_string()),
+                );
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn the_known_commands_are_the_ones_dispatch_runs() {
+        let mut known: Vec<String> = KNOWN.iter().map(|word| word.to_string()).collect();
+        let mut run = dispatched();
+        known.sort();
+        run.sort();
+        assert_eq!(known, run);
+    }
+
+    #[test]
+    fn an_argument_is_not_logged_as_a_command_and_a_command_is_not_one_of_the_arguments() {
+        assert_eq!(
+            logged("open", &args(&["open", "acme"])),
+            ("open", args(&["acme"]))
+        );
+        // Something typed that is no command is "unknown", and is an argument like the rest.
+        assert_eq!(
+            logged("globex-merger", &args(&["globex-merger", "x"])),
+            ("unknown", args(&["globex-merger", "x"]))
+        );
+        assert_eq!(logged("open", &args(&[])), ("open", args(&[])));
+    }
+
+    #[test]
+    fn a_missing_script_says_what_needs_it_after_its_path_and_the_reason_survives_the_anonymizer() {
+        use crate::anonymize::{Anonymizer, Identity, Names};
+        let message =
+            missing("update", Path::new("/opt/clients/Globex Corp/install.sh")).to_string();
+        assert_eq!(
+            message,
+            "Missing /opt/clients/Globex Corp/install.sh: update needs it"
+        );
+        let shown = Anonymizer::new(&Identity::default(), &Names::default()).apply(&message);
+        assert_eq!(
+            shown.as_str(),
+            "Missing /opt/folder-1/folder-2/folder-3: update needs it"
+        );
+    }
+
     #[test]
     fn a_commands_own_status_is_the_exit_status() {
-        assert_eq!(exit_code("open", Ok(2)), 2);
+        assert_eq!(exit_code("open", &[], Ok(2)), 2);
     }
 
     #[test]

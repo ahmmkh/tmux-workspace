@@ -35,7 +35,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Filled in by `work bug`. Run `work bug --print` to see it without opening anything.
+      description: Filled in by `work bug`. Run `work bug --print` to see it, and the link, without opening anything.
       render: markdown
     validations:
       required: true

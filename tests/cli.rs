@@ -351,7 +351,7 @@ mod legacy {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             format!(
-                "Workspace error: ai needs {}/legacy/bin/tmux-workspace, which is missing\nReport it: work bug\n",
+                "Workspace error: Missing {}/legacy/bin/tmux-workspace: ai needs it\nReport it: work bug\n",
                 share.path().display()
             )
         );
@@ -498,7 +498,7 @@ mod update {
         assert_eq!(
             common::text(&out.stderr),
             format!(
-                "Workspace error: update needs {}/install.sh, which is missing\nReport it: work bug\n",
+                "Workspace error: Missing {}/install.sh: update needs it\nReport it: work bug\n",
                 share.path().display()
             )
         );

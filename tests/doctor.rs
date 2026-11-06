@@ -142,6 +142,25 @@ fn missing_server_reports_warning_without_starting_a_server() {
 }
 
 #[test]
+fn a_server_that_cannot_be_reached_keeps_tmuxs_reason_after_the_path() {
+    let machine = Machine::new();
+    machine.fakes.stand_in_tmux(
+        r#"case "$1" in
+  -V) echo 'tmux 3.5a';;
+  *) echo 'error connecting to /tmp/tmux-501/default (No such file or directory)' >&2; exit 1;;
+esac"#,
+    );
+    let (code, out) = machine.doctor();
+    assert_eq!(code, 1);
+    assert!(
+        out.contains(
+            "WARN  tmux server: error connecting (No such file or directory): /tmp/tmux-501/default\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
 fn doctor_checks_the_tmux_floor() {
     let machine = Machine::new();
     machine.tmux("tmux 3.2a");
@@ -444,7 +463,7 @@ fn doctor_warns_when_another_binary_is_first_on_path() {
     let other = machine.fakes.path().join("tmux-workspace");
     assert!(
         out.contains(&format!(
-            "WARN  tmux-workspace on PATH: {} is not the installed binary\n",
+            "WARN  tmux-workspace on PATH: not the installed binary ({})\n",
             other.display()
         )),
         "{out}"

@@ -1112,6 +1112,8 @@ pub fn tick(tmux: &Tmux, host: &dyn Host) -> Result<()> {
     let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| save(tmux, host, false)))
         .unwrap_or_else(|panic| Err(Error::Msg(panic_text(panic.as_ref()))));
     let reported = saved.or_else(|e| -> Result<()> {
+        // The save went wrong and the tick goes on, so nothing else would tell the log.
+        crate::errorlog::record("tick", &[], &e);
         tmux.put("@workspace_save_error", &e.to_string(), None)?;
         message_via(tmux, &format!("Workspace autosave failed: {e}"));
         Ok(())
