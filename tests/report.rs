@@ -601,6 +601,7 @@ fn a_report_is_not_made_when_the_names_of_the_server_cannot_be_read() {
     );
     assert!(!stderr.contains("Report it"), "{stderr}");
     assert!(!stderr.contains("secret"), "{stderr}");
+    assert!(stderr.contains("a pane label or a folder"), "{stderr}");
     // On a terminal nothing is shown, asked, opened or copied either.
     let (status, _, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), "");
     assert_eq!((status, shown.as_str()), (1, ""));
@@ -609,6 +610,32 @@ fn a_report_is_not_made_when_the_names_of_the_server_cannot_be_read() {
     let out = quietly(world.command(&["idea", "--print"]));
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(text(&out.stdout).starts_with("### Environment\n"));
+}
+
+#[test]
+fn a_report_is_made_when_tmux_cannot_be_run_at_all() {
+    // The user whose tmux is broken is the one who wants to report it. A tmux that is on the PATH and cannot
+    // start (its interpreter is gone), like one that is not installed, has no names to hide.
+    let world = World::new();
+    tmux_workspace::testing::write_script(
+        &world.fakes.path().join("tmux"),
+        "#!/tw-no-such-interpreter\n",
+    );
+    let out = quietly(world.command(&["bug", "--print"]));
+    assert_eq!(
+        (text(&out.stderr).as_str(), out.status.code()),
+        ("", Some(0))
+    );
+    let shown = text(&out.stdout);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert!(lines[2].contains(" · tmux ✗ · "), "{}", lines[2]);
+    assert!(shown.contains("\n### Doctor\n0 panes · "), "{shown}");
+    assert!(shown.contains("\nWARN  tmux server: "), "{shown}");
+    assert!(!shown.contains("could not be read"), "{shown}");
+    // And on a terminal the question is asked as ever.
+    let (status, _, shown) = on_a_terminal(world.on_a_desktop(&["bug"]), "n\n");
+    assert_eq!(status, 0);
+    assert!(shown.contains(QUESTION), "{shown}");
 }
 
 #[test]

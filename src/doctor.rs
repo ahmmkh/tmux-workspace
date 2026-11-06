@@ -201,7 +201,7 @@ fn run(report: &mut Report, tmux: &Tmux, machine: &Machine) -> Result<i32> {
         ),
         Err(error) => (false, error.to_string()),
     };
-    report.check("tmux server", running, &said);
+    report.check("tmux server", running, &tmux_said(&said));
     if !running {
         report.say("\nStart or attach with work, then run tmux-workspace doctor again.");
         return Ok(1);
@@ -276,6 +276,21 @@ fn run(report: &mut Report, tmux: &Tmux, machine: &Machine) -> Result<i32> {
         "\n{count} warning(s). Ctrl+a r reloads tmux; Ctrl+a M toggles agent sounds."
     ));
     Ok(i32::from(count > 0))
+}
+
+/// What tmux says of a server it cannot reach, with its reason before its path.
+///
+/// `error connecting to PATH (No such file or directory)` is `error connecting (No such file or
+/// directory): PATH`: a path goes to the end of its segment when a report is anonymized, and the reason
+/// (no such file, permission denied, connection refused) is what tells one failure from another.
+fn tmux_said(said: &str) -> String {
+    if let Some(rest) = said.strip_prefix("error connecting to ")
+        && let Some((path, reason)) = rest.rsplit_once(" (")
+        && let Some(reason) = reason.strip_suffix(')')
+    {
+        return format!("error connecting ({reason}): {path}");
+    }
+    said.to_string()
 }
 
 /// `text`, or `fallback` when it is empty.
@@ -480,7 +495,7 @@ fn missing_codex_hooks(machine: &Machine) -> std::result::Result<Vec<String>, St
     let template = machine.share.join("integrations/codex-hooks.json");
     let wanted = render(&template, &machine.home).map_err(|e| e.to_string())?;
     let Some(expected) = wanted.get("hooks").and_then(Value::as_object) else {
-        return Err(format!("{} holds no hooks", template.display()));
+        return Err(format!("{}: no hooks in it", template.display()));
     };
     Ok(expected
         .iter()
@@ -758,6 +773,52 @@ mod tests {
             fs::write(&latest, bad).unwrap();
             assert_eq!(snapshot_age(dir.path()), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn what_tmux_says_of_a_server_it_cannot_reach_keeps_its_reason_after_the_path() {
+        use crate::anonymize::{Anonymizer, Identity, Names};
+        let said = "error connecting to /tmp/tmux-501/default (No such file or directory)";
+        assert_eq!(
+            tmux_said(said),
+            "error connecting (No such file or directory): /tmp/tmux-501/default"
+        );
+        // The reason survives the anonymizer, which takes the path for what goes to the end of its segment.
+        let shown =
+            Anonymizer::new(&Identity::default(), &Names::default()).apply(&tmux_said(said));
+        assert_eq!(
+            shown.as_str(),
+            "error connecting (No such file or directory): /tmp/folder-1/folder-2"
+        );
+        // Other things it says are as they were.
+        for same in [
+            "no server running on /tmp/tmux-501/default",
+            "error connecting to x",
+            "(No such file or directory)",
+            "",
+        ] {
+            assert_eq!(tmux_said(same), same);
+        }
+    }
+
+    #[test]
+    fn a_codex_template_without_hooks_says_so_after_its_path() {
+        use crate::anonymize::{Anonymizer, Identity, Names};
+        let dir = TempDir::new();
+        let machine = Machine {
+            home: dir.path().join("home"),
+            share: dir.path().join("share"),
+            codex: dir.path().join("home/.codex"),
+            state: dir.path().join("state"),
+        };
+        fs::create_dir_all(machine.share.join("integrations")).unwrap();
+        fs::write(machine.share.join("integrations/codex-hooks.json"), "{}").unwrap();
+        fs::create_dir_all(&machine.codex).unwrap();
+        fs::write(machine.codex.join("hooks.json"), "{}").unwrap();
+        let said = missing_codex_hooks(&machine).unwrap_err();
+        assert!(said.ends_with("codex-hooks.json: no hooks in it"), "{said}");
+        let shown = Anonymizer::new(&Identity::default(), &Names::default()).apply(&said);
+        assert!(shown.as_str().ends_with(": no hooks in it"), "{shown}");
     }
 
     #[test]

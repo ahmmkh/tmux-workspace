@@ -18,6 +18,7 @@ use crate::report::Kind;
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 /// How long the check of the Python version may take.
@@ -214,10 +215,7 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     };
     let script = share_root().join("legacy/bin/tmux-workspace");
     if !script.is_file() {
-        return Error::Msg(format!(
-            "{command} needs {}, which is missing",
-            script.display()
-        ));
+        return missing(command, &script);
     }
     let mut argv = vec![
         python.to_string_lossy().into_owned(),
@@ -226,6 +224,11 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     ];
     argv.extend(args.iter().cloned());
     process::exec(&argv)
+}
+
+/// The error of a command whose script is not there: its path, then what needs it.
+fn missing(command: &str, script: &Path) -> Error {
+    Error::Msg(format!("Missing {}: {command} needs it", script.display()))
 }
 
 /// `update [--check]`: become `bash <share>/install.sh --update [--check]`, the installer that came
@@ -239,10 +242,7 @@ fn update(args: &[String]) -> Error {
     };
     let script = share_root().join("install.sh");
     if !script.is_file() {
-        return Error::Msg(format!(
-            "update needs {}, which is missing",
-            script.display()
-        ));
+        return missing("update", &script);
     }
     let mut argv = vec![
         "bash".to_string(),
@@ -461,6 +461,22 @@ mod tests {
             ("unknown", args(&["globex-merger", "x"]))
         );
         assert_eq!(logged("open", &args(&[])), ("open", args(&[])));
+    }
+
+    #[test]
+    fn a_missing_script_says_what_needs_it_after_its_path_and_the_reason_survives_the_anonymizer() {
+        use crate::anonymize::{Anonymizer, Identity, Names};
+        let message =
+            missing("update", Path::new("/opt/clients/Globex Corp/install.sh")).to_string();
+        assert_eq!(
+            message,
+            "Missing /opt/clients/Globex Corp/install.sh: update needs it"
+        );
+        let shown = Anonymizer::new(&Identity::default(), &Names::default()).apply(&message);
+        assert_eq!(
+            shown.as_str(),
+            "Missing /opt/folder-1/folder-2/folder-3: update needs it"
+        );
     }
 
     #[test]

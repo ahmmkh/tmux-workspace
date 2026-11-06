@@ -309,11 +309,12 @@ fn names(tmux: &Tmux) -> Result<Names> {
                 names.add_folder_path(row.get("session_path"));
             }
         }
-        // No server runs, so it has no names.
-        Err(Error::Command { .. }) => {}
+        // No server answers, or tmux cannot even be run (it is not installed, or broken): there are no names
+        // to hide, and the one who wants to report that tmux does not work must be able to.
+        Err(Error::Command { .. } | Error::Io(_)) => {}
         Err(_) => {
             return fail(
-                "The names of the tmux server could not be read, so a report could show them: a session, tab or pane label has a line break or a control character in its name. Rename it and run the command again.",
+                "The names of the tmux server could not be read, so a report could show them: a session, a tab, a pane label or a folder has a line break or a control character in its name. Rename it and run the command again.",
             );
         }
     }

@@ -471,7 +471,7 @@ impl<'a> Installer<'a> {
             };
             if now != original {
                 return fail(format!(
-                    "{} changed during installation; rerun the installer.",
+                    "{}: changed during installation; rerun the installer.",
                     path.display()
                 ));
             }
@@ -487,7 +487,7 @@ impl<'a> Installer<'a> {
         let existing = parse_settings(&original, path)?;
         let wanted = render(template, &self.target.home)?;
         let Some(hooks) = wanted.get("hooks").and_then(Value::as_object) else {
-            return fail(format!("{} holds no hooks", template.display()));
+            return fail(format!("{}: no hooks in it", template.display()));
         };
         let (mut data, mut changed) = merge_hooks(&existing, hooks);
         if let Some(line) = wanted.get("statusLine").filter(|line| truthy(line)) {
@@ -723,6 +723,7 @@ pub fn main(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anonymize::{Anonymizer, Identity, Names};
     use crate::testing::TempDir;
     use serde_json::json;
 
@@ -821,9 +822,18 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "{} changed during installation; rerun the installer.",
+                "{}: changed during installation; rerun the installer.",
                 path.display()
             )
+        );
+        // The reason is not taken for the end of the path when the message is anonymized.
+        let shown =
+            Anonymizer::new(&Identity::default(), &Names::default()).apply(&error.to_string());
+        assert!(
+            shown
+                .as_str()
+                .ends_with(": changed during installation; rerun the installer."),
+            "{shown}"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "opus"}"#);
         assert_eq!(
@@ -831,6 +841,25 @@ mod tests {
             ["settings.json"],
             "no temporary file is left"
         );
+    }
+
+    #[test]
+    fn a_template_without_hooks_says_so_after_its_path() {
+        let dir = TempDir::new();
+        let template = dir.path().join("share/integrations/codex-hooks.json");
+        fs::create_dir_all(template.parent().unwrap()).unwrap();
+        fs::write(&template, "{}").unwrap();
+        let target = target(&dir);
+        let error = Installer::new(&target)
+            .hooks(&dir.path().join("hooks.json"), &template, "Codex")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{}: no hooks in it", template.display())
+        );
+        let shown =
+            Anonymizer::new(&Identity::default(), &Names::default()).apply(&error.to_string());
+        assert!(shown.as_str().ends_with(": no hooks in it"), "{shown}");
     }
 
     #[test]
