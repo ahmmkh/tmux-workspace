@@ -469,7 +469,7 @@ WHAT IT LEAVES OUT:
 SHELL USAGE:
   work bug              Report a bug
   work idea             Suggest an idea
-  work bug --print      Only print the report; open nothing
+  work bug --print      Print the report and the link; open nothing
   work ./bug            Open a workspace named bug (likewise ./idea)
 
 OVER SSH:

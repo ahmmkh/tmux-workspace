@@ -129,6 +129,42 @@ pub fn run(argv: &[&str]) -> Result<Output> {
     })
 }
 
+/// Start a program that is not waited for beyond `wait`: what it prints goes nowhere, so that a program
+/// that leaves a process behind (xclip, wl-copy, a browser that starts) cannot keep this one waiting for a
+/// pipe to close, and its input is `stdin` or nothing. The status is the program's when it ended within
+/// `wait`; `None` when it still runs, which is not killed. A program that cannot be started is the error.
+pub fn start(argv: &[String], stdin: Option<&str>, wait: Duration) -> Result<Option<i32>> {
+    let Some((program, args)) = argv.split_first() else {
+        return fail("empty command");
+    };
+    trace(argv);
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // Its own group: a Ctrl-C meant for this program does not end a browser that was started.
+        .process_group(0);
+    let mut child = command.spawn()?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        let text = text.as_bytes().to_vec();
+        // A program that exits without reading closes the pipe; that is not an error.
+        thread::spawn(move || pipe.write_all(&text));
+    }
+    Ok(
+        wait_until(&mut child, Instant::now() + wait)?.map(|status| {
+            status
+                .code()
+                .unwrap_or_else(|| -status.signal().unwrap_or(0))
+        }),
+    )
+}
+
 /// Replace this process with the command. Returns only when that fails.
 pub fn exec(argv: &[String]) -> Error {
     exec_with_env(argv, &[])
@@ -485,6 +521,79 @@ mod tests {
             which_in("/tw-no-such-dir/tool", std::ffi::OsStr::new("")),
             None
         );
+    }
+
+    /// A script in `dir`, which `start` runs.
+    fn script(dir: &TempDir, body: &str) -> Vec<String> {
+        let path = dir.path().join("program");
+        crate::testing::write_script(&path, &format!("#!/bin/sh\n{body}\n"));
+        vec![path.to_string_lossy().into_owned()]
+    }
+
+    #[test]
+    fn start_gives_the_status_of_a_program_that_ends_within_the_time() {
+        let dir = TempDir::new();
+        let wait = Duration::from_secs(5);
+        assert_eq!(start(&script(&dir, "exit 0"), None, wait).unwrap(), Some(0));
+        assert_eq!(start(&script(&dir, "exit 3"), None, wait).unwrap(), Some(3));
+        assert_eq!(
+            start(&script(&dir, "kill -9 $$"), None, wait).unwrap(),
+            Some(-9)
+        );
+        assert!(start(&["/tw-no-such-dir/program".to_string()], None, wait).is_err());
+        assert!(start(&[], None, wait).is_err());
+    }
+
+    #[test]
+    fn start_does_not_wait_for_what_a_program_leaves_behind() {
+        // A process that holds on to the output of its parent, as the one xclip leaves does.
+        let dir = TempDir::new();
+        let started = Instant::now();
+        let status = start(
+            &script(&dir, "sleep 5 &\nexit 0"),
+            None,
+            Duration::from_secs(10),
+        );
+        assert_eq!(status.unwrap(), Some(0));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn start_leaves_a_program_that_still_runs_when_the_time_is_up() {
+        let dir = TempDir::new();
+        let started = Instant::now();
+        let status = start(
+            &script(&dir, "exec sleep 2"),
+            None,
+            Duration::from_millis(100),
+        );
+        assert_eq!(status.unwrap(), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn start_gives_a_program_its_input_and_the_program_prints_nowhere() {
+        let dir = TempDir::new();
+        let out = dir.path().join("got");
+        let body = format!(
+            "/bin/cat > '{}'\necho printed\necho error >&2\nexit 0",
+            out.display()
+        );
+        let status = start(
+            &script(&dir, &body),
+            Some("the report"),
+            Duration::from_secs(5),
+        );
+        assert_eq!(status.unwrap(), Some(0));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "the report");
     }
 
     #[test]

@@ -6,14 +6,16 @@
 
 use crate::anonymize::{Anonymizer, Clean, Identity, Names};
 use crate::doctor;
-use crate::error::Result;
+use crate::error::{Error, Result, fail};
 use crate::errorlog;
 use crate::integrations::{Target, system_name};
 use crate::pane::login_shell;
-use crate::paths::{home, share_root, state_dir};
-use crate::process::{Spawn, executable, spawn, which};
-use crate::report::{Diagnostics, Kind, Report};
+use crate::paths::{home, projects_dir, share_root, state_dir};
+use crate::process::{self, Spawn, executable, spawn, which};
+use crate::report::{Diagnostics, Kind, Link, Report};
+use crate::snapshot::read_snapshot_in;
 use crate::tmux::Tmux;
+use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -21,8 +23,12 @@ use std::time::Duration;
 /// How long a program that is asked for a version may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long the browser's opener and the clipboard's tool may take.
-const HELPER_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the browser's opener is waited for. One that still runs after this has started a browser,
+/// and is left to it.
+const OPEN_WAIT: Duration = Duration::from_secs(3);
+
+/// How long the clipboard's tool is waited for.
+const CLIP_WAIT: Duration = Duration::from_secs(5);
 
 /// How many lines of errors.log a bug report holds.
 const LAST_ERRORS: usize = 10;
@@ -61,15 +67,14 @@ pub fn main(kind: Kind, args: &[String]) -> Result<i32> {
             return Ok(2);
         }
     };
-    let report = build(kind, &Tmux::new());
+    let tmux = Tmux::new();
+    let report = build(kind, &tmux)?;
     let text = report.text();
-    if print_only {
-        say(&format!("{text}\n"));
-        return Ok(0);
-    }
     say(&format!("{text}\n"));
     let link = report.link();
-    if !on_a_terminal() {
+    if print_only || !on_a_terminal() {
+        // The link is always there to be had: the report may be piped, or the browser on a screen that
+        // is not in front of the user.
         say(&format!(
             "\nOpen this link to file the issue; nothing is sent until you submit it there:\n{}\n",
             link.url
@@ -79,19 +84,23 @@ pub fn main(kind: Kind, args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    let system = system_name();
-    let opener = choose_opener(system, in_ssh_session(), has_screen(), |program| {
-        which(program).is_some()
-    });
+    let opener = choose_opener(
+        system_name(),
+        in_ssh_session(&tmux),
+        has_screen(),
+        |program| which(program).is_some(),
+    );
     if let Some(opener) = opener {
         if !ask() {
             say("Nothing was opened or sent.\n");
             return Ok(0);
         }
-        if run_helper(&[opener, &link.url], None) {
-            say(
-                "Opened the issue form in your browser. Nothing is sent until you press Submit there.\n",
-            );
+        if run_helper(&[opener, &link.url], None, OPEN_WAIT) {
+            say(&format!(
+                "Opened the issue form in your browser. Nothing is sent until you press Submit there.\n\
+                 The link, in case the browser is not on this screen:\n{}\n",
+                link.url
+            ));
             if link.shortened {
                 let copied = copy_to_clipboard(&text);
                 say(&format!(
@@ -107,7 +116,12 @@ pub fn main(kind: Kind, args: &[String]) -> Result<i32> {
         }
         say(&format!("{opener} did not open it.\n"));
     }
-    // Over SSH, or with nothing to open a browser with: the link, and the report on the clipboard.
+    show_for_a_browser_elsewhere(&text, &link);
+    Ok(0)
+}
+
+/// Over SSH, or with nothing to open a browser with: the link, and the report on the clipboard.
+fn show_for_a_browser_elsewhere(text: &str, link: &Link) {
     say(&format!(
         "\nOpen this link in a browser to file the issue; nothing is sent until you submit it there:\n{}\n",
         link.url
@@ -117,13 +131,12 @@ pub fn main(kind: Kind, args: &[String]) -> Result<i32> {
     }
     say(&format!(
         "{}\n",
-        if copy_to_clipboard(&text) {
+        if copy_to_clipboard(text) {
             ON_THE_CLIPBOARD
         } else {
             NOT_COPIED
         }
     ));
-    Ok(0)
 }
 
 /// What opens the link: nothing over SSH (the screen of the machine in front of you is not that of the
@@ -151,8 +164,28 @@ fn set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
-fn in_ssh_session() -> bool {
-    set("SSH_CONNECTION") || set("SSH_TTY")
+/// Whether this is an SSH session: this process says so, or the session of tmux does. A pane keeps the
+/// environment it was made with, when tmux was started at another screen; the environment of the session
+/// is the one that a client that attaches updates.
+fn in_ssh_session(tmux: &Tmux) -> bool {
+    set("SSH_CONNECTION") || set("SSH_TTY") || session_says_ssh(tmux)
+}
+
+fn session_says_ssh(tmux: &Tmux) -> bool {
+    if !crate::cli::in_tmux() {
+        return false;
+    }
+    let pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    ["SSH_CONNECTION", "SSH_TTY"].iter().any(|name| {
+        let mut args = vec!["show-environment"];
+        if !pane.is_empty() {
+            args.extend(["-t", &pane]);
+        }
+        args.push(name);
+        tmux.quiet(&args)
+            .strip_prefix(&format!("{name}="))
+            .is_some_and(|value| !value.is_empty())
+    })
 }
 
 fn has_screen() -> bool {
@@ -171,15 +204,13 @@ fn is_yes(answer: &str) -> bool {
     matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
 }
 
-/// Run a program that is given the link or the report, and say whether it ended well.
-fn run_helper(argv: &[&str], stdin: Option<&str>) -> bool {
-    spawn(&Spawn {
-        argv: argv.iter().map(|arg| arg.to_string()).collect(),
-        stdin: stdin.map(String::from),
-        timeout: Some(HELPER_TIMEOUT),
-        ..Spawn::default()
-    })
-    .is_ok_and(|out| out.status == 0)
+/// Start a program that is given the link or the report, and say whether it did well: it ended with
+/// status 0, or it still runs after `wait` (a browser that has started does not end). What it prints goes
+/// nowhere and nothing is waited for but its end, because a program that leaves a process behind, as
+/// xclip and wl-copy do, holds a pipe open for as long as that process lives.
+fn run_helper(argv: &[&str], stdin: Option<&str>, wait: Duration) -> bool {
+    let argv: Vec<String> = argv.iter().map(|arg| arg.to_string()).collect();
+    matches!(process::start(&argv, stdin, wait), Ok(None | Some(0)))
 }
 
 /// Copy the report with `~/.local/bin/tw-clip`, which also reaches the clipboard of the terminal you are
@@ -190,25 +221,34 @@ fn copy_to_clipboard(report: &str) -> bool {
         && run_helper(
             &[&clip.to_string_lossy(), "copy"],
             Some(&format!("{report}\n")),
+            CLIP_WAIT,
         )
 }
 
 // ---------------------------------------------------------------------------------------------
 // The report
 
-/// The report of a kind, from what this machine and the tmux server say, anonymized.
-fn build(kind: Kind, tmux: &Tmux) -> Report {
-    let mut anonymizer = Anonymizer::new(&Identity::current(), &names(tmux));
+/// The report of a kind, from what this machine and the tmux server say, anonymized. A bug report
+/// names the doctor's panes and the log's lines, which may hold the names of the server, so it is not
+/// made when those cannot be read.
+fn build(kind: Kind, tmux: &Tmux) -> Result<Report> {
+    let names = if kind == Kind::Bug {
+        names(tmux)?
+    } else {
+        Names::default()
+    };
+    let mut anonymizer = Anonymizer::new(&Identity::current(), &names);
+    // What this program wrote holds no name of the server: a tab called zsh must not change the shell.
     let environment = environment(tmux)
         .iter()
-        .map(|line| anonymizer.apply(line))
+        .map(|line| anonymizer.apply_own(line))
         .collect();
     let diagnostics = (kind == Kind::Bug).then(|| diagnostics(tmux, &mut anonymizer));
-    Report {
+    Ok(Report {
         kind,
         environment,
         diagnostics,
-    }
+    })
 }
 
 /// The doctor's findings and the last lines of errors.log.
@@ -231,7 +271,7 @@ fn diagnostics(tmux: &Tmux, anonymizer: &mut Anonymizer) -> Diagnostics {
         .map(|line| anonymizer.apply(line))
         .collect();
     Diagnostics {
-        summary: anonymizer.apply(&summary),
+        summary: anonymizer.apply_own(&summary),
         warnings: lines,
         errors,
     }
@@ -242,30 +282,97 @@ fn counted(count: usize, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
-/// The names of the sessions, windows and pane labels the server has, each once, in the order it lists
-/// them. A server that is not there has none.
-fn names(tmux: &Tmux) -> Names {
-    let rows = tmux
-        .fields(
-            "list-panes",
-            &["session_name", "window_name", "@workspace_label"],
-            &["-a"],
-        )
-        .unwrap_or_default();
+/// What the anonymizer has to hide: the names of the sessions, windows and pane labels that the server
+/// has, each once, in the order it lists them; the folders of its panes and sessions; the names in the
+/// saved snapshot, which a report may still say after the server has lost them; and the folders of the
+/// projects folder. A server that is not there has no names, and one whose names cannot be read is an
+/// error: a report would show them.
+fn names(tmux: &Tmux) -> Result<Names> {
     let mut names = Names::default();
-    for row in &rows {
-        for (list, name) in [
-            (&mut names.sessions, "session_name"),
-            (&mut names.windows, "window_name"),
-            (&mut names.labels, "@workspace_label"),
-        ] {
-            let value = row.get(name);
-            if !value.is_empty() && !list.iter().any(|known| known == value) {
-                list.push(value.to_string());
+    match tmux.fields(
+        "list-panes",
+        &[
+            "session_name",
+            "window_name",
+            "@workspace_label",
+            "pane_current_path",
+            "session_path",
+        ],
+        &["-a"],
+    ) {
+        Ok(rows) => {
+            for row in &rows {
+                add_name(&mut names.sessions, row.get("session_name"));
+                add_name(&mut names.windows, row.get("window_name"));
+                add_name(&mut names.labels, row.get("@workspace_label"));
+                names.add_folder_path(row.get("pane_current_path"));
+                names.add_folder_path(row.get("session_path"));
             }
         }
+        // No server runs, so it has no names.
+        Err(Error::Command { .. }) => {}
+        Err(_) => {
+            return fail(
+                "The names of the tmux server could not be read, so a report could show them: a session, tab or pane label has a line break or a control character in its name. Rename it and run the command again.",
+            );
+        }
     }
-    names
+    add_snapshot_names(&mut names, &state_dir());
+    add_projects(&mut names, &projects_dir());
+    Ok(names)
+}
+
+fn add_name(list: &mut Vec<String>, name: &str) {
+    if !name.is_empty() && !list.iter().any(|known| known == name) {
+        list.push(name.to_string());
+    }
+}
+
+/// The names that the saved snapshot in `state` has: sessions, tabs, labels and the folders of its panes.
+fn add_snapshot_names(names: &mut Names, state: &Path) {
+    let Ok(Some((_, data))) = read_snapshot_in(state) else {
+        return;
+    };
+    let text = |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(String::from);
+    for window in data["windows"].as_array().into_iter().flatten() {
+        add_name(
+            &mut names.sessions,
+            &text(window, "session_name").unwrap_or_default(),
+        );
+        add_name(
+            &mut names.windows,
+            &text(window, "window_name").unwrap_or_default(),
+        );
+    }
+    for pane in data["panes"].as_array().into_iter().flatten() {
+        add_name(
+            &mut names.sessions,
+            &text(pane, "session").unwrap_or_default(),
+        );
+        // The workspace a parked pane came from.
+        add_name(&mut names.sessions, &text(pane, "home").unwrap_or_default());
+        add_name(&mut names.labels, &text(pane, "label").unwrap_or_default());
+        if let Some(cwd) = text(pane, "cwd") {
+            names.add_folder_path(&cwd);
+        }
+    }
+}
+
+/// How many entries of the projects folder are looked at.
+const MAX_PROJECTS: usize = 10_000;
+
+/// The projects folder's own path and what is in it: the folders that `work NAME` makes and opens.
+fn add_projects(names: &mut Names, projects: &Path) {
+    names.add_folder_path(&projects.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(projects) else {
+        return;
+    };
+    for entry in entries.flatten().take(MAX_PROJECTS) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !names.folders.contains(&name) {
+            names.folders.push(name);
+        }
+    }
 }
 
 fn mark(there: bool) -> &'static str {
@@ -545,6 +652,105 @@ mod tests {
         assert_eq!(counted(1, "pane"), "1 pane");
         assert_eq!(counted(0, "error"), "0 errors");
         assert_eq!(counted(12, "pane"), "12 panes");
+    }
+
+    fn script(dir: &crate::testing::TempDir, body: &str) -> String {
+        let path = dir.path().join("helper");
+        crate::testing::write_script(&path, &format!("#!/bin/sh\n{body}\n"));
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_helper_is_judged_by_its_end_and_not_by_what_it_leaves_behind() {
+        let dir = crate::testing::TempDir::new();
+        let wait = Duration::from_secs(5);
+        let started = std::time::Instant::now();
+        // It copied, and left a process that holds on to its output.
+        assert!(run_helper(
+            &[&script(&dir, "sleep 5 &\nexit 0")],
+            None,
+            wait
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!run_helper(&[&script(&dir, "exit 1")], None, wait));
+        assert!(!run_helper(&["/tw-no-such-dir/helper"], None, wait));
+        // One that still runs when the time is up has started its browser.
+        assert!(run_helper(
+            &[&script(&dir, "exec sleep 2")],
+            None,
+            Duration::from_millis(100)
+        ));
+    }
+
+    #[test]
+    fn names_are_added_once_and_the_empty_ones_not_at_all() {
+        let mut list = Vec::new();
+        for name in ["a", "", "b", "a"] {
+            add_name(&mut list, name);
+        }
+        assert_eq!(list, ["a", "b"]);
+    }
+
+    #[test]
+    fn the_saved_snapshot_has_names_the_server_may_have_lost() {
+        let dir = crate::testing::TempDir::new();
+        let workspace = dir.path().join("workspace.json");
+        std::fs::write(
+            &workspace,
+            serde_json::json!({
+                "version": 1,
+                "windows": [{"session_name": "wayne-enterprises", "window_name": "plans"}],
+                "panes": [
+                    {"session": "wayne-enterprises", "home": "", "label": "boardroom", "cwd": "/Users/x/Clients/Soylent Green"},
+                    {"session": "__parked", "home": "initech", "label": "shell", "cwd": ""}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("latest.json"),
+            serde_json::json!({"path": workspace.to_string_lossy()}).to_string(),
+        )
+        .unwrap();
+        let mut names = Names::default();
+        add_name(&mut names.sessions, "alive");
+        add_snapshot_names(&mut names, dir.path());
+        assert_eq!(
+            names.sessions,
+            ["alive", "wayne-enterprises", "__parked", "initech"]
+        );
+        assert_eq!(names.windows, ["plans"]);
+        assert_eq!(names.labels, ["boardroom", "shell"]);
+        assert_eq!(names.folders, ["Users", "x", "Clients", "Soylent Green"]);
+        // No snapshot, or one that cannot be read, has none.
+        let mut none = Names::default();
+        add_snapshot_names(&mut none, &dir.path().join("elsewhere"));
+        std::fs::write(dir.path().join("latest.json"), "{").unwrap();
+        add_snapshot_names(&mut none, dir.path());
+        assert!(none.sessions.is_empty() && none.folders.is_empty());
+    }
+
+    #[test]
+    fn the_projects_folder_and_what_is_in_it_are_folders_to_hide() {
+        let dir = crate::testing::TempDir::new();
+        let projects = dir.path().join("Code/Clients");
+        for name in ["Globex Corp", "Jane's Bakery"] {
+            std::fs::create_dir_all(projects.join(name)).unwrap();
+        }
+        let mut names = Names::default();
+        add_projects(&mut names, &projects);
+        for name in ["Code", "Clients", "Globex Corp", "Jane's Bakery"] {
+            assert!(names.folders.iter().any(|folder| folder == name), "{name}");
+        }
+        // A folder that is not there adds its own path and nothing else.
+        let mut none = Names::default();
+        add_projects(&mut none, &dir.path().join("absent"));
+        assert_eq!(none.folders.last().map(String::as_str), Some("absent"));
     }
 
     #[test]

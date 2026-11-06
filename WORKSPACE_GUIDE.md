@@ -67,7 +67,7 @@ work rm my-api
 # Interactive fuzzy picker to choose which workspace to close/delete
 work rm
 
-# Report a bug or an idea (see "Reporting a bug or an idea" below); --print only shows the report
+# Report a bug or an idea (see "Reporting a bug or an idea" below); --print shows the report and the link and opens nothing
 work bug
 work idea
 work bug --print
@@ -365,13 +365,16 @@ environment only.
 - **Doctor** (bug only): how many panes and warnings `tmux-workspace doctor` found, and its warnings.
 - **Last errors** (bug only): the last ten lines of `~/.local/state/tmux-workspace/errors.log`. Every
   command that fails adds one line there, with the time, the command and the message: never its
-  arguments, never anything from a screen. The log keeps its last 200 lines and is private (mode 0600).
+  arguments (one that the message repeats is `<arg>`), never anything from a screen. The log keeps its last 200 lines and is private (mode 0600).
 - **What is left out**: workspace names become `workspace-1`, tab names `tab-1`, pane labels `label-1`,
   folders under your home `folder-1` (the home itself is `~`; generic folders such as `Projects` and
-  `src` stay). Your user and host names, e-mail and IP addresses, keys and tokens, and passwords in URLs
+  `src` stay). Folders that tmux, your projects folder or the saved snapshot know are hidden by name, and any other
+  path up to the colon, the quote or the next path that ends it, so that a few words after a path may go
+  with it. Your user and host names, e-mail and IP addresses, keys and tokens, and passwords in URLs
   are removed. Pane contents, environment variables, shell history and git remotes are never in the report.
-- `work bug --print` only prints the report. Without a terminal it prints the report and the link and opens
-  nothing. Over SSH, or with no way to open a browser, it prints the link and copies the full report with
+- `work bug --print` prints the report and the link and opens nothing, and so does `work bug` without a
+  terminal. After a browser was opened the link is printed as well, in case that browser is on a screen that
+  is not in front of you. Over SSH, or with no way to open a browser, it prints the link and copies the full report with
   `tw-clip` (OSC 52, which works over SSH): paste it into the form if a field is empty. A link over 8000
   bytes leaves out the oldest lines of the diagnostics, and the full report is copied.
 - A command that fails ends with `Report it: work bug`, and `doctor` with warnings ends with the same offer.
