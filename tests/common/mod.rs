@@ -114,6 +114,12 @@ pub fn on_a_terminal(mut command: Command, typed: &str) -> (i32, String, String)
     assert_eq!(opened, 0, "openpty");
     // SAFETY: both descriptors are new and owned by nobody else.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    // Not for the command's children, nor for what they start: a process that keeps the slave open keeps
+    // the terminal open, and this function waits for the end of the terminal.
+    for fd in [&master, &slave] {
+        // SAFETY: sets a flag of a descriptor that is open.
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
     // Raw: what is typed is not echoed, and the output's line ends stay as they are.
     // SAFETY: `termios` is plain data that `tcgetattr` fills in before it is used.
     unsafe {

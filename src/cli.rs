@@ -1,7 +1,9 @@
 //! The command line: which command runs, and what a failure looks like.
 
+use crate::bug;
 use crate::doctor;
 use crate::error::{Error, Result, fail};
+use crate::errorlog;
 use crate::help;
 use crate::hook;
 use crate::host::RealHost;
@@ -12,9 +14,11 @@ use crate::park;
 use crate::paths::share_root;
 use crate::pick;
 use crate::process::{self, Spawn};
+use crate::report::Kind;
 use crate::snapshot;
 use crate::tmux::Tmux;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 /// How long the check of the Python version may take.
@@ -33,7 +37,7 @@ pub fn main() -> i32 {
         // SAFETY: `umask` only sets this process's file-creation mask; it cannot fail.
         unsafe { libc::umask(0o077) };
     }
-    exit_code(run(&args))
+    exit_code(command(&args), &args, run(&args))
 }
 
 /// Whether a command runs with umask 077, so that what it creates, and what its children create,
@@ -81,6 +85,8 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "setup" => onboarding::setup(args),
         "integrations" => integrations::main(args),
         "doctor" => doctor::doctor(&Tmux::new()),
+        "bug" => bug::main(Kind::Bug, args),
+        "idea" => bug::main(Kind::Idea, args),
         "update" => Err(update(args)),
         // Runs in every new pane before the user's shell, and ends by becoming that shell.
         "pane-start" => pane::pane_start(
@@ -149,18 +155,26 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
     }
 }
 
-/// What `work update` says when it reaches `open`: the shell that ran it was opened before 2.0.
-const OLD_SHELL: &str = "No workspace named update is open, so this looks like work update from a terminal opened before tmux-workspace 2.0.
-Run exec $SHELL (or open a new terminal), then work update again.
-To make a workspace named update, run: work ./update";
+/// The names that a shell opened before the command existed sends to `open` as a workspace name, and the
+/// release in which the command came: `work update` since 2.0, `work bug` and `work idea` since 2.1.
+const COMMAND_NAMES: [(&str, &str); 3] = [("update", "2.0"), ("bug", "2.1"), ("idea", "2.1")];
+
+/// What `work NAME` says when it reaches `open` from a shell that was opened before NAME was a command.
+fn old_shell(name: &str, release: &str) -> String {
+    format!(
+        "No workspace named {name} is open, so this looks like work {name} from a terminal opened before tmux-workspace {release}.
+Run exec $SHELL (or open a new terminal), then work {name} again.
+To make a workspace named {name}, run: work ./{name}"
+    )
+}
 
 /// `open [--] [NAME]`: open the workspace NAME, or pick one.
 ///
 /// A shell opened before 2.0 still has the `work` function of 1.x, which sends everything but
 /// `work rm` here: `work update` is `open update` and `work --update` is `open --update`. Neither is
 /// meant as a workspace, so `open` refuses (status 2, nothing made) a name that starts with `-`, and
-/// `update` unless a workspace has that name. After `--` the name is taken as it is: `work ./update`
-/// is `open -- update`. The checks come before everything `open` does: no first-run questions, no
+/// `update` unless a workspace has that name. The same holds for `bug` and `idea`, which became commands
+/// in 2.1. After `--` the name is taken as it is: `work ./update` is `open -- update`. The checks come before everything `open` does: no first-run questions, no
 /// server started, no saved workspaces restored.
 fn open(tmux: &Tmux, args: &[String], errors: &mut dyn Write) -> Result<i32> {
     let (literal, name) = match args {
@@ -176,12 +190,12 @@ fn open(tmux: &Tmux, args: &[String], errors: &mut dyn Write) -> Result<i32> {
             )?;
             return Ok(2);
         }
-        if name == "update"
+        if let Some((_, release)) = COMMAND_NAMES.iter().find(|(command, _)| *command == name)
             && !pick::session_names(tmux)
                 .iter()
                 .any(|session| session == name)
         {
-            writeln!(errors, "{OLD_SHELL}")?;
+            writeln!(errors, "{}", old_shell(name, release))?;
             return Ok(2);
         }
     }
@@ -201,10 +215,7 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     };
     let script = share_root().join("legacy/bin/tmux-workspace");
     if !script.is_file() {
-        return Error::Msg(format!(
-            "{command} needs {}, which is missing",
-            script.display()
-        ));
+        return missing(command, &script);
     }
     let mut argv = vec![
         python.to_string_lossy().into_owned(),
@@ -213,6 +224,11 @@ pub fn legacy(command: &str, args: &[String]) -> Error {
     ];
     argv.extend(args.iter().cloned());
     process::exec(&argv)
+}
+
+/// The error of a command whose script is not there: its path, then what needs it.
+fn missing(command: &str, script: &Path) -> Error {
+    Error::Msg(format!("Missing {}: {command} needs it", script.display()))
 }
 
 /// `update [--check]`: become `bash <share>/install.sh --update [--check]`, the installer that came
@@ -226,10 +242,7 @@ fn update(args: &[String]) -> Error {
     };
     let script = share_root().join("install.sh");
     if !script.is_file() {
-        return Error::Msg(format!(
-            "update needs {}, which is missing",
-            script.display()
-        ));
+        return missing("update", &script);
     }
     let mut argv = vec![
         "bash".to_string(),
@@ -265,14 +278,87 @@ fn pane_or_current(tmux: &Tmux, pane: Option<&String>) -> Result<String> {
     }
 }
 
+/// Commands that nobody watches, because tmux or an agent starts them: a failure is logged, and said
+/// on stderr, but never with the offer of a report. `bug` and `idea` are here as well: a report
+/// of their failure would be the report that failed.
+const UNWATCHED: [&str; 10] = [
+    "agent-hook",
+    "init",
+    "tick",
+    "save",
+    "pane-start",
+    "exec-shell",
+    "window-preview",
+    "help-topic",
+    "bug",
+    "idea",
+];
+
+/// What a failed command writes to stderr: the error, and the offer of a report for a command that
+/// somebody runs.
+fn failure_text(command: &str, error: &Error) -> String {
+    let mut text = format!("Workspace error: {error}\n");
+    if !UNWATCHED.contains(&command) {
+        text.push_str("Report it: work bug\n");
+    }
+    text
+}
+
+/// The commands that `dispatch` runs.
+const KNOWN: [&str; 31] = [
+    "agent-hook",
+    "setup",
+    "integrations",
+    "doctor",
+    "bug",
+    "idea",
+    "update",
+    "pane-start",
+    "exec-shell",
+    "label",
+    "init",
+    "tick",
+    "save",
+    "restore",
+    "history",
+    "park",
+    "unpark",
+    "choose-park",
+    "open",
+    "pick-window",
+    "window-preview",
+    "new-tab",
+    "kill-workspace",
+    "delete",
+    "rm",
+    "help",
+    "help-topic",
+    "dash",
+    "dashboard",
+    "ai",
+    "cleanup",
+];
+
+/// What a command is called in the log, and which of its arguments may have been put into the message: all
+/// of them, the command's own name apart.
+fn logged<'a>(command: &'a str, args: &[String]) -> (&'a str, Vec<String>) {
+    if KNOWN.contains(&command) {
+        (command, args.iter().skip(1).cloned().collect())
+    } else {
+        ("unknown", args.to_vec())
+    }
+}
+
 /// The error contract: a command's own status is passed on, end of input is not a failure, and any
-/// other error is reported and exits 1.
-fn exit_code(result: Result<i32>) -> i32 {
+/// other error is logged (see `errorlog`), reported and exits 1.
+fn exit_code(command: &str, args: &[String], result: Result<i32>) -> i32 {
     match result {
         Ok(status) => status,
         Err(Error::Eof) => 0,
         Err(error) => {
-            let _ = writeln!(std::io::stderr(), "Workspace error: {error}");
+            let (name, arguments) = logged(command, args);
+            errorlog::record(name, &arguments, &error);
+            let _ = write!(std::io::stderr(), "{}", failure_text(command, &error));
             message(&format!("Workspace: {error}"));
             1
         }
@@ -296,8 +382,8 @@ mod tests {
 
     #[test]
     fn eof_and_success_exit_zero_without_output() {
-        assert_eq!(exit_code(Ok(0)), 0);
-        assert_eq!(exit_code(Err(Error::Eof)), 0);
+        assert_eq!(exit_code("open", &[], Ok(0)), 0);
+        assert_eq!(exit_code("open", &[], Err(Error::Eof)), 0);
     }
 
     #[test]
@@ -310,8 +396,92 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_offers_a_report_unless_nobody_watches_the_command() {
+        let error = Error::Msg("boom".into());
+        assert_eq!(
+            failure_text("open", &error),
+            "Workspace error: boom\nReport it: work bug\n"
+        );
+        for command in UNWATCHED {
+            assert_eq!(
+                failure_text(command, &error),
+                "Workspace error: boom\n",
+                "{command}"
+            );
+        }
+        for command in ["setup", "doctor", "integrations", "update", "park", "nope"] {
+            assert!(failure_text(command, &error).ends_with("Report it: work bug\n"));
+        }
+    }
+
+    /// The words of the arms of `dispatch`.
+    fn dispatched() -> Vec<String> {
+        let source = include_str!("cli.rs");
+        let body = source
+            .split("fn dispatch(")
+            .nth(1)
+            .and_then(|rest| rest.split("_ => fail(").next())
+            .unwrap();
+        let mut words = Vec::new();
+        for line in body.lines() {
+            // The arms are `"a" | "b" => ...`; whatever is after the arrow is not a command.
+            let Some((pattern, _)) = line.split_once("=>") else {
+                continue;
+            };
+            let pattern = pattern.trim();
+            if pattern.starts_with('"') {
+                words.extend(
+                    pattern
+                        .split('|')
+                        .map(|word| word.trim().trim_matches('"').to_string()),
+                );
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn the_known_commands_are_the_ones_dispatch_runs() {
+        let mut known: Vec<String> = KNOWN.iter().map(|word| word.to_string()).collect();
+        let mut run = dispatched();
+        known.sort();
+        run.sort();
+        assert_eq!(known, run);
+    }
+
+    #[test]
+    fn an_argument_is_not_logged_as_a_command_and_a_command_is_not_one_of_the_arguments() {
+        assert_eq!(
+            logged("open", &args(&["open", "acme"])),
+            ("open", args(&["acme"]))
+        );
+        // Something typed that is no command is "unknown", and is an argument like the rest.
+        assert_eq!(
+            logged("globex-merger", &args(&["globex-merger", "x"])),
+            ("unknown", args(&["globex-merger", "x"]))
+        );
+        assert_eq!(logged("open", &args(&[])), ("open", args(&[])));
+    }
+
+    #[test]
+    fn a_missing_script_says_what_needs_it_after_its_path_and_the_reason_survives_the_anonymizer() {
+        use crate::anonymize::{Anonymizer, Identity, Names};
+        let message =
+            missing("update", Path::new("/opt/clients/Globex Corp/install.sh")).to_string();
+        assert_eq!(
+            message,
+            "Missing /opt/clients/Globex Corp/install.sh: update needs it"
+        );
+        let shown = Anonymizer::new(&Identity::default(), &Names::default()).apply(&message);
+        assert_eq!(
+            shown.as_str(),
+            "Missing /opt/folder-1/folder-2/folder-3: update needs it"
+        );
+    }
+
+    #[test]
     fn a_commands_own_status_is_the_exit_status() {
-        assert_eq!(exit_code(Ok(2)), 2);
+        assert_eq!(exit_code("open", &[], Ok(2)), 2);
     }
 
     #[test]

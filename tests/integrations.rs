@@ -881,7 +881,7 @@ fn the_command_needs_install_uninstall_or_status() {
         assert_eq!(out.status.code(), Some(1));
         assert_eq!(
             text(&out.stderr),
-            "Workspace error: Usage: tmux-workspace integrations install|uninstall|status\n"
+            "Workspace error: Usage: tmux-workspace integrations install|uninstall|status\nReport it: work bug\n"
         );
         // Outside tmux the error contract's message goes to stdout.
         assert_eq!(

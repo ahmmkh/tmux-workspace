@@ -13,6 +13,7 @@ the release. The [README](README.md) covers installing, updating and uninstallin
 - See every pane and agent: **`Ctrl+a`, release, then `A`**
 - Open the AI tools (optional, see section 13): **`Ctrl+a`, release, then `a`**
 - Check terminal, hooks and saves: `tmux-workspace doctor` or **`Ctrl+a D`**
+- Report a bug or an idea: `work bug`, `work idea` or **`Ctrl+a`, release, then `F`**
 - Choose the projects folder again: `tmux-workspace setup`
 - Keybindings, `work`, recovery, agent hooks and Neovim integration all run through symlinks into the installed release or the clone.
 
@@ -65,6 +66,14 @@ work rm my-api
 
 # Interactive fuzzy picker to choose which workspace to close/delete
 work rm
+
+# Report a bug or an idea (see "Reporting a bug or an idea" below); --print shows the report and the link and opens nothing
+work bug
+work idea
+work bug --print
+
+# A workspace that is named bug or idea (work ./update does the same for update)
+work ./bug
 ```
 
 ### Automatic Project Folder Creation:
@@ -339,8 +348,37 @@ one-line command upgraded in place is a clone in `~/.local/share/tmux-workspace`
 | `Ctrl+a` `y` | Toggle typing into all panes of the tab |
 | `Ctrl+a` `r` | Reload tmux configuration |
 | `Ctrl+a` `D` | Terminal, hooks, agent and autosave diagnostics |
+| `Ctrl+a` `F` | Report a bug (an anonymized report, then a question before the browser opens) |
 | `Ctrl+a` `M` | Toggle agent sounds |
 | `Ctrl+a` `Ctrl+a` | Send raw Ctrl+a to shell/editor |
+
+### Reporting a bug or an idea
+
+`work bug` (in tmux also **`Ctrl+a`, release, then `F`**, in a popup that stays until you press a key)
+builds a report, shows it in full, and asks `Open a GitHub issue with this? [Y/n]`. A yes opens GitHub's
+issue form with the report filled in: `open` on macOS, `xdg-open` on Linux with a screen. Nothing is sent
+by tmux-workspace; you read the form and press Submit. `work idea` is the same for an idea, with the
+environment only.
+
+- **Environment**: the version and how it was installed, the system, tmux, your shell and terminal, the
+  tools it uses, and which agent integrations are set up.
+- **Doctor** (bug only): how many panes and warnings `tmux-workspace doctor` found, and its warnings.
+- **Last errors** (bug only): the last ten lines of `~/.local/state/tmux-workspace/errors.log`. Every
+  command that fails adds one line there, with the time, the command and the message: never its
+  arguments (one that the message repeats is `<arg>`), never anything from a screen. The log keeps its last 200 lines and is private (mode 0600).
+- **What is left out**: workspace names become `workspace-1`, tab names `tab-1`, pane labels `label-1`,
+  folders under your home `folder-1` (the home itself is `~`; generic folders such as `Projects` and
+  `src` stay). Folders that tmux, your projects folder or the saved snapshot know are hidden by name, and any other
+  path up to the colon, the quote or the next path that ends it, so that a few words after a path may go
+  with it. Your user and host names, e-mail and IP addresses, keys and tokens, and passwords in URLs
+  are removed. Pane contents, environment variables, shell history and git remotes are never in the report.
+- `work bug --print` prints the report and the link and opens nothing, and so does `work bug` without a
+  terminal. After a browser was opened the link is printed as well, in case that browser is on a screen that
+  is not in front of you. Over SSH, or with no way to open a browser, it prints the link and copies the full report with
+  `tw-clip` (OSC 52, which works over SSH): paste it into the form if a field is empty. A link over 8000
+  bytes leaves out the oldest lines of the diagnostics, and the full report is copied.
+- A command that fails ends with `Report it: work bug`, and `doctor` with warnings ends with the same offer.
+  The background commands (the agent hook, the status line, autosave) log their failures and say nothing.
 
 ---
 

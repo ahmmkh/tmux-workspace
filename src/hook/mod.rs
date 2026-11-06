@@ -10,6 +10,7 @@ pub mod process;
 pub mod tmuxcmd;
 
 use crate::error::Result;
+use crate::errorlog;
 use crate::host::{Host, RealHost};
 use crate::pyjson::{Style, dumps};
 use crate::text::now_ms;
@@ -134,7 +135,9 @@ fn publish(started: i64, args: &[String]) -> Option<String> {
     }
     let env = HookEnv::from_env()?;
     let payload = read_payload()?;
+    // The one thing a failure does: a line in errors.log, which only a failure pays for.
     run_at(started, mode, &payload, &env, &RealHost)
+        .inspect_err(|error| errorlog::record("agent-hook", &[], error))
         .ok()
         .flatten()
 }
@@ -239,6 +242,11 @@ fn run_at(
         explicit_pid = Some(pid);
     }
     let mut state = tmuxcmd::pane_state(host, &env.tmux, pane)?;
+    // A pane that is gone, whose agent outlived it (a shared Codex app-server does), has no process to
+    // belong to and nothing to publish to. That is the usual end of such an agent, not a failure.
+    if state.pid.is_empty() {
+        return Ok(None);
+    }
     let pane_pid = process::py_int(&state.pid)?;
     // A shared Codex app-server's inherited TMUX_PANE does not identify its client: the title does.
     let mut routed = None;
@@ -521,6 +529,26 @@ mod tests {
 
     fn env() -> HookEnv {
         vars("/tmp/scratch-socket,1,0", "%7").unwrap()
+    }
+
+    /// An agent that outlives its pane keeps telling the hook what it does. tmux prints nothing for a pane
+    /// that is gone, which is no failure.
+    #[test]
+    fn an_event_for_a_pane_that_is_gone_ends_without_an_error() {
+        let host = FakeHost::scripted(|_| Ok(String::new()));
+        for (mode, event) in [
+            ("codex", "PreToolUse"),
+            ("codex", "Stop"),
+            ("claude", "SessionEnd"),
+        ] {
+            let payload = json!({"hook_event_name": event, "session_id": "s", "cwd": "/w"});
+            assert!(
+                matches!(run(mode, &payload, &env(), &host), Ok(None)),
+                "{mode} {event}"
+            );
+        }
+        // One read of the pane each, and nothing else.
+        assert_eq!(host.calls_to("tmux").len(), 3);
     }
 
     /// Everything the hook decides before it starts a process: none of these may start one.

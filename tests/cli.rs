@@ -12,7 +12,7 @@ fn unknown_command_reports_and_exits_1() {
     let out = scratch.bin(EXE).arg("nope").output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "Workspace error: Unknown workspace command: nope\n"
+        "Workspace error: Unknown workspace command: nope\nReport it: work bug\n"
     );
     assert_eq!(
         out.stdout, b"",
@@ -53,7 +53,7 @@ fn outside_tmux_the_message_goes_to_stdout_and_no_tmux_runs() {
     let out = command.output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "Workspace error: Unknown workspace command: nope\n"
+        "Workspace error: Unknown workspace command: nope\nReport it: work bug\n"
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
@@ -77,7 +77,7 @@ fn no_argument_dispatches_open() {
     });
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "Workspace error: Install fzf to pick a workspace, or run: work NAME\n"
+        "Workspace error: Install fzf to pick a workspace, or run: work NAME\nReport it: work bug\n"
     );
     assert_eq!(out.status.code(), Some(1));
 }
@@ -351,7 +351,7 @@ mod legacy {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             format!(
-                "Workspace error: ai needs {}/legacy/bin/tmux-workspace, which is missing\n",
+                "Workspace error: Missing {}/legacy/bin/tmux-workspace: ai needs it\nReport it: work bug\n",
                 share.path().display()
             )
         );
@@ -479,7 +479,7 @@ mod update {
             .unwrap();
         assert_eq!(
             common::text(&out.stderr),
-            "Workspace error: Usage: tmux-workspace update [--check]\n"
+            "Workspace error: Usage: tmux-workspace update [--check]\nReport it: work bug\n"
         );
         assert_eq!(out.status.code(), Some(1));
         assert_eq!(ran(share.path()), "", "the installer does not run");
@@ -498,7 +498,7 @@ mod update {
         assert_eq!(
             common::text(&out.stderr),
             format!(
-                "Workspace error: update needs {}/install.sh, which is missing\n",
+                "Workspace error: Missing {}/install.sh: update needs it\nReport it: work bug\n",
                 share.path().display()
             )
         );

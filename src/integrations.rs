@@ -74,10 +74,9 @@ pub fn hook_commands(path: &Path) -> Vec<String> {
 /// (omp, Neovim, iTerm2) is in place: what `install.sh --update` asks before it registers the
 /// integrations again, so that an update keeps that choice.
 pub fn installed_on(target: &Target) -> bool {
-    let hooks = [target.claude_settings(), target.codex_hooks()]
-        .iter()
-        .any(|path| hook_commands(path).iter().any(|command| ours(command)));
-    hooks || target.links().iter().any(|link| target.made(link))
+    let each = target.each();
+    // The iTerm2 profile counts as well, but is no integration of a report.
+    each.iter().any(|(_, there)| *there) || target.made(&target.iterm_profile())
 }
 
 /// An `integrations/*-hooks.json` template with `{{BIN}}` filled in: the installed binary of this
@@ -311,6 +310,18 @@ impl Target {
         }
     }
 
+    /// What `integrations status` adds up, one by one: whether Claude Code's settings and Codex's hooks
+    /// run this project's hook, and whether the omp extension and the Neovim helper are linked in.
+    pub fn each(&self) -> [(&'static str, bool); 4] {
+        let hooked = |path: PathBuf| hook_commands(&path).iter().any(|command| ours(command));
+        [
+            ("claude", hooked(self.claude_settings())),
+            ("codex", hooked(self.codex_hooks())),
+            ("omp", self.made(&self.omp_extension())),
+            ("nvim", self.made(&self.neovim_helper())),
+        ]
+    }
+
     fn codex(&self) -> PathBuf {
         self.codex_home
             .clone()
@@ -460,7 +471,7 @@ impl<'a> Installer<'a> {
             };
             if now != original {
                 return fail(format!(
-                    "{} changed during installation; rerun the installer.",
+                    "{}: changed during installation; rerun the installer.",
                     path.display()
                 ));
             }
@@ -476,7 +487,7 @@ impl<'a> Installer<'a> {
         let existing = parse_settings(&original, path)?;
         let wanted = render(template, &self.target.home)?;
         let Some(hooks) = wanted.get("hooks").and_then(Value::as_object) else {
-            return fail(format!("{} holds no hooks", template.display()));
+            return fail(format!("{}: no hooks in it", template.display()));
         };
         let (mut data, mut changed) = merge_hooks(&existing, hooks);
         if let Some(line) = wanted.get("statusLine").filter(|line| truthy(line)) {
@@ -712,6 +723,7 @@ pub fn main(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anonymize::{Anonymizer, Identity, Names};
     use crate::testing::TempDir;
     use serde_json::json;
 
@@ -735,6 +747,67 @@ mod tests {
     }
 
     #[test]
+    fn each_integration_says_whether_it_is_in_place() {
+        let dir = TempDir::new();
+        let target = target(&dir);
+        let all = |claude, codex, omp, nvim| {
+            [
+                ("claude", claude),
+                ("codex", codex),
+                ("omp", omp),
+                ("nvim", nvim),
+            ]
+        };
+        assert_eq!(target.each(), all(false, false, false, false));
+        assert!(!installed_on(&target));
+
+        let hook = |binary: &str| {
+            json!({"hooks": {"Stop": [{"hooks": [{"type": "command",
+                "command": format!("'{binary}' agent-hook codex")}]}]}})
+            .to_string()
+        };
+        fs::create_dir_all(target.home.join(".claude")).unwrap();
+        fs::write(
+            target.home.join(".claude/settings.json"),
+            hook("/h/.local/bin/tmux-workspace"),
+        )
+        .unwrap();
+        assert_eq!(target.each(), all(true, false, false, false));
+
+        // A hook that is somebody else's is not ours.
+        fs::create_dir_all(target.home.join(".codex")).unwrap();
+        fs::write(target.home.join(".codex/hooks.json"), hook("/h/bin/other")).unwrap();
+        assert_eq!(target.each(), all(true, false, false, false));
+        fs::write(
+            target.home.join(".codex/hooks.json"),
+            hook("/h/.local/bin/tmux-workspace"),
+        )
+        .unwrap();
+        assert_eq!(target.each(), all(true, true, false, false));
+
+        // The links count when they lead into the share folder, and not when they lead elsewhere.
+        let source = dir.path().join("share/integrations/tmux-workspace.ts");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "").unwrap();
+        let link = target.home.join(".omp/agent/extensions/tmux-workspace.ts");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&source, &link).unwrap();
+        assert_eq!(target.each(), all(true, true, true, false));
+        let elsewhere = target.home.join("mine.lua");
+        fs::write(&elsewhere, "").unwrap();
+        let lua = target
+            .home
+            .join(".config/nvim/lua/custom/tmux_workspace.lua");
+        fs::create_dir_all(lua.parent().unwrap()).unwrap();
+        symlink(&elsewhere, &lua).unwrap();
+        assert_eq!(target.each(), all(true, true, true, false));
+        fs::remove_file(&lua).unwrap();
+        symlink(&source, &lua).unwrap();
+        assert_eq!(target.each(), all(true, true, true, true));
+        assert!(installed_on(&target));
+    }
+
+    #[test]
     fn a_file_that_changed_while_we_worked_is_not_overwritten() {
         let dir = TempDir::new();
         let path = dir.path().join("files/settings.json");
@@ -749,9 +822,18 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "{} changed during installation; rerun the installer.",
+                "{}: changed during installation; rerun the installer.",
                 path.display()
             )
+        );
+        // The reason is not taken for the end of the path when the message is anonymized.
+        let shown =
+            Anonymizer::new(&Identity::default(), &Names::default()).apply(&error.to_string());
+        assert!(
+            shown
+                .as_str()
+                .ends_with(": changed during installation; rerun the installer."),
+            "{shown}"
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"model": "opus"}"#);
         assert_eq!(
@@ -759,6 +841,25 @@ mod tests {
             ["settings.json"],
             "no temporary file is left"
         );
+    }
+
+    #[test]
+    fn a_template_without_hooks_says_so_after_its_path() {
+        let dir = TempDir::new();
+        let template = dir.path().join("share/integrations/codex-hooks.json");
+        fs::create_dir_all(template.parent().unwrap()).unwrap();
+        fs::write(&template, "{}").unwrap();
+        let target = target(&dir);
+        let error = Installer::new(&target)
+            .hooks(&dir.path().join("hooks.json"), &template, "Codex")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("{}: no hooks in it", template.display())
+        );
+        let shown =
+            Anonymizer::new(&Identity::default(), &Names::default()).apply(&error.to_string());
+        assert!(shown.as_str().ends_with(": no hooks in it"), "{shown}");
     }
 
     #[test]

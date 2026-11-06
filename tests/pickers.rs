@@ -421,7 +421,7 @@ fn without_fzf_sesh_or_a_terminal_the_error_says_what_to_install() {
     let out = world.run(&["open"]);
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: Install fzf to pick a workspace, or run: work NAME\n"
+        "Workspace error: Install fzf to pick a workspace, or run: work NAME\nReport it: work bug\n"
     );
     assert_eq!(out.status.code(), Some(1));
     // Without an argument, `open` is what runs.
@@ -430,7 +430,7 @@ fn without_fzf_sesh_or_a_terminal_the_error_says_what_to_install() {
     let out = quietly(command);
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: Install fzf to pick a workspace, or run: work NAME\n"
+        "Workspace error: Install fzf to pick a workspace, or run: work NAME\nReport it: work bug\n"
     );
 }
 
@@ -790,6 +790,17 @@ Run exec $SHELL (or open a new terminal), then work update again.
 To make a workspace named update, run: work ./update
 ";
 
+/// What `open bug` and `open idea` say when no workspace has that name: the shell that ran `work bug` was
+/// opened before 2.1, when `bug` and `idea` were no commands.
+fn reload_for(name: &str) -> String {
+    format!(
+        "No workspace named {name} is open, so this looks like work {name} from a terminal opened before tmux-workspace 2.1.
+Run exec $SHELL (or open a new terminal), then work {name} again.
+To make a workspace named {name}, run: work ./{name}
+"
+    )
+}
+
 /// What the refusal of a name that starts with a dash says.
 fn dash_refusal(name: &str) -> String {
     format!("Workspace error: A workspace name cannot start with -: {name}\n")
@@ -874,6 +885,85 @@ fn a_bare_update_opens_the_update_workspace_that_is_open() {
         "{trace:?}"
     );
     assert_eq!(world.sessions(), ["alpha", "update"]);
+}
+
+#[test]
+fn a_bare_bug_or_idea_with_no_such_workspace_says_to_reload_the_shell() {
+    for name in ["bug", "idea"] {
+        let world = World::new();
+        let projects = world.projects();
+        let out = world.run(&["open", name]);
+        assert_eq!(text(&out.stderr), reload_for(name), "{name}");
+        assert_eq!(text(&out.stdout), "", "{name}");
+        assert_eq!(out.status.code(), Some(2), "{name}");
+        // Nothing was made, as for `open update`.
+        assert_eq!(world.sessions(), ["alpha"], "{name}");
+        assert!(!projects.join(name).exists(), "{name}");
+        assert_eq!(world.fakes.calls("zoxide"), 0, "{name}");
+        assert_eq!(
+            world
+                .scratch
+                .tmux(&["show-options", "-gqv", "@workspace_initialized"]),
+            "",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_bug_asks_no_questions_and_starts_no_server() {
+    for name in ["bug", "idea"] {
+        let world = World::fresh();
+        world.lose_the_server();
+        let config = world.home().join(".config/tmux-workspace/config.json");
+        let (status, stderr, shown) = on_a_terminal(world.bin(&["open", name]), "");
+        assert_eq!((status, stderr.as_str()), (2, reload_for(name).as_str()));
+        assert_eq!(shown, "", "{name}");
+        assert!(!config.exists(), "{name}");
+        assert!(
+            !world.scratch.run(&["has-session"]).status.success(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn open_dash_dash_bug_makes_the_workspace_named_bug_and_so_does_idea() {
+    for name in ["bug", "idea"] {
+        let world = World::new();
+        let projects = world.projects();
+        world.ok(&["open", "--", name]);
+        assert_eq!(world.sessions(), ["alpha", name]);
+        assert!(projects.join(name).is_dir(), "{name}");
+    }
+}
+
+#[test]
+fn a_bare_bug_opens_the_bug_workspace_that_is_open() {
+    for name in ["bug", "idea"] {
+        let world = World::new();
+        world.session(name, &world.folder(name));
+        let (out, trace) = world.traced(world.bin(&["open", name]));
+        assert_eq!(
+            (text(&out.stderr).as_str(), out.status.code()),
+            ("", Some(0)),
+            "{name}"
+        );
+        assert_eq!(
+            traced_line(&trace, "tmux switch-client"),
+            format!("tmux switch-client -t ={name}")
+        );
+        assert_eq!(world.sessions(), ["alpha", name]);
+    }
+}
+
+#[test]
+fn other_names_are_no_commands_and_open_as_before() {
+    let world = World::new();
+    world.projects();
+    world.ok(&["open", "bugs"]);
+    world.ok(&["open", "idea-box"]);
+    assert_eq!(world.sessions(), ["alpha", "bugs", "idea-box"]);
 }
 
 #[test]
@@ -1172,8 +1262,11 @@ fn a_tab_whose_folder_is_missing_starts_in_the_folder_of_the_session() {
     let mut command = world.bin(&["new-tab", "x", "/nonexistent/folder"]);
     command.env("TMUX_PANE", &pane);
     assert_eq!(quietly(command).status.code(), Some(0));
-    let tab = world.scratch.expand("=beta:x", "#{pane_current_path}");
-    assert_eq!(tab, home.to_str().unwrap());
+    // Read until it holds (see `wait_for`): on Linux a new pane shows the server's folder until its shell runs.
+    wait_for(
+        || world.scratch.expand("=beta:x", "#{pane_current_path}"),
+        home.to_str().unwrap(),
+    );
 
     // When the folder of the session is gone too, the projects folder is the place.
     let projects = world.projects();
@@ -1183,9 +1276,9 @@ fn a_tab_whose_folder_is_missing_starts_in_the_folder_of_the_session() {
     let mut command = world.bin(&["new-tab", "y", ""]);
     command.env("TMUX_PANE", &pane);
     assert_eq!(quietly(command).status.code(), Some(0));
-    assert_eq!(
-        world.scratch.expand("=gone:y", "#{pane_current_path}"),
-        projects.to_str().unwrap()
+    wait_for(
+        || world.scratch.expand("=gone:y", "#{pane_current_path}"),
+        projects.to_str().unwrap(),
     );
 }
 

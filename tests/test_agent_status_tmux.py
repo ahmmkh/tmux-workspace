@@ -88,6 +88,44 @@ class Parse(ScratchTmux):
         self.assertIn('tmux-workspace" exec-shell', conf)
         self.assertNotIn('"$SHELL" -i', conf)
 
+    def report_popup_command(self):
+        """The command of the popup that Ctrl+a F opens, as sh gets it from tmux.conf."""
+        conf = (ROOT / 'tmux.conf').read_text()
+        bindings = [line for line in conf.splitlines() if re.match(r'bind(-key)?\s+(-\w+\s+)*F\s', line)]
+        self.assertEqual(len(bindings), 1, 'F is bound once')
+        found = re.fullmatch(r"bind F display-popup -E (?:-\w \S+ )*'(.*)'", bindings[0])
+        self.assertIsNotNone(found, bindings[0])
+        return found.group(1)
+
+    def test_prefix_capital_f_reports_a_bug_in_a_popup(self):
+        command = self.report_popup_command()
+        self.assertTrue(command.startswith('"$HOME/.local/bin/tmux-workspace" bug'), command)
+        self.assertNotIn('bug --print', command)
+
+    def test_the_bug_popup_stays_open_until_a_key_is_pressed(self):
+        with tempfile.TemporaryDirectory() as home:
+            tool = Path(home) / '.local' / 'bin' / 'tmux-workspace'
+            tool.parent.mkdir(parents=True)
+            tool.write_text('#!/bin/sh\necho "ran: $*"\n')
+            tool.chmod(0o755)
+            master, slave = pty.openpty()
+            self.addCleanup(os.close, master)
+            popup = subprocess.Popen(['/bin/sh', '-c', self.report_popup_command()],
+                                     env={'HOME': home, 'PATH': '/usr/bin:/bin'},
+                                     stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+            os.close(slave)
+            self.addCleanup(popup.kill)
+            shown = b''
+            deadline = time.monotonic() + 5
+            while b'any key' not in shown and time.monotonic() < deadline:
+                shown += os.read(master, 4096)
+            self.assertIn(b'ran: bug', shown)
+            self.assertIn(b'any key', shown)
+            time.sleep(0.5)
+            self.assertIsNone(popup.poll(), 'the popup waits for a key')
+            os.write(master, b'x')
+            self.assertEqual(popup.wait(timeout=5), 0)
+
     def test_status_regex_matches_every_known_shell(self):
         for shell in ('zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'nu', 'elvish', 'xonsh', 'pwsh'):
             with self.subTest(shell=shell):

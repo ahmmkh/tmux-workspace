@@ -1,0 +1,29 @@
+name: Idea
+description: Something tmux-workspace could do, or do better
+title: "[Idea]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The quickest way here is `work idea` (in a terminal). It builds the **Environment** below for you,
+        with the names of your workspaces, folders, user and host, addresses and keys taken out, and it asks
+        before it opens this form. Nothing is sent until you press Submit.
+  - type: textarea
+    id: what-you-want
+    attributes:
+      label: What you want
+      description: What tmux-workspace should do.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What you are trying to do, and what is in the way.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by `work idea`. Run `work idea --print` to see it, and the link, without opening anything.
+      render: markdown

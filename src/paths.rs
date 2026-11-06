@@ -403,6 +403,15 @@ fn passwd_home(lookup: Lookup) -> Option<PathBuf> {
     passwd_field(lookup, |entry| entry.pw_dir).map(PathBuf::from)
 }
 
+/// The login name the password database gives this account: empty when there is none.
+pub fn account_name() -> String {
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    passwd_field(Lookup::Uid(uid), |entry| entry.pw_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// The login shell the password database gives this account: empty when there is none.
 pub fn account_shell() -> String {
     // SAFETY: `getuid` has no preconditions and cannot fail.

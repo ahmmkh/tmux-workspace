@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.1.0 — 2026-11-06
+
+A friendlier installer, and a way to report a bug or an idea from the tool itself.
+
+### Added
+
+- `install.sh` run without options in a terminal shows a checklist of what it will set up, then a line per
+  step and a summary. Always set up, and locked: tmux-workspace, tmux 3.3+ when it is missing or too old,
+  `~/.tmux.conf` and the `work` command. Ticked: fzf, zoxide, python3 and procps on Alpine when missing, and
+  the status hooks of the agents it finds. Not ticked: lazygit, sesh and git. `↑`/`↓` or `j`/`k` move, space
+  ticks, Enter installs, `q` quits without a change. After Enter it asks for the projects folder
+  (`~/Projects` by default) unless one is set, and checks it before anything changes. Keys typed before the
+  list shows never answer it.
+- What the installer's commands print goes to `~/.local/state/tmux-workspace/install.log`. A step that fails
+  shows the end of that log, what to do, and a link to a new GitHub issue with the system and the log tail
+  filled in, anonymized. Nothing is sent.
+- `work bug` and `work idea` (`Ctrl+a F` in tmux) report a bug or an idea. `work bug` builds a report of your
+  setup, what `doctor` found and the last failures of tmux-workspace, shows it in full and asks
+  `Open a GitHub issue with this? [Y/n]`; a yes opens GitHub's issue form with the report filled in. Nothing is
+  sent by tmux-workspace itself: you read the form and press Submit. Every line is anonymized first: workspace,
+  tab and pane label names become `workspace-1`, `tab-1`, `label-1`, folders become `folder-1`, and user and host
+  names, e-mail and IP addresses, keys, tokens and passwords in URLs are removed; arguments you typed never
+  appear. Pane contents, environment variables, shell history and git remotes are never in it. `--print` prints
+  the report and the link and opens nothing. Over SSH, or without a browser, the link is shown and the full
+  report is copied with `tw-clip` (OSC 52). `work idea` is the same with the environment only.
+- `~/.local/state/tmux-workspace/errors.log` (private) keeps the time, the command and the message of the last
+  200 failures, never arguments or screen text; `work bug` reports its last ten lines.
+- Issue forms for bugs and ideas, and a help topic for `Ctrl+a ?`. `work ./bug` and `work ./idea` open a
+  workspace with that name.
+
+### Changed
+
+- A command that fails with status 1 ends its error with `Report it: work bug`. The agent hook, the status
+  line, autosave and the other commands nobody watches log the failure and say nothing more.
+- `doctor` ends with `If this looks like a bug: work bug (it includes these results, anonymized)` when it warns.
+- `open bug` and `open idea` exit with status 2 and say to run `exec $SHELL` unless a workspace has that name,
+  as `open update` does since 2.0.1.
+- `install.sh --update` (`work update`) and `--uninstall` in a terminal show the same step lines and summary;
+  `--uninstall` asks once first. With any option that chooses what to install (`--deps`, `--agents`,
+  `--projects`, `--no-shell`, `--no-tmux-conf`), without a terminal, with `TERM=dumb`, in CI, or with `--yes`,
+  `--dry-run` or `--check`, the installer prints the plain lines it always did, byte for byte.
+- Some messages put the path last, so a bug report keeps their reason: `Missing PATH: update needs it`,
+  `PATH: no hooks in it`, `No pane ID in PATH`, and doctor's `error connecting (reason): PATH`.
+
 ## 2.0.1 — 2026-11-06
 
 `work update` in a terminal that was open before the upgrade to 2.0 no longer makes a workspace.

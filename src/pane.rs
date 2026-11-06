@@ -324,7 +324,7 @@ fn restore_pane(tmux: &Tmux, pane: &str, path: &str, uid: &str) -> Result<()> {
         .and_then(Value::as_array)
         .and_then(|panes| panes.iter().find(|p| text_of(p, "id") == uid))
     else {
-        return fail(format!("{path} has no pane {uid}"));
+        return fail(format!("No pane {uid} in {path}"));
     };
 
     let write = |name: &str, value: &str| -> Vec<String> {
@@ -678,5 +678,22 @@ mod tests {
         let plain = dir.path().join("plain");
         std::fs::write(&plain, "").unwrap();
         assert!(!usable_shell(plain.to_str().unwrap()), "not executable");
+    }
+    #[test]
+    fn a_snapshot_without_the_pane_says_which_after_naming_the_pane_and_the_file_last() {
+        use crate::anonymize::{Anonymizer, Identity, Names};
+        let dir = crate::testing::TempDir::new();
+        let file = dir.path().join("Globex Corp").join("workspace.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"panes": [{"id": "aaaa"}]}"#).unwrap();
+        let tmux = Tmux::new().program("/tw-no-such-dir/tmux");
+        let error = restore_pane(&tmux, "%1", &file.to_string_lossy(), "4f3a").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("No pane 4f3a in {}", file.display())
+        );
+        let shown =
+            Anonymizer::new(&Identity::default(), &Names::default()).apply(&error.to_string());
+        assert!(shown.as_str().starts_with("No pane 4f3a in "), "{shown}");
     }
 }

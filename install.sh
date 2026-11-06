@@ -39,6 +39,9 @@ Usage: install.sh [options]
   --uninstall       remove the links and shell lines, and restore the backups
   -h, --help        show this help
 
+On a terminal, without --deps, --projects, --agents, --no-shell, --no-tmux-conf, --yes or --dry-run, the
+installer asks what to set up in a checklist; with any of them, the options decide.
+
 Environment:
   TMUX_WORKSPACE_HOME    where releases are unpacked (~/.local/share/tmux-workspace)
   TMUX_WORKSPACE_DIST    a URL or folder holding the release archives and SHA256SUMS
@@ -47,20 +50,22 @@ EOF
 }
 
 say() { printf '%-8s %s\n' "$1" "$2"; }
-die() { printf 'error    %s\n' "$1" >&2; exit "${2:-1}"; }
+die() { DIE_MSG=$1; printf 'error    %s\n' "$1" >&2; exit "${2:-1}"; }
+DIE_MSG=''  # what die said: on a terminal, the failure says it again as what to do
 
 DEPS=0 AGENTS=0 SHELLS=1 TMUXCONF=1 DRY=0 YES=0 UNINSTALL=0 UPDATE=0 CHECK=0 PROJECTS='' WANTED=''
+CHOSEN=0  # an option that chooses what to set up was given: then nobody is asked (see choose_ui)
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do
     case $1 in
-        --deps) DEPS=1 ;;
-        --agents) AGENTS=1 ;;
-        --projects) [ $# -ge 2 ] || { usage >&2; exit 2; }; PROJECTS=$2; shift ;;
-        --projects=*) PROJECTS=${1#*=} ;;
+        --deps) DEPS=1 CHOSEN=1 ;;
+        --agents) AGENTS=1 CHOSEN=1 ;;
+        --projects) [ $# -ge 2 ] || { usage >&2; exit 2; }; PROJECTS=$2 CHOSEN=1; shift ;;
+        --projects=*) PROJECTS=${1#*=} CHOSEN=1 ;;
         --version) [ $# -ge 2 ] || { usage >&2; exit 2; }; WANTED=$2; shift ;;
         --version=*) WANTED=${1#*=} ;;
-        --no-shell) SHELLS=0 ;;
-        --no-tmux-conf) TMUXCONF=0 ;;
+        --no-shell) SHELLS=0 CHOSEN=1 ;;
+        --no-tmux-conf) TMUXCONF=0 CHOSEN=1 ;;
         --dry-run) DRY=1 ;;
         --yes|-y) YES=1 ;;
         --uninstall) UNINSTALL=1 ;;
@@ -108,6 +113,30 @@ PENDING=''      # a new binary next to the one it replaces after a pull; removed
 REASON='' REASON_KIND=''  # why try_fetch or try_stage_archive failed; missing: no release fits
 UPDATED_FROM='' # what git_update updated from: nothing when the clone was up to date
 NEW_BINARY='' NEW_STAMP=''  # the binary git_update had for the new version, and its release
+CHANGES=0       # how many changes were made so far: a progress line says when its step made none
+TMUXCONF_AGREED=$YES  # 1: replace a ~/.tmux.conf of the user's (moved to a backup) without asking
+PIPED=0         # this run started as `curl … | bash`
+SUDO_ASKS=0     # sudo asks for a password at every command here
+
+# How this run talks to the person. plain: the `say` lines above, which tests and scripts parse. guided:
+# a checklist of what to set up, then a line per step and a summary. styled: the lines per step and the
+# summary without the checklist (--update, --uninstall). See choose_ui.
+UI=plain
+LOG=$STATE/install.log  # guided and styled runs: what every command printed, with a header per run
+LOG_START=0     # the lines LOG had before this run
+UI_OPEN=0       # 1 once the lines per step started: the terminal is on fd 3, stdout and stderr go to LOG
+PENDING_LOG=''  # a temporary LOG while nothing is decided yet (a piped download): kept only on failure
+STEP='' STEP_NAME='' STEP_MODE='' STEP_FIX='' STEP_NOTE='' STEP_CHANGES=0 SPIN_PID=''
+SAME_NOTE='already set up'  # what a line says when its step changed nothing
+TTY_SAVED=''    # the terminal settings the checklist changed, restored on every exit
+CURSOR_HIDDEN=0
+DONE_NAMES=''   # the steps that changed something, for the summary
+KEPT=''         # files of the user's that were left in place, a line each
+CODEX_CHANGED=0 # the agent step changed Codex's hooks, which Codex asks to review
+COLS=80 ROWS=0
+G_LOCK='#' G_CURSOR='>' G_OK='ok' G_FAIL='x' G_DOT='-' G_UPDOWN='up/down' G_MORE='...'
+SPIN_FRAMES=('|' '/' '-' "\\")
+C_BOLD='' C_DIM='' C_GREEN='' C_RED='' C_CYAN='' C_OFF=''
 
 # ---------------------------------------------------------------------------------------------
 # Helpers
@@ -116,7 +145,7 @@ NEW_BINARY='' NEW_STAMP=''  # the binary git_update had for the new version, and
 act() {
     local label=$1 text=$2
     shift 2
-    CHANGED=1
+    changed
     if [ "$DRY" = 1 ]; then
         say would "$label $text"
     else
@@ -124,6 +153,8 @@ act() {
         say "$label" "$text"
     fi
 }
+
+changed() { CHANGED=1; CHANGES=$((CHANGES + 1)); }
 
 has() { command -v "$1" >/dev/null 2>&1; }
 
@@ -204,11 +235,364 @@ remove_stage() {
     STAGE=''
 }
 
-on_exit() {  # every exit: no download and no half-placed binary stays behind
+on_exit() {  # every exit: no download and no half-placed binary stays behind, and the terminal is as it was
+    local status=$?
     remove_stage
     if [ -n "$PENDING" ]; then rm -f "${PENDING:?}"; fi
+    if [ "$UI" != plain ]; then ui_exit "$status" || true; fi
 }
 trap on_exit EXIT
+
+# ---------------------------------------------------------------------------------------------
+# On a terminal: a line per step instead of the `say` lines, which go to LOG. Plain ANSI escapes,
+# stty and read; nothing to install first.
+
+# A person at a terminal that moves its cursor: not a pipe, a file, CI or a dumb terminal.
+terminal_ok() {
+    [ -t 1 ] && [ -z "${CI:-}" ] && has stty && tty_ok || return 1
+    case ${TERM:-dumb} in dumb | unknown) return 1 ;; esac
+}
+
+# The checklist for an install on a terminal without options; the lines per step for an update or an
+# uninstall there (and for the installer a pull handed over to). --yes, --dry-run and --check stay plain,
+# and so does an install with an option that chooses what to set up: whoever gave it has decided, and a
+# script that runs on a terminal nobody watches must not wait for a key.
+choose_ui() {
+    [ "$DRY$YES$CHECK" = 000 ] && terminal_ok || return 0
+    if [ "$UPDATE$UNINSTALL" = 00 ] && [ -z "$UPDATE_FROM" ]; then
+        [ "$CHOSEN" = 0 ] || return 0
+        UI=guided
+    else
+        UI=styled
+    fi
+    if [ "$UPDATE" = 1 ]; then SAME_NOTE=unchanged; fi
+    case ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} in
+        *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*)
+            G_LOCK='■' G_CURSOR='›' G_OK='✓' G_FAIL='✗' G_DOT='·' G_UPDOWN='↑↓' G_MORE='…'
+            SPIN_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+            ;;
+    esac
+    if [ -z "${NO_COLOR:-}" ]; then
+        C_BOLD=$'\033[1m' C_DIM=$'\033[2m' C_GREEN=$'\033[32m' C_RED=$'\033[31m' C_CYAN=$'\033[36m' C_OFF=$'\033[0m'
+    fi
+    local size
+    size=$(stty size </dev/tty 2>/dev/null || true)
+    ROWS=${size%% *} COLS=${size##* }
+    case $COLS in '' | 0 | *[!0-9]*) COLS=80 ;; esac
+    case $ROWS in '' | 0 | *[!0-9]*) ROWS=0 ;; esac  # 0: not known
+    # Every way out runs on_exit, which gives the terminal back its settings and its cursor.
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 131' QUIT
+    trap 'exit 143' TERM
+}
+
+ui() {  # ui TEXT: a line on the terminal
+    if [ "$UI_OPEN" = 1 ]; then printf '%s\n' "$1" >&3; else printf '%s\n' "$1"; fi
+}
+
+ui_path() {  # PATH with the home folder shown as ~
+    case $1 in
+        "$HOME") printf '~\n' ;;
+        "$HOME"/*)
+            # shellcheck disable=SC2088 # a ~ to read, not to expand
+            printf '~/%s\n' "${1#"$HOME"/}"
+            ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+fit() {  # fit TEXT [WIDTH]: TEXT cut to WIDTH characters (the terminal's), so that it never wraps
+    local width=${2:-$((COLS - 1))}
+    if [ "${#1}" -le "$width" ]; then
+        printf '%s' "$1"
+    elif [ "$width" -gt "${#G_MORE}" ]; then
+        printf '%s%s' "${1:0:$((width - ${#G_MORE}))}" "$G_MORE"
+    fi
+}
+
+ui_version() {  # the version this installer installs
+    if [ -n "${REPO:-}" ] && [ -f "$REPO/VERSION" ]; then
+        release_version "$REPO"
+    elif [ -n "${REPO:-}" ] && [ -f "$REPO/Cargo.toml" ]; then
+        tree_version "$REPO"
+    fi
+}
+
+ui_rerun() {  # the command that runs this installer again
+    if [ "$PIPED" = 1 ] || [ -z "${REPO:-}" ]; then
+        printf '%s\n' 'curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.sh | bash'
+    else
+        printf '%s/install.sh\n' "$(ui_path "$REPO")"
+    fi
+}
+
+# From here on the terminal shows a line per step (on fd 3), and stdout and stderr go to LOG.
+progress_open() {
+    [ "$UI" != plain ] && [ "$UI_OPEN" = 0 ] || return 0
+    local version
+    if [ -n "$PENDING_LOG" ]; then
+        LOG=$PENDING_LOG
+    else
+        mkdir -p "$STATE"
+        chmod 700 "$STATE"
+        (umask 077 && : >>"$LOG")
+        chmod 600 "$LOG"
+    fi
+    LOG_START=$(awk 'END { print NR }' "$LOG")
+    version=$(ui_version)
+    exec 3>&1 4>&2 >>"$LOG" 2>&1
+    UI_OPEN=1
+    printf '=== %s  install.sh%s%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${version:+ $version}" \
+        "${ORIGINAL_ARGS[*]+ ${ORIGINAL_ARGS[*]}}"
+}
+
+progress_close() {  # the terminal back on stdout and stderr: before handing over to another installer
+    [ "$UI_OPEN" = 1 ] || return 0
+    step_end
+    exec 1>&3 2>&4 3>&- 4>&-
+    UI_OPEN=0
+    if [ -n "$PENDING_LOG" ]; then rm -f "$PENDING_LOG"; fi
+    PENDING_LOG=''
+}
+
+# step NAME [DETAIL] [MODE]: the line of what runs next, marked done (ok) by the next step or step_end,
+# or failed (x) when the installer stops first. NAME is also what a bug report names. MODE slow spins
+# meanwhile; ask is a slow step that may ask something on the terminal (sudo, ssh, git), so it shows its
+# line and no spinner; quick is a step that changes nothing the installer counts; otherwise, a step that
+# changed nothing says so. Nothing in the plain UI.
+step() {
+    [ "$UI" != plain ] || return 0
+    progress_open
+    step_end
+    STEP_NAME=$1 STEP_MODE=${3:-} STEP_FIX='' STEP_NOTE='' STEP_CHANGES=$CHANGES
+    STEP=$(printf '%-22s%s' "$1" "${2:-}")
+    STEP=$(fit "$STEP" $((COLS - 6)))
+    printf -- '--- %s\n' "$STEP"
+    if [ "$STEP_MODE" = slow ] && has sleep; then
+        spin_start
+    elif [ "$STEP_MODE" = ask ]; then
+        printf '  %s %s\n' "$G_DOT" "$STEP" >&3
+    else
+        printf '  %s %s' "${SPIN_FRAMES[0]}" "$STEP" >&3
+    fi
+}
+
+step_end() {  # the step that runs is done
+    [ -n "$STEP" ] || return 0
+    spin_stop
+    local note=$STEP_NOTE
+    if [ "$STEP_MODE" = slow ] || [ "$STEP_MODE" = ask ] || [ "$CHANGES" != "$STEP_CHANGES" ]; then
+        DONE_NAMES="${DONE_NAMES:+$DONE_NAMES, }$STEP_NAME"
+    elif [ "$STEP_MODE" != quick ] && [ -z "$note" ]; then
+        note=$SAME_NOTE
+    fi
+    mark_step "$C_GREEN$G_OK$C_OFF" "$STEP" "$note"
+    STEP=''
+}
+
+mark_step() {  # mark_step GLYPH TEXT [NOTE]: the line of the step, finished
+    printf '\r\033[K  %s %s%s\n' "$1" "$2" "${3:+ $C_DIM($3)$C_OFF}" >&3
+}
+
+spin_start() {  # the line of the step, with a spinner until spin_stop
+    local text=$STEP
+    (
+        trap 'exit 0' TERM
+        i=0
+        while kill -0 "$$" 2>/dev/null; do
+            printf '\r  %s %s' "${SPIN_FRAMES[i]}" "$text" >&3
+            i=$(((i + 1) % ${#SPIN_FRAMES[@]}))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+    ) &
+    SPIN_PID=$!
+}
+
+spin_stop() {
+    [ -n "$SPIN_PID" ] || return 0
+    kill "$SPIN_PID" 2>/dev/null || true
+    wait "$SPIN_PID" 2>/dev/null || true
+    SPIN_PID=''
+}
+
+# ui_exit STATUS: every exit of a guided or styled run. The terminal gets back its settings and its
+# cursor, and a run that stops in a step says why, what to do, and how to report it.
+ui_exit() {
+    spin_stop
+    if [ -n "$TTY_SAVED" ]; then
+        drain_tty 2>/dev/null
+        stty "$TTY_SAVED" </dev/tty 2>/dev/null
+    fi
+    TTY_SAVED=''
+    if [ "$CURSOR_HIDDEN" = 1 ]; then printf '\033[?25h' >/dev/tty; fi
+    CURSOR_HIDDEN=0
+    if [ "$UI_OPEN" = 1 ]; then
+        if [ "$1" = 0 ]; then step_end; else progress_fail "$1"; fi
+    else
+        case $1 in 129 | 130 | 131 | 143) printf '\n%s\n' 'Cancelled. Nothing was changed.' >/dev/tty ;; esac
+    fi
+    if [ -n "$PENDING_LOG" ]; then rm -f "$PENDING_LOG"; fi
+}
+
+progress_fail() {  # progress_fail STATUS: the run stopped in the middle of a step
+    local status=$1 name=${STEP_NAME:-install} fix line
+    spin_stop
+    mark_step "$C_RED$G_FAIL$C_OFF" "${STEP:-${DIE_MSG:-the installer stopped (exit status $status)}}"
+    STEP=''
+    case $status in
+        129 | 130 | 131 | 143)
+            ui "  Stopped. What was done so far stays; run the installer again to finish: $(ui_rerun)"
+            return 0
+            ;;
+    esac
+    keep_log
+    ui ''
+    log_tail 10 | while IFS= read -r line; do ui "    $C_DIM$line$C_OFF"; done
+    fix=${DIE_MSG:-${STEP_FIX:-Fix what the log says, then run the installer again: $(ui_rerun)}}
+    ui ''
+    ui "  $C_BOLD$fix$C_OFF"
+    ui "  Log: $(ui_path "$LOG")"
+    ui "  Report it: $(report_link "$name")"
+    copy_report
+}
+
+keep_log() {  # a failed piped download: its temporary log joins install.log
+    [ -n "$PENDING_LOG" ] || return 0
+    LOG=$STATE/install.log
+    mkdir -p "$STATE"
+    chmod 700 "$STATE"
+    (umask 077 && : >>"$LOG")
+    LOG_START=$(awk 'END { print NR }' "$LOG")
+    cat "$PENDING_LOG" >>"$LOG"
+    rm -f "$PENDING_LOG"
+    PENDING_LOG=''
+}
+
+log_tail() {  # log_tail N: the last N lines this run wrote to LOG
+    awk -v start="$LOG_START" -v n="$1" 'NR > start { line[NR] = $0 }
+        END { first = NR - n + 1; if (first <= start) first = start + 1; for (i = first; i <= NR; i++) print line[i] }' "$LOG"
+}
+
+# ---------------------------------------------------------------------------------------------
+# A failed step offers a bug report: a link to a new GitHub issue with this machine and the end of
+# the log filled in, anonymized. Nothing is sent; the person opens the link, reads it and decides.
+
+# anonymize: standard input with what names this person or machine taken out, the same way as the
+# reports of `tmux-workspace bug`: the home folder, the user and host names, e-mail and IP addresses,
+# credentials in URLs, and tokens.
+anonymize() {
+    local name home=$HOME real host short hosts=''
+    local rules=(-e 's/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\/@[:space:]:]+:[^\/@[:space:]]*@/\1/g'
+        -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<email>/g')
+    real=$(cd "$HOME" 2>/dev/null && pwd -P || true)
+    for home in "$HOME" "$real"; do
+        if [ "${#home}" -gt 1 ]; then rules+=(-e "s/$(ere_escape "$home")/~/g"); fi
+    done
+    if has hostname; then hosts=$(hostname 2>/dev/null || true); fi
+    for host in "$hosts" "$(uname -n 2>/dev/null || true)"; do
+        short=${host%%.*}
+        for name in "$host" "$short"; do
+            [ "${#name}" -ge 2 ] || continue
+            name=$(ere_escape "$name")
+            rules+=(-e "s/(^|[^[:alnum:]_-])$name([^[:alnum:]_-]|\$)/\1<host>\2/g")
+            rules+=(-e "s/(^|[^[:alnum:]_-])$name([^[:alnum:]_-]|\$)/\1<host>\2/g")
+        done
+    done
+    for name in "${USER:-}" "${LOGNAME:-}" "$(id -un 2>/dev/null || true)"; do
+        [ "${#name}" -ge 2 ] || continue
+        name=$(ere_escape "$name")
+        rules+=(-e "s/(^|[^[:alnum:]_<])$name([^[:alnum:]_>]|\$)/\1<user>\2/g")
+        rules+=(-e "s/(^|[^[:alnum:]_<])$name([^[:alnum:]_>]|\$)/\1<user>\2/g")
+    done
+    local ipv4='(^|[^[:alnum:].])([0-9]{1,3}\.){3}[0-9]{1,3}([^[:alnum:].]|$)'
+    local ipv6='(^|[^[:alnum:]:])([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}([^[:alnum:]:]|$)'
+    local short6='(^|[^[:alnum:]:])(([0-9A-Fa-f]{1,4}:)+:([0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*)?|::[0-9A-Fa-f]{1,4}(:[0-9A-Fa-f]{1,4})*)([^[:alnum:]:]|$)'
+    rules+=(-e "s/$ipv4/\1<ip>\3/g" -e "s/$ipv4/\1<ip>\3/g" -e "s/$ipv6/\1<ip>\3/g" -e "s/$short6/\1<ip>\7/g"
+        -e "s/$short6/\1<ip>\7/g"
+        -e 's/(^|[^[:alnum:]_-])(sk-|ghp_|gho_|github_pat_|xox[abpr]-|AKIA)[A-Za-z0-9_-]{8,}/\1<token>/g')
+    # Last, any run of 24 or more letters, digits, _ and - that mixes letters and digits.
+    LC_ALL=C sed -E "${rules[@]}" | LC_ALL=C awk '{
+        out = ""; rest = $0
+        while (match(rest, /[A-Za-z0-9_-]+/)) {
+            word = substr(rest, RSTART, RLENGTH)
+            if (RLENGTH >= 24 && word ~ /[A-Za-z]/ && word ~ /[0-9]/) word = "<token>"
+            out = out substr(rest, 1, RSTART - 1) word
+            rest = substr(rest, RSTART + RLENGTH)
+        }
+        print out rest
+    }'
+}
+
+ere_escape() { printf '%s\n' "$1" | sed 's/[]\/$*.^|[(){}?+]/\\&/g'; }  # TEXT as a sed -E pattern
+
+# urlencode TEXT: percent-encoded UTF-8; RFC 3986's unreserved characters stay as they are. A subshell, so
+# that LC_ALL=C (a byte at a time) ends with it.
+urlencode() (
+    LC_ALL=C
+    text=$1 out='' i=0
+    while [ "$i" -lt "${#text}" ]; do
+        c=${text:i:1}
+        case $c in
+            [A-Za-z0-9._~-]) out=$out$c ;;
+            *)
+                printf -v n '%d' "'$c"
+                n=$((n & 255))  # bash 3.2 reads bytes over 127 as negative, musl as U+DF80 and up
+                printf -v c '%%%02X' "$n"
+                out=$out$c
+                ;;
+        esac
+        i=$((i + 1))
+    done
+    printf '%s' "$out"
+)
+
+report_environment() {  # what the bug template asks about the machine
+    local version tmux_v=missing
+    version=$(ui_version)
+    if has tmux; then tmux_v=$(tmux -V 2>/dev/null | sed 's/^tmux //'); fi
+    printf 'tmux-workspace: %s (installing)\n' "${version:-${WANTED:-the latest release}}"
+    printf 'OS: %s\narch: %s\nbash: %s\n' "$(os_label full)" "$(uname -m)" "$BASH_VERSION"
+    printf 'package manager: %s\ntmux: %s\n' "${PM:-none}" "${tmux_v:-missing}"
+}
+
+# report_link STEP: a new issue of the bug template, its title naming STEP, with the machine and the last
+# 20 lines of the log. A link stays within 8000 bytes: the oldest lines of the log go first.
+report_link() {
+    local base title environment line encoded=() n start=0 total=0 i diagnostics=''
+    title=$(printf 'install failed: %s\n' "$1" | anonymize)
+    environment=$(report_environment | anonymize)
+    base="$REPO_URL/issues/new?template=bug.yml&title=$(urlencode "$title")&environment=$(urlencode "$environment")&diagnostics="
+    while IFS= read -r line; do
+        encoded[${#encoded[@]}]=$(urlencode "$line")
+        total=$((total + ${#encoded[${#encoded[@]} - 1]} + 3))
+    done < <(log_tail 20 | anonymize)
+    n=${#encoded[@]}
+    total=$((total - 3))
+    while [ "$start" -lt "$n" ] && [ $((${#base} + total)) -gt 8000 ]; do
+        total=$((total - ${#encoded[start]} - 3))
+        start=$((start + 1))
+    done
+    for ((i = start; i < n; i++)); do
+        if [ "$i" -gt "$start" ]; then diagnostics=$diagnostics%0A; fi
+        diagnostics=$diagnostics${encoded[i]}
+    done
+    printf '%s%s\n' "$base" "$diagnostics"
+}
+
+copy_report() {  # the anonymized end of the log on the clipboard too, where there is one
+    local copied=1
+    if has pbcopy; then
+        log_tail 20 | anonymize | pbcopy 2>/dev/null || copied=0
+    elif has wl-copy && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        log_tail 20 | anonymize | wl-copy 2>/dev/null || copied=0
+    elif has xclip && [ -n "${DISPLAY:-}" ]; then
+        log_tail 20 | anonymize | xclip -selection clipboard 2>/dev/null || copied=0
+    else
+        return 0
+    fi
+    if [ "$copied" = 1 ]; then ui '  The end of the log, anonymized, is on the clipboard as well.'; fi
+}
 
 # ---------------------------------------------------------------------------------------------
 # Where the code lives: this clone or unpacked release, or a release downloaded when the script
@@ -251,14 +635,43 @@ install_packages() {
     if [ -n "$SUDO" ] && ! has sudo; then die "sudo is needed to run: $(install_command "$@")" 3; fi
     if [ "$PM" = apt-get ]; then $SUDO apt-get update -qq; fi
     say install "$*"
+    pm_install "$@"
+}
+
+pm_install() {  # pm_install PACKAGE...: the package manager installs them
+    local sudo
+    sudo=$(pm_sudo)
     case $PM in
         brew) brew install "$@" ;;
-        apt-get) DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq "$@" ;;
-        dnf) $SUDO dnf install -y -q "$@" ;;
-        pacman) $SUDO pacman -S --needed --noconfirm "$@" ;;
-        apk) $SUDO apk add -q "$@" ;;
-        zypper) $SUDO zypper install -y "$@" ;;
+        apt-get) DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y -qq "$@" ;;
+        dnf) $sudo dnf install -y -q "$@" ;;
+        pacman) $sudo pacman -S --needed --noconfirm "$@" ;;
+        apk) $sudo apk add -q "$@" ;;
+        zypper) $sudo zypper install -y "$@" ;;
     esac
+}
+
+pm_update() { if [ "$PM" = apt-get ]; then $(pm_sudo) apt-get update -qq; fi; }  # the package lists
+
+# How to run the package manager: with SUDO, or under a spinner with sudo -n, which fails instead of
+# asking where nobody would see the question (sudo_ready and sudo_fresh asked first).
+pm_sudo() {
+    if [ -n "$SUDO" ] && [ "$UI" != plain ] && [ "$SUDO_ASKS" = 0 ]; then echo "$SUDO -n"; else echo "$SUDO"; fi
+}
+
+pm_usable() { [ -n "$PM" ] && { [ -z "$SUDO" ] || has sudo; }; }  # packages can be installed here
+
+pm_has() {  # pm_has TOOL: the package manager here has a package of TOOL
+    case $1 in
+        sesh) [ "$PM" = brew ] ;;
+        lazygit) case $PM in brew | pacman | apk) return 0 ;; *) return 1 ;; esac ;;
+        procps) [ "$PM" = apk ] ;;
+        *) [ -n "$PM" ] ;;
+    esac
+}
+
+package_of() {  # package_of TOOL: the name of its package here
+    if [ "$1" = python3 ] && [ "$PM" = pacman ]; then echo python; else echo "$1"; fi
 }
 
 # Whether DIR holds tmux-workspace: a clone (with Cargo.toml) or an unpacked release (with VERSION).
@@ -391,6 +804,7 @@ run_staged() {
     TMUX_WORKSPACE_HOME=${HOME_SHARE:-$(share_home)}
     TMUX_WORKSPACE_STAGE=$STAGE
     export TMUX_WORKSPACE_HOME TMUX_WORKSPACE_STAGE
+    progress_close
     exec bash "$STAGED/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 }
 
@@ -413,6 +827,7 @@ clone_install() {
             clone_release_binary "$root"
         fi
     fi
+    progress_close
     exec bash "$root/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 }
 
@@ -422,6 +837,7 @@ clone_install() {
 clone_release_binary() {
     local root=$1 dest=$1/bin/tmux-workspace stamp=$1/bin/tmux-workspace.version
     if [ ! -x "$dest" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$(tree_version "$root")" ]; then
+        step binary "$(ui_path "$dest")" slow
         obtain_binary "$root" '' "release cargo"
         place_binary "$NEW_BINARY" "$dest" "$stamp" "$NEW_STAMP"
         remove_stage
@@ -447,7 +863,18 @@ remote_install() {
         say "done" "nothing to remove"
         exit 0
     fi
+    PIPED=1
+    if [ "$UI" = guided ]; then
+        # Without tmux and a way to install it, say so before downloading. Until the checklist is
+        # answered nothing is written, the log of the download included.
+        tmux_usable || pm_usable || stop_without_tmux "$(tmux_version 2>/dev/null || true)"
+        PENDING_LOG=$(mktemp)
+    fi
+    step download "tmux-workspace ${WANTED:-(the latest release)}" slow
     stage_archive "${WANTED:-latest}"
+    if [ "$UI" != plain ]; then
+        STEP=$(printf '%-22s%s' download "tmux-workspace $(release_version "$STAGED"), checked against SHA256SUMS")
+    fi
     HOME_SHARE=$home
     run_staged
 }
@@ -471,6 +898,7 @@ settle_release() {
     if staged_here; then
         STAGE=$(cd "$TMUX_WORKSPACE_STAGE" && pwd -P)  # the download this installer runs from: removed on exit
         unset TMUX_WORKSPACE_STAGE
+        PIPED=1
     elif [ -L "$parent/current" ]; then
         HOME_SHARE=$parent
         if [ -n "$WANTED" ] && [ "${WANTED#v}" != "$(release_version "$REPO")" ] && [ "$UNINSTALL$UPDATE" = 00 ]; then
@@ -508,6 +936,7 @@ place_release() {
         REPO=$home/current
         return 0
     fi
+    step unpack "tmux-workspace $own to $(ui_path "$home")"
     mkdir -p "$home"
     if [ ! -f "$dest/VERSION" ] || [ ! -x "$dest/bin/tmux-workspace" ]; then
         rm -rf "${home:?}/.incoming-$$" "${home:?}/.outgoing-$$"
@@ -515,13 +944,13 @@ place_release() {
         if [ -e "$dest" ] || [ -L "$dest" ]; then mv "$dest" "$home/.outgoing-$$"; fi
         mv "$home/.incoming-$$" "$dest"
         rm -rf "${home:?}/.outgoing-$$"
-        CHANGED=1
+        changed
         say unpack "tmux-workspace $own to $dest"
     fi
     previous=$(readlink "$home/current" 2>/dev/null || true)
     if [ "$previous" != "$own" ]; then
         ln -sfn "$own" "$home/current"
-        CHANGED=1
+        changed
         say link "$home/current -> $own"
         prune_releases "$home" "$own" "$previous"  # the new current and the one before it stay
     fi
@@ -585,18 +1014,22 @@ update_release() {
     if [ -n "$WANTED" ]; then
         wanted=${WANTED#v}
     else
+        step 'latest release' 'asking which version is the newest' slow
         latest_version
+        if [ "$UI" != plain ]; then STEP=$(printf '%-22s%s' 'latest release' "$LATEST"); fi
         wanted=$LATEST
         version_lt "$own" "$wanted" || wanted=$own
     fi
     if [ "$wanted" = "$own" ]; then
         say "done" "already up to date ($own)"
+        ui_done "tmux-workspace $own is up to date."
         exit 0
     fi
     if [ "$CHECK" = 1 ]; then
         say update "update available: $own → $wanted"
         exit 0
     fi
+    step download "tmux-workspace $wanted" slow
     stage_archive "v$wanted"
     TMUX_WORKSPACE_UPDATE_FROM=$own
     export TMUX_WORKSPACE_UPDATE_FROM
@@ -610,10 +1043,12 @@ update_clone() {
     git_update "$REPO"
     if [ -z "$UPDATED_FROM" ]; then
         say "done" "already up to date ($(clone_label "$REPO" HEAD))"
+        ui_done "tmux-workspace $(clone_label "$REPO" HEAD) is up to date."
         exit 0
     fi
     TMUX_WORKSPACE_UPDATE_FROM=$UPDATED_FROM
     export TMUX_WORKSPACE_UPDATE_FROM
+    progress_close
     exec bash "$REPO/install.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 }
 
@@ -638,6 +1073,7 @@ git_update() {
             die "$root is on ${branch:-a detached HEAD}, not $default; switch to $default to update it" 1
         fi
     fi
+    step updates "fetching them for $(ui_path "$root")" ask
     git -C "$root" fetch --quiet || die "could not fetch the updates of $root" 3
     upstream='@{upstream}'
     [ "$elsewhere" = 0 ] || upstream=origin/$default  # --check only: what an update on $default would get
@@ -665,12 +1101,15 @@ git_update() {
         return 0
     fi
     # The new binary goes next to the old one before the pull, so after it only a rename is left.
+    step 'new binary' "of $to" slow
     obtain_binary "$root" "$upstream" "release cargo"
     mkdir -p "$root/bin"
     PENDING=$root/bin/tmux-workspace.new.$$
     { cp "$NEW_BINARY" "$PENDING" && chmod 755 "$PENDING"; } || die "could not write $PENDING; $root is unchanged" 3
     remove_stage
+    step pull "$(ui_path "$root") to $to"
     git -C "$root" merge --ff-only --quiet "$upstream" || die "could not fast-forward $root" 1
+    changed
     mv -f "$PENDING" "$root/bin/tmux-workspace"
     PENDING=''
     if [ -n "$NEW_STAMP" ]; then
@@ -771,6 +1210,7 @@ install_binary() {
     if [ -n "$given" ]; then
         [ -f "$given" ] || die "TMUX_WORKSPACE_BINARY is not a file: $given" 3
         if [ "$(resolve "$given")" = "$(resolve "$dest")" ] || cmp -s "$given" "$dest" 2>/dev/null; then return 0; fi
+        step binary "$(ui_path "$dest") from $(ui_path "$given")"
         act binary "$dest (from $given)" place_binary "$given" "$dest" "$stamp" ''
         return 0
     fi
@@ -781,7 +1221,13 @@ install_binary() {
         say would "build $dest with cargo, or download the release of $(tree_version "$REPO")"
         return 0
     fi
+    if has cargo; then
+        step build 'cargo build --release --locked' slow
+    else
+        step download "tmux-workspace $(tree_version "$REPO")" slow
+    fi
     obtain_binary "$REPO" '' "cargo release"
+    if [ -n "$NEW_STAMP" ] && has cargo; then STEP_NOTE="cargo could not build it; this is the release of $NEW_STAMP"; fi
     if cmp -s "$NEW_BINARY" "$dest" 2>/dev/null && [ "$(cat "$stamp" 2>/dev/null || true)" = "$NEW_STAMP" ]; then
         remove_stage
         return 0
@@ -796,9 +1242,21 @@ install_binary() {
 
 ok() { [ "$UPDATE" = 1 ] || say ok "$1"; }
 
+# Every install checks this before it changes anything. On a terminal, that is where the checklist asks
+# what to set up, and installs the tools it was given.
 check_requirements() {
     [ "$CHECKED" = 0 ] || return 0
     CHECKED=1
+    if [ "$UI" = guided ]; then
+        survey
+        if checklist_fits; then
+            guided_setup
+            return 0
+        fi
+        UI=plain  # a terminal too short for the checklist: the installer as it is without one
+        trap - HUP INT QUIT TERM
+    fi
+    if [ "$UI" != plain ]; then step requirements "tmux $(tmux -V 2>/dev/null | sed 's/^tmux //')" quick; fi
     local missing='' old='' tool version
     if has tmux; then
         version=$(tmux_version)
@@ -865,6 +1323,510 @@ check_requirements_again() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# The checklist: what to set up, a row each. Needed rows are always set up; recommended rows start
+# ticked and optional ones not. Arrow keys or j and k move, space ticks, Enter installs, q or Esc quits.
+
+os_label() {  # os_label [full]: macOS 27 or Debian 12; full: macOS 27.2, Debian GNU/Linux 12 (bookworm)
+    local name='' version=''
+    case $(uname -s) in
+        Darwin)
+            if has sw_vers; then version=$(sw_vers -productVersion 2>/dev/null || true); fi
+            [ "${1:-}" = full ] || version=${version%%.*}
+            printf 'macOS%s\n' "${version:+ $version}"
+            ;;
+        Linux)
+            if [ -r /etc/os-release ]; then
+                if [ "${1:-}" = full ]; then name=$(os_release PRETTY_NAME); fi
+                if [ -z "$name" ]; then
+                    name=$(os_release NAME)
+                    name=${name% GNU/Linux}
+                    name=${name% Linux}
+                    version=$(os_release VERSION_ID)
+                fi
+            fi
+            printf '%s%s\n' "${name:-Linux}" "${version:+ $version}"
+            ;;
+        *) uname -s ;;
+    esac
+}
+
+os_release() { sed -n "s/^$1=//p" /etc/os-release | head -n 1 | tr -d '"'; }
+
+codex_home() { printf '%s\n' "${CODEX_HOME:-$HOME/.codex}"; }  # where Codex keeps hooks.json
+
+shell_targets() {  # where the work command goes: the files shell_rc and the fish link change
+    local list='' rc=${ZDOTDIR:-$HOME}/.zshrc shell
+    shell=$(basename "${SHELL:-sh}")
+    if [ -e "$rc" ] || [ "$shell" = zsh ]; then list=$(ui_path "$rc"); fi
+    if [ -e "$HOME/.bashrc" ] || [ "$shell" = bash ]; then list="${list:+$list, }$(ui_path "$HOME/.bashrc")"; fi
+    if has fish || [ -d "$HOME_CONFIG/fish" ]; then list="${list:+$list, }fish"; fi
+    printf '%s\n' "$list"
+}
+
+agent_names() {  # the agents that `integrations install` registers here
+    local names=''
+    if [ -d "$HOME/.claude" ]; then names='Claude Code'; fi
+    if [ -d "$(codex_home)" ]; then names="${names:+$names, }Codex"; fi
+    if [ -d "$HOME/.omp" ]; then names="${names:+$names, }omp"; fi
+    if [ -d "$HOME/.config/nvim" ]; then names="${names:+$names, }Neovim"; fi
+    if [ "$(uname -s)" = Darwin ]; then names="${names:+$names, }iTerm2 profile"; fi
+    printf '%s\n' "${names:-none found}"
+}
+
+# The rows: R_KIND need, rec or opt; R_ON ticked; R_PKG the package a row installs; R_AGENT 1 for the
+# agent rows. One `integrations install` registers every agent, so those go on and off together.
+NROWS=0 NAGENTS=0 CURSOR=-1 ANSWERED=0 DRAWN=0 FOUND='' NOTFOUND='' HEADER='' SUSPEND=0
+R_KIND=() R_NAME=() R_HINT=() R_ON=() R_PKG=() R_AGENT=() SCREEN=()
+
+add_row() {  # add_row KIND NAME HINT [ON [PACKAGE [AGENT]]]
+    R_KIND[NROWS]=$1 R_NAME[NROWS]=$2 R_HINT[NROWS]=$3 R_ON[NROWS]=${4:-1} R_PKG[NROWS]=${5:-} R_AGENT[NROWS]=${6:-0}
+    NROWS=$((NROWS + 1))
+}
+
+found() { FOUND="${FOUND:+$FOUND, }$1"; }
+
+where_to_get() {  # where_to_get TOOL: for a tool no package here installs
+    case $1 in
+        fzf) echo github.com/junegunn/fzf ;;
+        zoxide) echo github.com/ajeetdsouza/zoxide ;;
+        lazygit) echo github.com/jesseduffield/lazygit ;;
+        sesh) echo github.com/joshmedeski/sesh ;;
+        git) echo git-scm.com ;;
+        python3) echo python.org ;;
+        *) install_command "$1" ;;
+    esac
+}
+
+# offer KIND TOOL [HAVE]: a row that installs TOOL with the package manager, or, when that cannot, TOOL on
+# the "not found" line with where to get it. HAVE is the version there is, when it is too old.
+offer() {
+    local kind=$1 tool=$2 name=$2 why='' on=0 package
+    case $tool in
+        fzf) why='fuzzy pickers' ;;
+        zoxide) why="\`work\` finds folders you visit often" ;;
+        python3) why="dash, ai and cleanup need it${3:+ (this one is $3)}" name="python3 $PYTHON_MIN+" ;;
+        procps) why='agent status and snapshots need its ps' ;;
+        lazygit) why='Ctrl+a g popup' ;;
+        sesh) why='picker fallback' ;;
+        git) why='lazygit and updating a clone use it' ;;
+    esac
+    if [ "$kind" = rec ]; then on=1; fi
+    if pm_usable && pm_has "$tool"; then
+        package=$(package_of "$tool")
+        add_row "$kind" "$name" "$why $G_DOT $(install_command "$package")" "$on" "$package"
+    else
+        NOTFOUND="$NOTFOUND$tool ($(where_to_get "$tool"))"$'\n'
+    fi
+}
+
+# No tmux 3.3+ and nothing to install it with: say what to run, and stop before the checklist.
+stop_without_tmux() {
+    printf '%s\n' "tmux-workspace needs tmux $TMUX_MIN or newer${1:+ (this one is $1)}, and no package manager here can install it."
+    if [ "$(uname -s)" = Darwin ]; then
+        printf '  Install Homebrew (https://brew.sh), then run:\n    brew install tmux\n'
+    elif [ -n "$PM" ]; then
+        printf '  As root, run:\n    %s\n' "$(SUDO='' install_command tmux)"
+    else
+        printf '  Install tmux %s or newer with the package manager of your system.\n' "$TMUX_MIN"
+    fi
+    printf '  Then run this installer again:\n    %s\n' "$(ui_rerun)"
+    exit 3
+}
+
+tmux_usable() {  # tmux is there, and new enough
+    local version
+    has tmux || return 1
+    version=$(tmux_version)
+    [ -z "$version" ] || version_ge "$version" "$TMUX_MIN"
+}
+
+survey() {  # the rows of this machine, and the tools it has
+    local tool version python='' hint
+    for tool in tmux fzf zoxide git lazygit sesh; do
+        if [ "$tool" = tmux ]; then
+            if tmux_usable; then found "tmux $(tmux -V 2>/dev/null | sed 's/^tmux //')"; fi
+        elif has "$tool"; then
+            found "$tool"
+        fi
+    done
+    version=$(python_version)
+    if [ -n "$version" ] && version_ge "$version" "$PYTHON_MIN"; then
+        found "python3 $version"
+    else
+        python="old $version"  # missing, or too old: a row
+    fi
+    HEADER="$(os_label) $(uname -m) $G_DOT $(basename "${SHELL:-sh}") $G_DOT ${PM:-no package manager}"
+    HEADER="$HEADER${FOUND:+ $G_DOT found: $FOUND}"
+
+    add_row need tmux-workspace "$(ui_path "$BIN_DIR/tmux-workspace")"
+    if ! tmux_usable; then
+        if has tmux; then version=$(tmux_version); else version=''; fi
+        pm_usable || stop_without_tmux "$version"
+        add_row need "tmux $TMUX_MIN+" "${version:+this one is $version $G_DOT }$(install_command tmux)" 1 tmux
+    fi
+    if [ "$TMUXCONF" = 1 ]; then
+        hint=$(ui_path "$HOME/.tmux.conf")
+        if { [ -e "$HOME/.tmux.conf" ] || [ -L "$HOME/.tmux.conf" ]; } && ! installed_link "$HOME/.tmux.conf"; then
+            hint="$hint (yours moves to a backup)"
+        fi
+        add_row need 'tmux config' "$hint"
+    fi
+    if [ "$SHELLS" = 1 ]; then
+        hint=$(shell_targets)
+        [ -z "$hint" ] || add_row need 'work command' "$hint"
+    fi
+
+    for tool in fzf zoxide; do has "$tool" || offer rec "$tool"; done
+    if [ -n "$python" ]; then offer rec python3 "${python#old }"; fi
+    if [ "$PM" = apk ] && ! ps -p $$ -o pid=,tpgid=,lstart= >/dev/null 2>&1; then offer rec procps; fi
+    if [ -d "$HOME/.claude" ]; then add_row rec 'Claude Code status' "found $(ui_path "$HOME/.claude")" 1 '' 1; fi
+    if [ -d "$(codex_home)" ]; then add_row rec 'Codex status' "found $(ui_path "$(codex_home)")" 1 '' 1; fi
+    if [ -d "$HOME/.omp" ]; then add_row rec 'omp status' "found $(ui_path "$HOME/.omp")" 1 '' 1; fi
+    if [ -d "$HOME/.config/nvim" ]; then add_row rec 'Neovim status' "found $(ui_path "$HOME/.config/nvim")" 1 '' 1; fi
+    if [ "$(uname -s)" = Darwin ]; then add_row rec 'iTerm2 profile' "a \"tmux workspace\" profile" 1 '' 1; fi
+    for tool in lazygit sesh git; do has "$tool" || offer opt "$tool"; done
+
+    local i
+    for ((i = 0; i < NROWS; i++)); do
+        if [ "${R_AGENT[i]}" = 1 ]; then NAGENTS=$((NAGENTS + 1)); fi
+        if [ "$CURSOR" -lt 0 ] && [ "${R_KIND[i]}" != need ]; then CURSOR=$i; fi
+    done
+}
+
+# Whether PATH is a link into this installation: this clone or release, or any release installed.
+installed_link() {
+    [ -L "$1" ] || return 1
+    case $(resolve "$1") in "$(resolve "$REPO")"/* | "$(resolve "$(share_home)")"/*) return 0 ;; esac
+    return 1
+}
+
+screen_add() { SCREEN[${#SCREEN[@]}]=$1; }
+
+wrap_items() {  # wrap_items PREFIX ITEMS: ITEMS (a line each) after PREFIX, wrapped to the terminal's width
+    local line=$1 item indent
+    indent=$(printf '%*s' "${#1}" '')
+    while IFS= read -r item; do
+        if [ -z "$item" ]; then continue; fi
+        if [ "$line" = "$1" ]; then
+            line=$line$item
+        elif [ $((${#line} + ${#item} + 4)) -le "$COLS" ]; then
+            line="$line, $item"
+        else
+            screen_add "$(fit "$line,")"
+            line=$indent$item
+        fi
+    done <<EOF
+$2
+EOF
+    screen_add "$(fit "$line")"
+}
+
+checklist_lines() {  # the checklist as it is now, a line each, in SCREEN
+    local i kind='' box mark bold help
+    SCREEN=()
+    screen_add "$C_BOLD$(fit "tmux-workspace $(ui_version) installer")$C_OFF"
+    screen_add "$(fit "$HEADER")"
+    if [ -n "$NOTFOUND" ]; then wrap_items 'not found: ' "$NOTFOUND"; fi
+    screen_add ''
+    if [ "$ANSWERED" = 1 ]; then
+        help=''  # the list stays on the terminal as a record of the choices
+    elif [ "$CURSOR" -ge 0 ]; then
+        help="$G_UPDOWN move $G_DOT space toggle $G_DOT enter install $G_DOT q quit"
+    else
+        help="enter install $G_DOT q quit"
+    fi
+    screen_add "${C_BOLD}What should I set up?$C_OFF   $C_DIM$(fit "$help" $((COLS - 25)))$C_OFF"
+    screen_add ''
+    for ((i = 0; i < NROWS; i++)); do
+        if [ "${R_KIND[i]}" != "$kind" ]; then
+            kind=${R_KIND[i]}
+            case $kind in
+                need) screen_add "${C_BOLD}Needed for tmux-workspace to work$C_OFF" ;;
+                rec) screen_add "${C_BOLD}Recommended$C_OFF" ;;
+                opt) screen_add "${C_BOLD}Optional$C_OFF" ;;
+            esac
+        fi
+        if [ "$kind" = need ]; then
+            box="[$C_DIM$G_LOCK$C_OFF]"
+        elif [ "${R_ON[i]}" = 1 ]; then
+            box="[${C_GREEN}x$C_OFF]"
+        else
+            box='[ ]'
+        fi
+        mark=' ' bold=''
+        if [ "$i" = "$CURSOR" ]; then mark=$C_CYAN$G_CURSOR$C_OFF bold=$C_BOLD; fi
+        screen_add "$mark $box $bold$(printf '%-22s' "${R_NAME[i]}")${bold:+$C_OFF}$C_DIM$(fit "${R_HINT[i]}" $((COLS - 29)))$C_OFF"
+    done
+    if [ "$NAGENTS" -ge 2 ]; then screen_add "${C_DIM}The agent rows go on and off together.$C_OFF"; fi
+}
+
+draw() {  # the checklist on the terminal, over the one drawn before
+    local line
+    checklist_lines
+    if [ "$DRAWN" -gt 0 ]; then printf '\033[%dA' "$DRAWN"; fi
+    for line in "${SCREEN[@]}"; do printf '\r\033[K%s\n' "$line"; done
+    DRAWN=${#SCREEN[@]}
+}
+
+move() {  # move -1|1: the cursor to the row above or below that can be ticked
+    local i=$CURSOR
+    [ "$i" -ge 0 ] || return 0
+    while :; do
+        i=$((i + $1))
+        if [ "$i" -lt 0 ] || [ "$i" -ge "$NROWS" ]; then return 0; fi
+        if [ "${R_KIND[i]}" != need ]; then
+            CURSOR=$i
+            return 0
+        fi
+    done
+}
+
+toggle() {  # tick or untick the row of the cursor: every agent row at once
+    local on i
+    [ "$CURSOR" -ge 0 ] || return 0
+    on=$((1 - R_ON[CURSOR]))
+    if [ "${R_AGENT[CURSOR]}" = 1 ]; then
+        for ((i = 0; i < NROWS; i++)); do
+            if [ "${R_AGENT[i]}" = 1 ]; then R_ON[i]=$on; fi
+        done
+    else
+        R_ON[CURSOR]=$on
+    fi
+}
+
+# Throw away what was typed ahead, so that no key pressed before a question showed answers it.
+drain_tty() {
+    local saved keys
+    saved=$(stty -g </dev/tty)
+    stty -icanon min 0 time 0 </dev/tty
+    while IFS= read -r keys </dev/tty; do :; done
+    stty "$saved" </dev/tty
+}
+
+raw_keys() {  # a key at a time, without echo or cursor; a read gives up after 0.1 s; Ctrl+C still works
+    stty -icanon -echo min 0 time 1 <&5
+    printf '\033[?25l'
+    CURSOR_HIDDEN=1
+}
+
+# Ctrl+Z in the checklist (the TSTP trap asks for it, the key loop does it): the terminal as it was while
+# the installer is stopped, the list again after. The stop is SIGTSTP's own, not SIGSTOP: where no shell
+# could continue the installer (the session's only process group: ssh -t host ./install.sh, a tmux window,
+# exec ./install.sh), the system drops it, and the list stays. It is sent from here, not from the trap:
+# bash 3.2 does not stop for a SIGTSTP that its own trap sends.
+suspend_checklist() {
+    SUSPEND=0
+    stty "$TTY_SAVED" <&5
+    printf '\033[?25h'
+    trap - TSTP
+    kill -TSTP $$
+    trap 'SUSPEND=1' TSTP
+    raw_keys
+    DRAWN=0
+    draw
+}
+
+quit_checklist() {
+    drain_tty
+    printf '\n%s\n' 'Nothing was changed.'
+    exit 0
+}
+
+# checklist: until Enter. q and Ctrl+D quit without a change, and so does Ctrl+C (the INT trap of
+# choose_ui). Esc alone does nothing: over a slow link the bytes of an arrow key can come apart, and the
+# rest of them must not end up in the shell. The keys come from /dev/tty, never from standard input, which
+# is the script itself when it is piped.
+checklist() {
+    local keys enter carry='' idle=0 second=$SECONDS
+    exec 5</dev/tty
+    TTY_SAVED=$(stty -g <&5)
+    raw_keys
+    drain_tty
+    trap 'SUSPEND=1' TSTP
+    draw
+    while :; do
+        keys='' enter=0
+        if IFS= read -r keys <&5; then enter=1; fi  # a read that ends with a newline: Enter
+        if [ "$SUSPEND" = 1 ]; then suspend_checklist; fi
+        if [ -z "$keys" ] && [ "$enter" = 0 ]; then
+            # Nothing typed. A terminal that is gone returns at once instead, again and again.
+            if [ "$SECONDS" = "$second" ]; then idle=$((idle + 1)); else idle=0 second=$SECONDS; fi
+            [ "$idle" -lt 200 ] || die "lost the terminal; nothing was changed" 1
+            continue
+        fi
+        keys=$carry$keys carry=''
+        while [ -n "$keys" ]; do
+            # The start of an escape sequence whose end has not come yet: it may come with the next read.
+            case $keys in
+                $'\033')
+                    carry=$keys
+                    break
+                    ;;
+                $'\033'[[O]*)
+                    case ${keys:2} in *[A-Za-z~]*) ;; *)
+                        carry=$keys
+                        break
+                        ;;
+                    esac
+                    ;;
+            esac
+            case $keys in
+                $'\033[A'* | $'\033OA'* | k*) move -1 ;;
+                $'\033[B'* | $'\033OB'* | j*) move 1 ;;
+                q* | Q* | $'\004'*) quit_checklist ;;
+                ' '*) toggle ;;
+            esac
+            case $keys in
+                $'\033'[[O][AB]*) keys=${keys:3} ;;
+                $'\033'[[O]*)
+                    keys=${keys:2}
+                    keys=${keys#*[A-Za-z~]}
+                    ;;
+                *) keys=${keys:1} ;;  # a key, or an Esc on its own
+            esac
+        done
+        [ "$enter" = 0 ] || break
+        draw
+    done
+    trap - TSTP
+    CURSOR=-1 ANSWERED=1
+    draw
+    stty "$TTY_SAVED" <&5
+    TTY_SAVED=''
+    printf '\033[?25h'
+    CURSOR_HIDDEN=0
+    exec 5<&-
+}
+
+checklist_fits() {  # the checklist fits on the terminal, which its redraws need (rows not known: it does)
+    [ "$ROWS" -gt 0 ] || return 0
+    checklist_lines
+    [ "${#SCREEN[@]}" -lt "$ROWS" ]
+}
+
+# folder_problem PATH: why PATH cannot be the projects folder, as tmux-workspace setup would find; nothing
+# when it can.
+folder_problem() {
+    local path=$1 parent
+    [ -n "$path" ] || return 0
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        if [ ! -d "$path" ]; then printf '%s is a file, not a folder.\n' "$(ui_path "$path")"; fi
+        return 0
+    fi
+    parent=$(dirname "$path")
+    while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do parent=$(dirname "$parent"); done
+    if [ ! -d "$parent" ] || [ ! -w "$parent" ]; then
+        printf '%s cannot be made: %s is not a folder you can write to.\n' "$(ui_path "$path")" "$(ui_path "$parent")"
+    fi
+}
+
+# The projects folder, inline, unless --projects or the config names it, with line editing (readline).
+# It is checked as `tmux-workspace setup` will check it, and asked again until it can be. Ctrl+D leaves it
+# to the first `work`, as `tmux-workspace setup` does.
+ask_projects() {
+    local answer path problem prompt
+    [ -z "$PROJECTS" ] || return 0
+    if grep -q '"projects_dir"' "$CONFIG_DIR/config.json" 2>/dev/null; then return 0; fi
+    # \001 and \002 tell readline which bytes of the prompt take no room on the screen.
+    prompt=$'\001'$C_BOLD$'\002''Projects folder'$'\001'$C_OFF$'\002'' [~/Projects]: '
+    drain_tty
+    printf '\n'
+    while :; do
+        if ! IFS= read -e -r -p "$prompt" answer </dev/tty; then
+            printf '\n'
+            return 0
+        fi
+        answer=${answer#"${answer%%[![:space:]]*}"}  # setup trims the spaces around it
+        answer=${answer%"${answer##*[![:space:]]}"}
+        case $answer in
+            *[[:cntrl:]]*)
+                printf '%s\n' 'That holds keys that are not characters. Type the path of a folder.'
+                continue
+                ;;
+        esac
+        [ -n "$answer" ] || answer=$HOME/Projects
+        # shellcheck disable=SC2088 # the ~ the person typed
+        case $answer in
+            '~') path=$HOME ;;
+            '~/'*) path=$HOME/${answer#'~/'} ;;
+            '~'*) path='' ;;  # another user's home: tmux-workspace setup knows it
+            /*) path=$answer ;;
+            *) path=$HOME/$answer ;;
+        esac
+        problem=$(folder_problem "$path")
+        if [ -n "$problem" ]; then
+            printf '%s Choose another folder.\n' "$problem"
+            continue
+        fi
+        PROJECTS=$answer
+        return 0
+    done
+}
+
+chosen_packages() {  # the packages of the ticked rows
+    local i list=''
+    for ((i = 0; i < NROWS; i++)); do
+        if [ -n "${R_PKG[i]}" ] && [ "${R_ON[i]}" = 1 ]; then list="${list:+$list }${R_PKG[i]}"; fi
+    done
+    printf '%s\n' "$list"
+}
+
+# sudo asks for the password now, where its question shows. A sudo that keeps no password (it asks at
+# every command, timestamp_timeout=0) makes the package steps run without a spinner, which would cover
+# its question; otherwise each step gets sudo -v first and runs with sudo -n, which never asks.
+sudo_ready() {
+    local packages
+    packages=$(chosen_packages)
+    [ -n "$SUDO" ] && [ -n "$packages" ] || return 0
+    drain_tty
+    printf '\nInstalling %s takes sudo.\n' "$packages"
+    sudo -v || die "sudo did not run; nothing was changed" 1
+    sudo -n true 2>/dev/null || SUDO_ASKS=1
+}
+
+sudo_fresh() {  # before a package step: a sudo whose password ran out asks again here, not under a spinner
+    [ -n "$SUDO" ] && [ "$SUDO_ASKS" = 0 ] || return 0
+    step_end
+    sudo -v || die "sudo did not run; run the installer again to finish: $(ui_rerun)" 1
+}
+
+install_chosen() {  # a step for each ticked package row; tmux is checked again once it is installed
+    local i what mode=slow
+    if [ "$SUDO_ASKS" = 1 ]; then mode=ask; fi
+    if [ "$PM" = apt-get ] && [ -n "$(chosen_packages)" ]; then
+        sudo_fresh
+        step 'package lists' "${SUDO:+$SUDO }apt-get update" "$mode"
+        pm_update </dev/null
+    fi
+    for ((i = 0; i < NROWS; i++)); do
+        [ -n "${R_PKG[i]}" ] && [ "${R_ON[i]}" = 1 ] || continue
+        sudo_fresh
+        step "${R_NAME[i]}" "$(install_command "${R_PKG[i]}")" "$mode"
+        what="leave ${R_NAME[i]} unticked"
+        [ "${R_KIND[i]}" != need ] || what="install it yourself"
+        STEP_FIX="$PM could not install ${R_PKG[i]}. Fix what the log says (or $what), then run the installer again: $(ui_rerun)"
+        pm_install "${R_PKG[i]}" </dev/null
+        changed
+        if [ "${R_PKG[i]}" = tmux ]; then check_requirements_again; fi
+    done
+}
+
+guided_setup() {  # after survey: the checklist, the projects folder, and the tools it asked for
+    local i
+    checklist
+    ask_projects
+    TMUXCONF_AGREED=1  # the tmux config row said a file of the user's moves to a backup
+    if [ "$NAGENTS" -gt 0 ]; then
+        AGENTS=0
+        for ((i = 0; i < NROWS; i++)); do
+            if [ "${R_AGENT[i]}" = 1 ] && [ "${R_ON[i]}" = 1 ]; then AGENTS=1; fi
+        done
+    fi
+    sudo_ready
+    install_chosen
+}
+
+# ---------------------------------------------------------------------------------------------
 # Changes, each one backed up first
 
 ensure_backup_dir() {
@@ -902,13 +1864,16 @@ link() {  # link SOURCE DEST
     act link "$dest -> $source" make_link "$source" "$dest"
 }
 
-# A file the user already has (not one of ours) is replaced only with --yes or a yes on the terminal.
-link_asking() {  # link_asking SOURCE DEST
-    local source=$1 dest=$2
+# A file the user already has (not one of ours) is replaced only with --yes or a yes on the terminal
+# (AGREED 1: the checklist said so). The lines per step never stop to ask: they keep the file.
+link_asking() {  # link_asking SOURCE DEST [AGREED]
+    local source=$1 dest=$2 agreed=${3:-$YES}
     ours "$dest" "$source" && return 0
-    if { [ -e "$dest" ] || [ -L "$dest" ]; } && [ "$YES" = 0 ]; then
-        if [ "$DRY" = 1 ] || ! ask "Replace your $dest? It moves to a backup and --uninstall restores it."; then
+    if { [ -e "$dest" ] || [ -L "$dest" ]; } && [ "$agreed" = 0 ]; then
+        if [ "$DRY" = 1 ] || [ "$UI" != plain ] || ! ask "Replace your $dest? It moves to a backup and --uninstall restores it."; then
             say skip "$dest exists; rerun with --yes to replace it (a backup is kept)"
+            KEPT="$KEPT$dest"$'\n'
+            STEP_NOTE='kept yours'
             return 0
         fi
     fi
@@ -959,21 +1924,33 @@ onboard() {
     local tool=$BIN_DIR/tmux-workspace
     if [ -n "$PROJECTS" ]; then
         if [ "$DRY" = 1 ]; then say would "set the projects folder to $PROJECTS"; return 0; fi
-        "$tool" setup --projects "$PROJECTS" >/dev/null
+        step 'projects folder' "$(ui_path "$PROJECTS")"
+        if [ "$UI" = plain ]; then
+            "$tool" setup --projects "$PROJECTS" >/dev/null
+        elif ! "$tool" setup --projects "$PROJECTS" >/dev/null; then
+            # The prompt checked it as setup does; should setup refuse it anyway, the install still
+            # finishes, and the first `work` asks, as it did when setup asked.
+            STEP_NOTE="setup refused it; the first \`work\` asks"
+            say later "projects folder: the first \`work\` asks (or rerun with --projects DIR)"
+            return 0
+        fi
         say setup "projects folder $PROJECTS"
-        CHANGED=1
+        changed
     elif grep -q '"projects_dir"' "$CONFIG_DIR/config.json" 2>/dev/null; then
         return 0
-    elif [ "$YES" = 0 ] && [ "$DRY" = 0 ] && tty_ok; then
+    elif [ "$YES" = 0 ] && [ "$DRY" = 0 ] && [ "$UI" = plain ] && tty_ok; then
         "$tool" setup </dev/tty >/dev/tty || say later "projects folder: the first \`work\` asks"
-        CHANGED=1
+        changed
     else
+        step 'projects folder' "the first \`work\` asks" quick
         say later "projects folder: the first \`work\` asks (or rerun with --projects DIR)"
     fi
 }
 
 do_install() {
+    local codex_hooks
     say repo "$REPO"
+    step tmux-workspace "$(ui_path "$BIN_DIR/tmux-workspace")"
     link "$REPO/bin/tmux-workspace" "$BIN_DIR/tmux-workspace"
     link "$REPO/bin/tw-clip" "$BIN_DIR/tw-clip"
     link "$REPO/bin/tw-sound" "$BIN_DIR/tw-sound"
@@ -982,9 +1959,16 @@ do_install() {
     # now holds the new version, and what the install left out (--no-shell, --no-tmux-conf, a file
     # the user kept) stays out.
     if [ "$UPDATE" = 0 ]; then
-        [ "$TMUXCONF" = 0 ] || link_asking "$REPO/tmux.conf" "$HOME/.tmux.conf"
-        if has sesh; then link_asking "$REPO/sesh.toml" "$HOME_CONFIG/sesh/sesh.toml"; fi
+        if [ "$TMUXCONF" = 1 ]; then
+            step 'tmux config' "$(ui_path "$HOME/.tmux.conf")"
+            link_asking "$REPO/tmux.conf" "$HOME/.tmux.conf" "$TMUXCONF_AGREED"
+        fi
+        if has sesh; then
+            step 'sesh config' "$(ui_path "$HOME_CONFIG/sesh/sesh.toml")"
+            link_asking "$REPO/sesh.toml" "$HOME_CONFIG/sesh/sesh.toml"
+        fi
         if [ "$SHELLS" = 1 ]; then
+            if [ "$UI" != plain ]; then step 'work command' "$(shell_targets)"; fi
             shell_rc "${ZDOTDIR:-$HOME}/.zshrc" zsh
             shell_rc "$HOME/.bashrc" bash
             if has fish || [ -d "$HOME_CONFIG/fish" ]; then
@@ -992,10 +1976,14 @@ do_install() {
             fi
         fi
     fi
+    step config "$(ui_path "$CONFIG_DIR/config.json")"
     migrate_config
     if [ "$AGENTS" = 1 ] || { [ "$UPDATE" = 1 ] && integrations_installed; }; then
+        if [ "$UI" != plain ]; then step 'agent status' "$(agent_names)"; fi
+        codex_hooks=$(cat "$(codex_home)/hooks.json" 2>/dev/null || true)
         act agents "Claude Code, Codex, omp and Neovim where installed" \
             env TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations install
+        if [ "$codex_hooks" != "$(cat "$(codex_home)/hooks.json" 2>/dev/null || true)" ]; then CODEX_CHANGED=1; fi
     fi
     if [ "$DRY" = 1 ]; then
         [ "$UPDATE" = 1 ] || say would "ask for your projects folder unless it is set"
@@ -1009,9 +1997,11 @@ do_install() {
     onboard
     if [ "$CHANGED" = 0 ]; then
         say "done" "tmux-workspace already installed"
+        summary_install
         return 0
     fi
     if [ "$TMUXCONF" = 1 ] && has tmux && tmux info >/dev/null 2>&1; then
+        step 'tmux reloaded' 'the running server' quick
         tmux source-file "$HOME/.tmux.conf" && say reload "the running tmux server"
     fi
     "$BIN_DIR/tmux-workspace" doctor >/dev/null 2>&1 || true
@@ -1024,7 +2014,45 @@ do_install() {
     # open already. A first install has none, and `next` tells it to open one.
     if [ -n "$UPDATE_FROM" ]; then say_reload_shells; fi
     say next "open a new terminal, then: work my-project   (Ctrl+a ? lists every shortcut)"
+    summary_install
 }
+
+# The end of a guided or styled install: what changed, how to undo it, and what to do next.
+summary_install() {
+    [ "$UI" != plain ] || return 0
+    local version path advice
+    step_end
+    version=$(ui_version)
+    ui ''
+    if [ "$CHANGED" = 0 ]; then
+        ui "${C_BOLD}tmux-workspace $version is installed already.$C_OFF Nothing changed."
+    else
+        ui "${C_BOLD}tmux-workspace $version is installed.$C_OFF"
+        if [ -n "$DONE_NAMES" ]; then ui "  Changed    $DONE_NAMES"; fi
+        { printf '%s\n' "$BACKUP_DIR" && log_since | sed -n 's/^backups in //p'; } | while IFS= read -r path; do
+            if [ -n "$path" ]; then ui "  Backups    $(ui_path "$path")"; fi
+        done
+        ui "  Undo       $(ui_path "$REPO")/install.sh --uninstall"
+    fi
+    printf '%s' "$KEPT" | while IFS= read -r path; do
+        ui "  Kept       your $(ui_path "$path"); rerun with --yes to replace it (a backup is kept)"
+    done
+    version=$(python_version)
+    if [ -z "$version" ] || ! version_ge "$version" "$PYTHON_MIN"; then
+        ui "  Note       dash, ai and cleanup need python3 $PYTHON_MIN+"
+    fi
+    ui ''
+    ui "${C_BOLD}Next$C_OFF"
+    ui "  1. Open a new terminal, or run: exec \$SHELL"
+    ui '  2. work my-project'
+    ui '  3. Ctrl+a ? lists every shortcut'
+    if [ "$CODEX_CHANGED" = 1 ]; then
+        ui '  Codex: review the new hooks with /hooks in Codex, then restart running Codex CLIs.'
+    fi
+    log_since | sed -n '/^Neovim: /p; /^iTerm2: /p' | while IFS= read -r advice; do ui "  $advice"; done
+}
+
+log_since() { awk -v start="$LOG_START" 'NR > start' "$LOG"; }  # what this run wrote to LOG
 
 # A terminal that is open keeps the work command it started with, which may be an older one.
 say_reload_shells() {
@@ -1048,11 +2076,35 @@ installed_label() {  # the version REPO holds, as the update messages name it
 
 finish_update() {
     if ours "$HOME/.tmux.conf" "$REPO/tmux.conf" && has tmux && tmux info >/dev/null 2>&1; then
+        step 'tmux reloaded' 'the running server' quick
         tmux source-file "$HOME/.tmux.conf" && say reload "the running tmux server"
     fi
     "$BIN_DIR/tmux-workspace" doctor >/dev/null 2>&1 || true
     say "done" "updated ${UPDATE_FROM:-an earlier version} → $(installed_label)"
     say_reload_shells
+    [ "$UI" != plain ] || return 0
+    ui_done "Updated ${UPDATE_FROM:-an earlier version} to $(installed_label)."
+    ui "  Run exec \$SHELL in terminals that are already open, so they get the new work command."
+    if [ "$CODEX_CHANGED" = 1 ]; then
+        ui '  Codex: review the new hooks with /hooks in Codex, then restart running Codex CLIs.'
+    fi
+}
+
+ui_done() {  # ui_done TEXT: the last step is done, and TEXT says how it ended
+    [ "$UI" != plain ] || return 0
+    step_end
+    ui ''
+    ui "$C_BOLD$1$C_OFF"
+}
+
+confirm_uninstall() {  # one question before an uninstall on a terminal
+    drain_tty
+    printf '%s\n' "${C_BOLD}tmux-workspace $(ui_version)$C_OFF"
+    if ! ask "${C_BOLD}Remove tmux-workspace?$C_OFF Its links, the work command and the agent hooks go, and what it replaced comes back."; then
+        printf '%s\n' 'Nothing was changed.'
+        exit 0
+    fi
+    SAME_NOTE='nothing to remove'
 }
 
 stop_server_hooks() {
@@ -1066,20 +2118,24 @@ do_uninstall() {
     if [ "$DRY" = 1 ]; then
         say would "remove the agent integrations that --agents added"
     elif [ -x "$REPO/bin/tmux-workspace" ]; then
+        step 'agent integrations' 'what --agents registered' quick
         TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations uninstall | while IFS= read -r line; do
             if [ -n "$line" ]; then say remove "$line"; fi
         done
     fi
+    step links "$(ui_path "$BIN_DIR/tmux-workspace"), $(ui_path "$HOME/.tmux.conf") and the rest"
     for dest in "$BIN_DIR/tmux-workspace" "$BIN_DIR/tw-clip" "$BIN_DIR/tw-sound" "$STATUS_CONF" \
         "$HOME/.tmux.conf" "$HOME_CONFIG/sesh/sesh.toml" "$HOME_CONFIG/fish/functions/work.fish"; do
         if [ -L "$dest" ] && owned "$dest"; then act remove "$dest" rm -f "${dest:?}"; fi
     done
+    if [ "$UI" != plain ]; then step 'work command' "$(rc_files)"; fi
     for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc"; do
         [ -e "$rc" ] || continue
         target=$(resolve "$rc")
         if grep -qF "$BLOCK_START" "$target"; then act edit "$rc (removes the work command)" strip_block "$target"; fi
     done
     # Newest backups first; a path that is back already keeps its newer content.
+    step backups 'put back'
     while IFS= read -r dir; do
         manifest=$dir/manifest
         [ -f "$manifest" ] || continue
@@ -1092,6 +2148,7 @@ do_uninstall() {
     done < <(find "$STATE/backups" -mindepth 1 -maxdepth 1 -name 'install-*' 2>/dev/null | sort -r)
     # A running server still starts panes with the removed tmux-workspace: tell it to stop.
     if [ "$ours_conf" = 1 ] && has tmux && tmux info >/dev/null 2>&1; then
+        step 'tmux server' 'no longer starts panes through tmux-workspace'
         act tmux "the running server no longer starts panes through tmux-workspace" stop_server_hooks
         say note "restart tmux to finish: tmux kill-server, then start it again"
     fi
@@ -1099,14 +2156,39 @@ do_uninstall() {
     if [ "$KIND" = release ] && [ "$CHANGED" = 1 ]; then
         say note "the program files stay in $HOME_SHARE; delete that folder to remove them"
     fi
+    [ "$UI" != plain ] || return 0
+    if [ "$CHANGED" = 0 ]; then
+        ui_done 'Nothing to remove.'
+        return 0
+    fi
+    ui_done "tmux-workspace is removed.$C_OFF Snapshots and $(ui_path "$CONFIG_DIR") stay."
+    if [ "$KIND" = release ]; then
+        ui "  The program files stay in $(ui_path "$HOME_SHARE"); delete that folder to remove them."
+    fi
+    if [ "$ours_conf" = 1 ] && has tmux && tmux info >/dev/null 2>&1; then
+        ui '  Restart tmux to finish: tmux kill-server, then start it again.'
+    fi
+}
+
+rc_files() {  # the shell startup files there are, which hold the work command
+    local list='' rc
+    for rc in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc"; do
+        if [ -e "$rc" ]; then list="${list:+$list, }$(ui_path "$rc")"; fi
+    done
+    printf '%s\n' "${list:-none}"
 }
 
 main() {
+    choose_ui
     REPO=$(script_dir || true)
     if [ -z "$REPO" ] || ! is_tree "$REPO"; then
         remote_install
     fi
     detect_platform
+    if [ "$UI" = styled ]; then
+        if [ "$UNINSTALL" = 1 ]; then confirm_uninstall; fi
+        progress_open
+    fi
     if [ -f "$REPO/Cargo.toml" ]; then
         KIND=clone
         OWN=$REPO
