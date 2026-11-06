@@ -99,6 +99,21 @@ pub struct Names {
     pub sessions: Vec<String>,
     pub windows: Vec<String>,
     pub labels: Vec<String>,
+    /// Names of folders: every component of the paths that are known, and the entries of the projects
+    /// folder.
+    pub folders: Vec<String>,
+}
+
+impl Names {
+    /// Every component of `path` is the name of a folder.
+    pub fn add_folder_path(&mut self, path: &str) {
+        for component in path.split('/') {
+            if !matches!(component, "" | "." | "..") && !self.folders.iter().any(|f| f == component)
+            {
+                self.folders.push(component.to_string());
+            }
+        }
+    }
 }
 
 /// Folder names that say nothing about a person or a project. A name of the server that is one of
@@ -153,14 +168,22 @@ const OWN: [&str; 14] = [
     "WORKSPACE_GUIDE.md",
 ];
 
+/// Words that a report says of its own, and the names of programs that a tab is called after. None of
+/// them is a secret, and to map one would change the report: a tab called `zsh` would make the shell of
+/// the environment `tab-1`, a session called `errors` the count of them.
+const PUBLIC_WORDS: [&str; 52] = [
+    "zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "pwsh", "python",
+    "python3", "node", "ruby", "claude", "codex", "omp", "nvim", "vim", "vi", "nano", "emacs",
+    "less", "htop", "top", "git", "ssh", "docker", "make", "cargo", "npm", "lazygit", "fzf",
+    "zoxide", "sesh", "yazi", "tmux", "macOS", "Linux", "release", "clone", "unknown", "none",
+    "pane", "panes", "warning", "warnings", "error", "errors", "doctor", "install",
+];
+
 /// What the numbered replacements are called.
 const NUMBERED: [&str; 4] = ["workspace", "tab", "label", "folder"];
 
 /// The other replacements.
-const ANGLE: [&str; 5] = ["<user>", "<host>", "<email>", "<ip>", "<token>"];
-
-/// What ends a path: a space, and what quotes or separates one.
-const PATH_STOP: &str = "\"'`()[]{},;|:";
+const ANGLE: [&str; 6] = ["<user>", "<host>", "<email>", "<ip>", "<token>", "<arg>"];
 
 /// What may stand before a path.
 const BEFORE_PATH: &str = "\"'`([{<>=,;|:";
@@ -194,6 +217,7 @@ const TARGETS: [&str; 7] = [
 ];
 
 /// One word to replace: a name of the server, the login name or the host name.
+#[derive(Clone)]
 struct Word {
     needle: String,
     replacement: String,
@@ -206,7 +230,12 @@ struct Word {
 /// is the same number everywhere in one report.
 pub struct Anonymizer {
     homes: Vec<String>,
+    /// The names of the server, the login name and the host name, the longest first.
     words: Vec<Word>,
+    /// Only the login name and the host name.
+    people: Vec<Word>,
+    /// The names of folders that are known, the longest first.
+    known_folders: Vec<String>,
     folders: HashMap<String, usize>,
 }
 
@@ -221,7 +250,7 @@ impl Anonymizer {
         ] {
             let mut number = 0;
             for name in list {
-                if name.is_empty() || is_generic(name) || !taken.insert(name.as_str()) {
+                if name.is_empty() || is_public(name) || !taken.insert(name.as_str()) {
                     continue;
                 }
                 number += 1;
@@ -232,17 +261,27 @@ impl Anonymizer {
                 });
             }
         }
+        let mut people: Vec<Word> = Vec::new();
         for (list, replacement) in [(&identity.users, "<user>"), (&identity.hosts, "<host>")] {
             for name in list.iter().filter(|name| !name.is_empty()) {
-                words.push(Word {
+                people.push(Word {
                     needle: name.clone(),
                     replacement: replacement.to_string(),
                     fold: true,
                 });
             }
         }
+        words.extend(people.iter().cloned());
         // The longest first, so that `acme-secret` is never cut short by `acme`.
         words.sort_by_key(|word| std::cmp::Reverse(word.needle.len()));
+        people.sort_by_key(|word| std::cmp::Reverse(word.needle.len()));
+        let mut known_folders: Vec<String> = Vec::new();
+        for folder in &names.folders {
+            if !keeps(folder) && !known_folders.contains(folder) {
+                known_folders.push(folder.clone());
+            }
+        }
+        known_folders.sort_by_key(|folder| std::cmp::Reverse(folder.len()));
         let mut homes: Vec<String> = identity
             .homes
             .iter()
@@ -254,12 +293,25 @@ impl Anonymizer {
         Anonymizer {
             homes,
             words,
+            people,
+            known_folders,
             folders: HashMap::new(),
         }
     }
 
+    /// Text that this program wrote itself and that holds no name of the server (the environment, the
+    /// counts): what identifies a person or a machine is taken out, and no name of the server is looked for,
+    /// so that a tab called `zsh` cannot change the version of a shell.
+    pub fn apply_own(&mut self, text: &str) -> Clean {
+        self.run(text, false)
+    }
+
     /// `text` without anything that identifies. Applying it again changes nothing.
     pub fn apply(&mut self, text: &str) -> Clean {
+        self.run(text, true)
+    }
+
+    fn run(&mut self, text: &str, with_names: bool) -> Clean {
         // Nothing but printable characters and line ends: what a terminal or a form could be made to do
         // with the rest is not for a report to say.
         let text: String = text
@@ -269,11 +321,60 @@ impl Anonymizer {
         let text = strip_url_credentials(&text);
         let text = hide_emails(&text);
         let text = replace_homes(&text, &self.homes);
-        let text = replace_words(&text, &self.words);
+        let text = if with_names {
+            let text = replace_words(&text, &self.words);
+            // The folders that are known, by their names, before any guess at where a path ends.
+            self.replace_known_folders(&text)
+        } else {
+            replace_words(&text, &self.people)
+        };
         let text = self.hide_paths(&text);
         let text = hide_ipv6(&text);
         let text = hide_ipv4(&text);
         Clean(hide_tokens(&text))
+    }
+
+    /// A folder that is known, as a whole component of a path (after a `/`), is `folder-N`, whatever
+    /// its name holds and whatever follows it.
+    fn replace_known_folders(&mut self, text: &str) -> String {
+        if self.known_folders.is_empty() {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0;
+        while at < text.len() {
+            if let Some(len) = placeholder_len(text, at) {
+                out.push_str(&text[at..at + len]);
+                at += len;
+                continue;
+            }
+            if prev_char(text, at) == Some('/') {
+                let found = self
+                    .known_folders
+                    .iter()
+                    .find(|folder| {
+                        text[at..].starts_with(folder.as_str())
+                            && ends_component(text, at + folder.len())
+                    })
+                    .cloned();
+                if let Some(folder) = found {
+                    out.push_str(&self.folder_name(&folder));
+                    at += folder.len();
+                    continue;
+                }
+            }
+            let c = next_char(text, at).unwrap_or(' ');
+            out.push(c);
+            at += c.len_utf8();
+        }
+        out
+    }
+
+    /// `folder-N` for the folder `component`: its number is the order in which folders come up.
+    fn folder_name(&mut self, component: &str) -> String {
+        let next = self.folders.len() + 1;
+        let number = *self.folders.entry(component.to_string()).or_insert(next);
+        format!("folder-{number}")
     }
 
     /// Every path in `text`: the folders that are not generic are called `folder-N`.
@@ -286,9 +387,12 @@ impl Anonymizer {
                 let end = path_end(text, at);
                 let run = &text[at..end];
                 let is_path = if c == '/' {
-                    run.len() > 1 && !run.starts_with("//")
+                    run.len() > 1
+                        && !run.starts_with("//")
+                        && !next_char(text, at + 1).is_none_or(char::is_whitespace)
                 } else {
-                    run == "~" || run.contains('/')
+                    // `~/x`, `~bob/x`; not `~` alone and not `~5 minutes`.
+                    run.split(' ').next().is_some_and(|word| word.contains('/'))
                 };
                 if is_path {
                     out.push_str(&self.map_path(run));
@@ -308,9 +412,7 @@ impl Anonymizer {
             if keeps(component) || (index == 0 && component == "~") {
                 parts.push(component.to_string());
             } else {
-                let next = self.folders.len() + 1;
-                let number = *self.folders.entry(component.to_string()).or_insert(next);
-                parts.push(format!("folder-{number}"));
+                parts.push(self.folder_name(component));
             }
         }
         parts.join("/")
@@ -319,6 +421,15 @@ impl Anonymizer {
 
 fn is_generic(name: &str) -> bool {
     GENERIC.contains(&name) || OWN.contains(&name)
+}
+
+/// Whether a name of the server is left as it is: a generic one, a number, a version, a program or a
+/// word of the report.
+fn is_public(name: &str) -> bool {
+    is_generic(name)
+        || PUBLIC_WORDS.contains(&name)
+        || name.bytes().all(|b| b.is_ascii_digit())
+        || is_version(name)
 }
 
 /// Whether a folder name stays: a generic one, a version, or a replacement made earlier.
@@ -489,6 +600,30 @@ fn word_at(text: &str, at: usize, word: &Word) -> bool {
     let last = word.needle.chars().next_back().unwrap_or(' ');
     same && !(is_word(first) && prev_char(text, at).is_some_and(is_word))
         && !(is_word(last) && next_char(text, end).is_some_and(is_word))
+        && !in_version(text, at, end)
+}
+
+/// Whether a path component ends at `at`: the end of the text or of the line, a `/`, a colon, a quote, a
+/// closing bracket or a pipe. A space, a comma or a full stop does not end one: what follows may be the
+/// rest of a longer name, and the path goes on to the end of its segment.
+fn ends_component(text: &str, at: usize) -> bool {
+    next_char(text, at).is_none_or(|c| {
+        matches!(
+            c,
+            '/' | ':' | '"' | '\'' | '`' | ')' | ']' | '}' | '|' | '\n'
+        )
+    })
+}
+
+/// Whether the text at `at..end` stands between the digits of a version: `1.beta.2`, `v2.0`, `beta.1`.
+fn in_version(text: &str, at: usize, end: usize) -> bool {
+    let after_digits = text[..at]
+        .strip_suffix('.')
+        .is_some_and(|before| before.ends_with(|c: char| c.is_ascii_digit()));
+    let before_digits = text[end..]
+        .strip_prefix('.')
+        .is_some_and(|after| after.starts_with(|c: char| c.is_ascii_digit()));
+    after_digits || before_digits
 }
 
 /// The names of the server, the login and the host, wherever they stand as a whole word.
@@ -520,36 +655,60 @@ fn before_path(prev: Option<char>) -> bool {
     prev.is_none_or(|c| c.is_whitespace() || BEFORE_PATH.contains(c))
 }
 
-/// The length of what is not a space or a stop, from `at`.
-fn run_len(text: &str, at: usize) -> usize {
-    text[at..]
-        .chars()
-        .take_while(|c| !c.is_whitespace() && !PATH_STOP.contains(*c))
-        .map(char::len_utf8)
-        .sum()
-}
-
-/// Where the path that starts at `start` ends. A space goes on with the path when the next word
-/// holds a slash that does not start it (`~/My Projects/x`); the full stop of a sentence does not.
+/// Where the path that starts at `start` ends: at the end of its segment, which is the end of the
+/// line, a colon before a space (a message puts its path before `: why`), a space before the next path, a
+/// bracket that nothing opened in the path, and the quote that closes the quote it came after. Spaces,
+/// quotes, brackets and commas inside a folder name are the folder's. To hide a few words too many is
+/// safe; to stop at a space is not.
 fn path_end(text: &str, start: usize) -> usize {
-    let mut end = start + run_len(text, start);
-    while let Some(word) = text[end..].strip_prefix(' ') {
-        let len = run_len(text, end + 1);
-        let word = &word[..len];
-        if len > 0
-            && word.contains('/')
-            && !word.starts_with(['/', '~', '-'])
-            && !word.contains("://")
-        {
-            end += 1 + len;
-        } else {
+    let quote = prev_char(text, start).filter(|c| matches!(c, '\'' | '"' | '`'));
+    let mut depth = [0i32; 3];
+    let mut delimited = false;
+    let mut end = start;
+    for (offset, c) in text[start..].char_indices() {
+        let at = start + offset;
+        let rest = &text[at + c.len_utf8()..];
+        let after = rest.chars().next();
+        let stop = match c {
+            '\n' => true,
+            ':' => after.is_none_or(|next| next.is_whitespace() || next == '/' || next == '~'),
+            ' ' => rest.starts_with('/') || rest.starts_with("~/"),
+            '(' | '[' | '{' => {
+                depth[bracket(c)] += 1;
+                false
+            }
+            ')' | ']' | '}' => {
+                depth[bracket(c)] -= 1;
+                depth[bracket(c)] < 0
+            }
+            c if Some(c) == quote => {
+                !after.is_some_and(|next| next.is_alphanumeric() || next == '/' || next == '_')
+            }
+            _ => false,
+        };
+        if stop {
+            delimited = matches!(c, ':' | ')' | ']' | '}') || Some(c) == quote;
             break;
         }
+        end = at + c.len_utf8();
     }
-    while end > start + 1 && text[start..end].ends_with(['.', '!', '?']) {
+    // The full stop of a sentence and the like are not the path's, unless a colon or a quote closes it.
+    while !delimited
+        && end > start + 1
+        && text[start..end].ends_with(['.', ',', ';', '!', '?', ' '])
+    {
         end -= 1;
     }
     end
+}
+
+/// Which of the three kinds of brackets `c` is.
+fn bracket(c: char) -> usize {
+    match c {
+        '(' | ')' => 0,
+        '[' | ']' => 1,
+        _ => 2,
+    }
 }
 
 /// Whether `part` is an IPv4 address.
@@ -723,6 +882,7 @@ mod tests {
             sessions: own(sessions),
             windows: own(windows),
             labels: own(labels),
+            ..Names::default()
         }
     }
 
@@ -1072,14 +1232,241 @@ mod tests {
     }
 
     #[test]
-    fn a_path_with_a_space_is_hidden_whole_when_a_later_word_goes_on_with_a_slash() {
+    fn a_path_goes_on_through_spaces_to_the_end_of_its_segment() {
         let mut anon = plain();
         assert_eq!(
             clean(
                 &mut anon,
                 "write /Users/kh/My Projects/acme secret/x failed"
             ),
-            "write ~/folder-1/folder-2/folder-3 failed"
+            "write ~/folder-1/folder-2/folder-3"
+        );
+    }
+
+    fn with_folders(folders: &[&str]) -> Anonymizer {
+        let known = Names {
+            folders: folders.iter().map(|folder| folder.to_string()).collect(),
+            ..Names::default()
+        };
+        Anonymizer::new(&identity(), &known)
+    }
+
+    #[test]
+    fn a_folder_that_holds_a_space_a_quote_a_bracket_or_a_comma_is_one_folder() {
+        for path in [
+            "Globex Corp",
+            "Jane's Bakery",
+            "Initech (Jane Doe)",
+            "[Cyberdyne]",
+            "hooli,inc",
+            "Soylent Green",
+            "Acme & Sons, Ltd.",
+            "Smith, John",
+        ] {
+            // Nothing is known of the folder but the line that says it cannot be written: the end of its
+            // segment is the end of the path.
+            let mut anon = plain();
+            let line = format!("Cannot write /Users/kh/Projects/{path}: Permission denied");
+            assert_eq!(
+                clean(&mut anon, &line),
+                "Cannot write ~/Projects/folder-1: Permission denied",
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_in_the_middle_of_a_line_ends_at_the_colon_or_the_next_path() {
+        let mut anon = plain();
+        assert_eq!(
+            clean(
+                &mut anon,
+                "Cannot read /Users/kh/Ahmed's Clients/Globex Corp/notes.json: gone"
+            ),
+            "Cannot read ~/folder-1/folder-2/folder-3: gone"
+        );
+        assert_eq!(
+            clean(
+                &mut anon,
+                "~/Projects/Initech (Jane Doe)/api/x.json: no ~/Projects/[Cyberdyne]/x"
+            ),
+            "~/Projects/folder-4/folder-5/folder-6: no ~/Projects/folder-7/folder-8"
+        );
+        assert_eq!(
+            clean(
+                &mut anon,
+                "~/Projects/hooli,inc/plan/latest.json: no ~/b; ~/c."
+            ),
+            "~/Projects/folder-9/folder-10/latest.json: no ~/folder-11; ~/folder-12."
+        );
+        // What follows the last component up to the next path is taken for the rest of its name.
+        assert_eq!(
+            clean(&mut anon, "~/Projects/Smith, John and then ~/d"),
+            "~/Projects/folder-13 ~/folder-14"
+        );
+    }
+
+    #[test]
+    fn a_quoted_path_ends_at_the_quote_that_closes_it_and_not_at_a_quote_in_a_name() {
+        let mut anon = plain();
+        assert_eq!(
+            clean(&mut anon, "write \"/Users/kh/Projects/Soylent Green\" now"),
+            "write \"~/Projects/folder-1\" now"
+        );
+        assert_eq!(
+            clean(&mut anon, "write '/Users/kh/Projects/Jane's Bakery/x' now"),
+            "write '~/Projects/folder-2/folder-3' now"
+        );
+        assert_eq!(
+            clean(
+                &mut anon,
+                "(see ~/Projects/Initech (Jane Doe)/x) and [~/y z]"
+            ),
+            "(see ~/Projects/folder-4/folder-3) and [~/folder-5]"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_is_known_is_hidden_whatever_its_name_holds() {
+        let mut anon = with_folders(&[
+            "Globex Corp",
+            "Jane's Bakery",
+            "Initech (Jane Doe)",
+            "hooli,inc",
+            "Odd ) Name",
+            "Notes /archive",
+        ]);
+        assert_eq!(
+            clean(
+                &mut anon,
+                "a /Users/kh/Projects/Globex Corp: b /Users/kh/Projects/Jane's Bakery: c"
+            ),
+            "a ~/Projects/folder-1: b ~/Projects/folder-2: c"
+        );
+        assert_eq!(
+            clean(
+                &mut anon,
+                "~/Projects/Initech (Jane Doe)/api: ~/Projects/hooli,inc/x: Globex Corp"
+            ),
+            "~/Projects/folder-3/folder-5: ~/Projects/folder-4/folder-6: Globex Corp"
+        );
+        // Names that the end of a segment would cut in two, which only a known name gets whole.
+        assert_eq!(
+            clean(
+                &mut anon,
+                "x /Users/kh/Projects/Odd ) Name: and /Users/kh/Projects/Notes /archive/z: no"
+            ),
+            "x ~/Projects/folder-7: and ~/Projects/folder-8/folder-9: no"
+        );
+        let mut unknown = plain();
+        assert_eq!(
+            clean(&mut unknown, "x /Users/kh/Projects/Odd ) Name: no"),
+            "x ~/Projects/folder-1) Name: no",
+            "the cut an unknown name gets"
+        );
+        // A known name counts as a whole folder name only: a longer one is left to the segment rule.
+        assert_eq!(
+            clean(&mut anon, "x /Users/kh/Projects/Globex Corporation/y: no"),
+            "x ~/Projects/folder-10/folder-11: no"
+        );
+        // The same folder, the same number.
+        assert_eq!(
+            clean(&mut anon, "/Users/kh/Projects/Globex Corp/"),
+            "~/Projects/folder-1/"
+        );
+    }
+
+    #[test]
+    fn the_longest_known_folder_is_tried_first_and_generic_ones_are_never_hidden() {
+        let mut anon = with_folders(&[
+            "Globex Corp",
+            "Globex Corp International",
+            "Projects",
+            "src",
+            "",
+        ]);
+        assert_eq!(
+            clean(
+                &mut anon,
+                "/Users/kh/Projects/Globex Corp International/src/Globex Corp"
+            ),
+            "~/Projects/folder-1/src/folder-2"
+        );
+    }
+
+    #[test]
+    fn a_tab_called_like_a_program_or_a_number_does_not_change_the_report() {
+        let mut anon = Anonymizer::new(
+            &identity(),
+            &names(
+                &["0", "1", "2", "acme"],
+                &["zsh", "claude", "codex", "python3", "errors", "release"],
+                &["fzf", "42", "3.8"],
+            ),
+        );
+        let text = "tmux-workspace 2.1.0 (release, aarch64-apple-darwin)\nmacOS 27.2 arm64 · tmux 3.8 · zsh 5.9 · Ghostty\n\
+                    python3 3.15 · fzf ✓ · zoxide ✓ · sesh ✗ · lazygit ✓\nintegrations: claude ✗ codex ✗ omp ✗ nvim ✗\n\
+                    1 pane · 2 warnings · 0 errors\nWARN  0:1.0 codex: No Codex status. Review /hooks\nstatus 1 of 2, acme";
+        assert_eq!(
+            clean(&mut anon, text),
+            text.replace("acme", "workspace-1"),
+            "only the name that is a name goes"
+        );
+    }
+
+    #[test]
+    fn a_name_is_not_replaced_inside_a_version_number() {
+        let mut anon = Anonymizer::new(&identity(), &names(&["beta", "v2"], &[], &[]));
+        assert_eq!(
+            clean(&mut anon, "1.beta.2 3.beta v2.0 beta.1 beta"),
+            "1.beta.2 3.beta v2.0 beta.1 workspace-1"
+        );
+    }
+
+    #[test]
+    fn text_of_this_program_is_checked_for_who_and_where_but_not_for_names() {
+        let mut anon = Anonymizer::new(&identity(), &names(&["Ghostty", "tab"], &[], &[]));
+        assert_eq!(
+            clean(
+                &mut anon,
+                "x Ghostty tab kh@box.org kh /Users/kh/Projects/Ghostty"
+            ),
+            "x workspace-1 workspace-2 <email> <user> ~/Projects/workspace-1"
+        );
+        assert_eq!(
+            anon.apply_own("x Ghostty tab kh@box.org kh-mbp ~/Projects/p")
+                .as_str(),
+            "x Ghostty tab <email> <host> ~/Projects/folder-1"
+        );
+    }
+
+    #[test]
+    fn an_argument_stand_in_is_a_placeholder_like_the_others() {
+        let mut anon = Anonymizer::new(&identity(), &names(&["arg"], &[], &[]));
+        let once = clean(&mut anon, "arg park <arg> in /Users/kh/Projects/<arg>/x");
+        assert_eq!(once, "workspace-1 park <arg> in ~/Projects/<arg>/folder-1");
+        assert_eq!(clean(&mut anon, &once), once);
+    }
+
+    #[test]
+    fn names_are_collected_from_paths_component_by_component() {
+        let mut found = Names::default();
+        found.add_folder_path("/Users/kh/Projects/Globex Corp/api");
+        found.add_folder_path("/Users/kh/Projects/Globex Corp/web/");
+        found.add_folder_path("./x/../y");
+        found.add_folder_path("");
+        assert_eq!(
+            found.folders,
+            [
+                "Users",
+                "kh",
+                "Projects",
+                "Globex Corp",
+                "api",
+                "web",
+                "x",
+                "y"
+            ]
         );
     }
 
@@ -1138,8 +1525,8 @@ mod tests {
         let mut anon = Anonymizer::new(&identity(), &names(&["café"], &["日本"], &["📁"]));
         assert_eq!(clean(&mut anon, ""), "");
         assert_eq!(
-            clean(&mut anon, "/Users/kh/Café/📁/日本 é"),
-            "~/folder-1/label-1/tab-1 é"
+            clean(&mut anon, "/Users/kh/Café/📁/日本: é"),
+            "~/folder-1/label-1/tab-1: é"
         );
         let text = "é /Users/kh/Café/x kh@kh-mbp.local ::1 1.2.3.4 sk-é-1 https://u:p@h.io/é ~/ a/b @ : :: / ~ <";
         for cut in (0..=text.len()).filter(|cut| text.is_char_boundary(*cut)) {

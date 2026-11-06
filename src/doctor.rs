@@ -409,7 +409,7 @@ fn binary_on_path(report: &mut Report) {
         report.check(
             LABEL,
             false,
-            &format!("{} is not the installed binary", found.display()),
+            &format!("not the installed binary ({})", found.display()),
         );
     }
 }

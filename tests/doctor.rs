@@ -444,7 +444,7 @@ fn doctor_warns_when_another_binary_is_first_on_path() {
     let other = machine.fakes.path().join("tmux-workspace");
     assert!(
         out.contains(&format!(
-            "WARN  tmux-workspace on PATH: {} is not the installed binary\n",
+            "WARN  tmux-workspace on PATH: not the installed binary ({})\n",
             other.display()
         )),
         "{out}"
