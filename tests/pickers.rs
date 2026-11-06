@@ -1262,8 +1262,11 @@ fn a_tab_whose_folder_is_missing_starts_in_the_folder_of_the_session() {
     let mut command = world.bin(&["new-tab", "x", "/nonexistent/folder"]);
     command.env("TMUX_PANE", &pane);
     assert_eq!(quietly(command).status.code(), Some(0));
-    let tab = world.scratch.expand("=beta:x", "#{pane_current_path}");
-    assert_eq!(tab, home.to_str().unwrap());
+    // Read until it holds (see `wait_for`): on Linux a new pane shows the server's folder until its shell runs.
+    wait_for(
+        || world.scratch.expand("=beta:x", "#{pane_current_path}"),
+        home.to_str().unwrap(),
+    );
 
     // When the folder of the session is gone too, the projects folder is the place.
     let projects = world.projects();
@@ -1273,9 +1276,9 @@ fn a_tab_whose_folder_is_missing_starts_in_the_folder_of_the_session() {
     let mut command = world.bin(&["new-tab", "y", ""]);
     command.env("TMUX_PANE", &pane);
     assert_eq!(quietly(command).status.code(), Some(0));
-    assert_eq!(
-        world.scratch.expand("=gone:y", "#{pane_current_path}"),
-        projects.to_str().unwrap()
+    wait_for(
+        || world.scratch.expand("=gone:y", "#{pane_current_path}"),
+        projects.to_str().unwrap(),
     );
 }
 
