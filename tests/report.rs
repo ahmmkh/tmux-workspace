@@ -13,6 +13,23 @@ use std::process::{Command, Stdio};
 use tmux_workspace::testing::{ScratchTmux, TempDir, wait_for};
 
 /// The lines of errors.log in a state folder.
+/// `text` with the number of every `folder-N` replaced by `#`.
+fn folder_numbers_hidden(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("folder-") {
+        out.push_str(&rest[..at + "folder-".len()]);
+        rest = &rest[at + "folder-".len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 {
+            out.push('#');
+            rest = &rest[digits..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn log_lines(state: &Path) -> Vec<String> {
     fs::read_to_string(state.join("errors.log"))
         .unwrap_or_default()
@@ -948,14 +965,17 @@ fn nothing_that_identifies_reaches_the_report_or_the_link() {
         printed.contains("mail <email> from <ip> with <token> and token <token> for <user>"),
         "{printed}"
     );
-    // Folders with a space or an apostrophe in their names, known and unknown, are one folder each.
+    // Folders with a space or an apostrophe in their names, known and unknown, are one folder each. Their
+    // numbers are not compared: `clients` and `Clients` are one folder on macOS and two on Linux, so the
+    // folders are met in a different order there.
+    let numbered = folder_numbers_hidden(&printed);
     for line in [
-        "Cannot write ~/folder-5/folder-4: Permission denied",
-        "Cannot write ~/Projects/folder-6: Permission denied (os error 13); Cannot write ~/Projects/folder-7: denied",
-        "Cannot write ~/Projects/folder-8/folder-9: Permission denied",
-        "Cannot write ~/folder-5/folder-10: Permission denied, and ~/Projects/folder-11/folder-12",
+        "Cannot write ~/folder-#/folder-#: Permission denied",
+        "Cannot write ~/Projects/folder-#: Permission denied (os error 13); Cannot write ~/Projects/folder-#: denied",
+        "Cannot write ~/Projects/folder-#/folder-#: Permission denied",
+        "Cannot write ~/folder-#/folder-#: Permission denied, and ~/Projects/folder-#/folder-#",
     ] {
-        assert!(printed.contains(line), "{line}\n{printed}");
+        assert!(numbered.contains(line), "{line}\n{printed}");
     }
     // The arguments of a failed command, and a workspace that is gone but was saved.
     assert!(
@@ -967,8 +987,11 @@ fn nothing_that_identifies_reaches_the_report_or_the_link() {
         printed.contains("restore: tmux described the new session workspace-3 unexpectedly"),
         "{printed}"
     );
+    // `user@host` reads as an e-mail address where the host name has a dot (`Ahmeds-MacBook-Pro.local`), and as
+    // a user and a host where it has none (a container's `6c57566775cb`, a CI runner): both hide it.
     assert!(
-        printed.contains("update: <email> then <host> and <host> as <user>"),
+        printed.contains("update: <email> then <host> and <host> as <user>")
+            || printed.contains("update: <user>@<host> then <host> and <host> as <user>"),
         "{printed}"
     );
     assert!(

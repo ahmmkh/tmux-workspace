@@ -368,8 +368,14 @@ fn add_projects(names: &mut Names, projects: &Path) {
     let Ok(entries) = std::fs::read_dir(projects) else {
         return;
     };
-    for entry in entries.flatten().take(MAX_PROJECTS) {
-        let name = entry.file_name().to_string_lossy().into_owned();
+    // Sorted, so the numbers are the same on every file system: APFS and ext4 list a folder in different orders.
+    let mut found: Vec<String> = entries
+        .flatten()
+        .take(MAX_PROJECTS)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    found.sort();
+    for name in found {
         if !names.folders.contains(&name) {
             names.folders.push(name);
         }
