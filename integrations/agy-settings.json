@@ -1,0 +1,6 @@
+{
+  "title": {
+    "type": "command",
+    "command": "{{BIN}} agent-hook agy"
+  }
+}

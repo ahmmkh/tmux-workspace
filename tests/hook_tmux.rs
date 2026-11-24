@@ -1285,6 +1285,61 @@ fn hook_ignores_an_environment_that_names_no_pane() {
 }
 
 #[test]
+fn agy_hook_publishes_identity_transitions_status_and_prints_title_outside_tmux() {
+    let world = World::new();
+    let host = world.host_of("agy", TmuxMode::Real);
+    let run_agy = |payload: Value| -> Option<String> {
+        hook::run("agy", &payload, &world.env, &host).expect("agy hook does not fail")
+    };
+
+    // Working turn with conversation id publishes identity and sets status to working.
+    let out = run_agy(json!({
+        "conversation_id": "conv-1234",
+        "cwd": CWD,
+        "agent_state": "working",
+        "conversation_title": "Ship release"
+    }));
+    assert_eq!(out.as_deref(), Some("agy | Ship release\n"));
+    assert_eq!(world.identity()["kind"], json!("agy"));
+    assert_eq!(world.identity()["id"], json!("conv-1234"));
+    assert_eq!(world.status(), "working");
+
+    // Waiting for permission transitions to blocked.
+    run_agy(json!({
+        "conversation_id": "conv-1234",
+        "cwd": CWD,
+        "agent_state": "working",
+        "tool_confirmation_pending": true,
+        "conversation_title": "Ship release"
+    }));
+    assert_eq!(world.status(), "blocked");
+
+    // Idle after working/blocked uses @agent_turn_over (done on a hidden pane).
+    run_agy(json!({
+        "conversation_id": "conv-1234",
+        "cwd": CWD,
+        "agent_state": "idle",
+        "conversation_title": "Ship release"
+    }));
+    assert_eq!(world.status(), "done");
+
+    // Outside tmux, the binary still prints the title and exits 0 with silent stderr.
+    let outside = json!({
+        "conversation_id": "conv-1234",
+        "cwd": "/tmp/my-app",
+        "agent_state": "idle",
+        "conversation_title": "Outside title"
+    });
+    let (out, _) = hook_binary("agy", "", "", outside.to_string().into_bytes());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "agy | Outside title\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+#[test]
 fn hook_exits_zero_whatever_the_arguments() {
     let home = TempDir::new();
     for args in [

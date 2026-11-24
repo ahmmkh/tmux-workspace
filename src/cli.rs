@@ -1,6 +1,9 @@
 //! The command line: which command runs, and what a failure looks like.
 
+use crate::ai;
 use crate::bug;
+use crate::cleanup;
+use crate::dash;
 use crate::doctor;
 use crate::error::{Error, Result, fail};
 use crate::errorlog;
@@ -11,21 +14,12 @@ use crate::integrations;
 use crate::onboarding;
 use crate::pane;
 use crate::park;
-use crate::paths::share_root;
 use crate::pick;
-use crate::process::{self, Spawn};
 use crate::report::Kind;
 use crate::snapshot;
 use crate::tmux::Tmux;
+use crate::update;
 use std::io::Write;
-use std::path::Path;
-use std::time::Duration;
-
-/// How long the check of the Python version may take.
-const PYTHON_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The legacy Python is tested on 3.9, which is what macOS ships as `/usr/bin/python3`.
-const PYTHON_CHECK: &str = "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)";
 
 /// Run the command named by the arguments and return the process exit status.
 pub fn main() -> i32 {
@@ -87,7 +81,9 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "doctor" => doctor::doctor(&Tmux::new()),
         "bug" => bug::main(Kind::Bug, args),
         "idea" => bug::main(Kind::Idea, args),
-        "update" => Err(update(args)),
+        "feedback" => bug::main(Kind::Feedback, args),
+        "report" => bug::report(args),
+        "update" => update::main(args),
         // Runs in every new pane before the user's shell, and ends by becoming that shell.
         "pane-start" => pane::pane_start(
             &Tmux::new(),
@@ -149,15 +145,22 @@ fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             help::print_topic(args.first().map_or("", String::as_str));
             Ok(0)
         }
-        // Still Python: the stage 2 and 3 ports take these over.
-        "dash" | "dashboard" | "ai" | "cleanup" => Err(legacy(command, args)),
+        "dash" | "dashboard" => dash::main(&Tmux::new(), args),
+        "cleanup" => cleanup::main(&Tmux::new()),
+        "ai" => ai::main(&Tmux::new(), args),
         _ => fail(format!("Unknown workspace command: {command}")),
     }
 }
 
 /// The names that a shell opened before the command existed sends to `open` as a workspace name, and the
-/// release in which the command came: `work update` since 2.0, `work bug` and `work idea` since 2.1.
-const COMMAND_NAMES: [(&str, &str); 3] = [("update", "2.0"), ("bug", "2.1"), ("idea", "2.1")];
+/// release in which the command came: `work update` since 2.0, `work bug`/`idea` since 2.1, `feedback`/`report` since 2.2.
+const COMMAND_NAMES: [(&str, &str); 5] = [
+    ("update", "2.0"),
+    ("bug", "2.1"),
+    ("idea", "2.1"),
+    ("feedback", "2.2"),
+    ("report", "2.2"),
+];
 
 /// What `work NAME` says when it reaches `open` from a shell that was opened before NAME was a command.
 fn old_shell(name: &str, release: &str) -> String {
@@ -202,74 +205,6 @@ fn open(tmux: &Tmux, args: &[String], errors: &mut dyn Write) -> Result<i32> {
     pick::open_workspace(tmux, name).map(|()| 0)
 }
 
-/// Hand a command that is not ported yet to `legacy/bin/tmux-workspace`: become `python3` running it.
-/// Returns only when that fails. Without a python3 of version 3.9 or later, it says so on stderr and
-/// exits 1: the error contract does not apply, as the command is not ours yet.
-pub fn legacy(command: &str, args: &[String]) -> Error {
-    let Some(python) = python3_9() else {
-        let _ = writeln!(
-            std::io::stderr(),
-            "tmux-workspace {command} needs python3 3.9+ until it is ported (stage 2/3)"
-        );
-        std::process::exit(1);
-    };
-    let script = share_root().join("legacy/bin/tmux-workspace");
-    if !script.is_file() {
-        return missing(command, &script);
-    }
-    let mut argv = vec![
-        python.to_string_lossy().into_owned(),
-        script.to_string_lossy().into_owned(),
-        command.to_string(),
-    ];
-    argv.extend(args.iter().cloned());
-    process::exec(&argv)
-}
-
-/// The error of a command whose script is not there: its path, then what needs it.
-fn missing(command: &str, script: &Path) -> Error {
-    Error::Msg(format!("Missing {}: {command} needs it", script.display()))
-}
-
-/// `update [--check]`: become `bash <share>/install.sh --update [--check]`, the installer that came
-/// with this binary. It downloads with curl or wget, so the binary needs no HTTP client of its own.
-/// Returns only when the installer cannot be started.
-fn update(args: &[String]) -> Error {
-    let check = match args {
-        [] => false,
-        [flag] if flag == "--check" => true,
-        _ => return Error::Msg("Usage: tmux-workspace update [--check]".into()),
-    };
-    let script = share_root().join("install.sh");
-    if !script.is_file() {
-        return missing("update", &script);
-    }
-    let mut argv = vec![
-        "bash".to_string(),
-        script.to_string_lossy().into_owned(),
-        "--update".to_string(),
-    ];
-    if check {
-        argv.push("--check".to_string());
-    }
-    process::exec(&argv)
-}
-
-/// The `python3` on `PATH`, when it is version 3.9 or later. One `python3 -c` call.
-fn python3_9() -> Option<std::path::PathBuf> {
-    let python = process::which("python3")?;
-    let check = process::spawn(&Spawn {
-        argv: vec![
-            python.to_string_lossy().into_owned(),
-            "-c".into(),
-            PYTHON_CHECK.into(),
-        ],
-        timeout: Some(PYTHON_CHECK_TIMEOUT),
-        ..Spawn::default()
-    });
-    check.is_ok_and(|out| out.status == 0).then_some(python)
-}
-
 /// The pane named, or else the one the command runs in.
 fn pane_or_current(tmux: &Tmux, pane: Option<&String>) -> Result<String> {
     match pane {
@@ -281,7 +216,7 @@ fn pane_or_current(tmux: &Tmux, pane: Option<&String>) -> Result<String> {
 /// Commands that nobody watches, because tmux or an agent starts them: a failure is logged, and said
 /// on stderr, but never with the offer of a report. `bug` and `idea` are here as well: a report
 /// of their failure would be the report that failed.
-const UNWATCHED: [&str; 10] = [
+const UNWATCHED: [&str; 12] = [
     "agent-hook",
     "init",
     "tick",
@@ -292,6 +227,8 @@ const UNWATCHED: [&str; 10] = [
     "help-topic",
     "bug",
     "idea",
+    "feedback",
+    "report",
 ];
 
 /// What a failed command writes to stderr: the error, and the offer of a report for a command that
@@ -305,13 +242,15 @@ fn failure_text(command: &str, error: &Error) -> String {
 }
 
 /// The commands that `dispatch` runs.
-const KNOWN: [&str; 31] = [
+const KNOWN: [&str; 33] = [
     "agent-hook",
     "setup",
     "integrations",
     "doctor",
     "bug",
     "idea",
+    "feedback",
+    "report",
     "update",
     "pane-start",
     "exec-shell",
@@ -461,22 +400,6 @@ mod tests {
             ("unknown", args(&["globex-merger", "x"]))
         );
         assert_eq!(logged("open", &args(&[])), ("open", args(&[])));
-    }
-
-    #[test]
-    fn a_missing_script_says_what_needs_it_after_its_path_and_the_reason_survives_the_anonymizer() {
-        use crate::anonymize::{Anonymizer, Identity, Names};
-        let message =
-            missing("update", Path::new("/opt/clients/Globex Corp/install.sh")).to_string();
-        assert_eq!(
-            message,
-            "Missing /opt/clients/Globex Corp/install.sh: update needs it"
-        );
-        let shown = Anonymizer::new(&Identity::default(), &Names::default()).apply(&message);
-        assert_eq!(
-            shown.as_str(),
-            "Missing /opt/folder-1/folder-2/folder-3: update needs it"
-        );
     }
 
     #[test]

@@ -40,10 +40,11 @@ for file in install.sh tmux.conf agent-status.conf sesh.toml shell.zsh config.ex
     cp "$root/$file" "$dir/"
 done
 chmod 755 "$dir/install.sh"
-cp -R "$root/shell" "$root/integrations" "$root/legacy" "$dir/"
-# Byte code and Finder files of the working tree are not part of a release.
-find "$dir" -name __pycache__ -type d -prune -exec rm -rf {} +
-find "$dir" \( -name '*.pyc' -o -name .DS_Store \) -type f -exec rm -f {} +
+cp -R "$root/shell" "$root/integrations" "$dir/"
+# Finder metadata and stray Python bytecode from the working tree are not part of a release.
+find "$dir" -name .DS_Store -type f -exec rm -f {} +
+find "$dir" -name '__pycache__' -type d -exec rm -rf {} +
+find "$dir" -name '*.pyc' -type f -exec rm -f {} +
 printf '%s\n' "$version" >"$dir/VERSION"
 # The same modes whatever the umask of the build: readable by all, executable where it was.
 chmod -R u=rwX,go=rX "$dir"

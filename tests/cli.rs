@@ -260,139 +260,75 @@ mod setup {
     }
 }
 
-/// `dash`, `dashboard`, `ai` and `cleanup` stay Python until stages 2 and 3 port them: the binary
-/// hands them to `legacy/bin/tmux-workspace`.
-mod legacy {
+/// Native Rust `dash`, `ai`, and `cleanup` run directly without Python.
+mod native_commands {
     use super::*;
-    use std::path::{Path, PathBuf};
-
-    fn script() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("legacy/bin/tmux-workspace")
-    }
 
     #[test]
-    fn dash_is_handed_to_the_legacy_python() {
+    fn dash_runs_natively_without_python() {
         let scratch = ScratchTmux::new();
         scratch.pane(&["new-window", "-t", "alpha", "-n", "two"]);
-        let args = ["dash", "--once", "--width", "80", "--height", "24"];
-        let ours = scratch.bin(EXE).args(args).output().unwrap();
-        // The frame the Python itself draws for this server.
-        let theirs = scratch
-            .bin("python3")
-            .arg(script())
-            .args(args)
+        let fakes = common::Fakes::new();
+        fakes.real_tmux();
+        let out = scratch
+            .bin(EXE)
+            .args(["dash", "--once", "--width", "80", "--height", "24"])
+            .env("PATH", fakes.path())
             .output()
             .unwrap();
         assert_eq!(
-            ours.status.code(),
+            out.status.code(),
             Some(0),
             "{}",
-            String::from_utf8_lossy(&ours.stderr)
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(ours.stderr, b"");
-        let frame = String::from_utf8_lossy(&ours.stdout);
+        assert_eq!(out.stderr, b"");
+        let frame = String::from_utf8_lossy(&out.stdout);
         assert!(frame.contains("0:one"), "{frame}");
         assert!(frame.contains("1:two"), "{frame}");
-        assert_eq!(frame, String::from_utf8_lossy(&theirs.stdout));
     }
 
     #[test]
-    fn legacy_command_without_python_explains() {
+    fn ai_home_and_update_auto_run_natively() {
         let scratch = ScratchTmux::new();
-        let empty = TempDir::new();
+        let out = scratch.bin(EXE).args(["ai", "--json"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(json["tools"]["find"].is_string());
+
         let out = scratch
             .bin(EXE)
-            .arg("dash")
-            .env("PATH", empty.path())
+            .args(["update", "--auto", "on"])
             .output()
             .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "tmux-workspace dash needs python3 3.9+ until it is ported (stage 2/3)\n"
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(out.stdout, b"");
-        assert_eq!(out.status.code(), Some(1));
-    }
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Auto-update enabled"));
 
-    #[test]
-    fn legacy_command_with_an_old_python_explains() {
-        let scratch = ScratchTmux::new();
-        let fakes = common::Fakes::new();
-        // Fails the one version check.
-        fakes.add("python3", "exit 1");
         let out = scratch
             .bin(EXE)
-            .arg("cleanup")
-            .env("PATH", fakes.path())
+            .args(["update", "--auto", "status"])
             .output()
             .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "tmux-workspace cleanup needs python3 3.9+ until it is ported (stage 2/3)\n"
-        );
-        assert_eq!(out.status.code(), Some(1));
-        assert_eq!(fakes.calls("python3"), 1, "one `python3 -c` call, no more");
-        assert_eq!(fakes.args("python3", 1)[0], "-c");
-    }
+        assert_eq!(out.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("auto-update: on (daily)"));
 
-    #[test]
-    fn a_share_folder_without_the_legacy_script_is_an_error_not_a_crash() {
-        let scratch = ScratchTmux::new();
-        let fakes = common::Fakes::new();
-        fakes.add("python3", "exit 0");
-        let share = TempDir::new();
         let out = scratch
             .bin(EXE)
-            .arg("ai")
-            .env("PATH", fakes.path())
-            .env("TMUX_WORKSPACE_SHARE", share.path())
+            .args(["update", "--auto", "off"])
             .output()
             .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!(
-                "Workspace error: Missing {}/legacy/bin/tmux-workspace: ai needs it\nReport it: work bug\n",
-                share.path().display()
-            )
-        );
-        assert_eq!(out.status.code(), Some(1));
-        assert_eq!(fakes.calls("python3"), 1, "the script is never started");
-    }
-
-    #[test]
-    fn all_four_commands_run_the_script_with_their_arguments() {
-        for command in ["dash", "dashboard", "ai", "cleanup"] {
-            let scratch = ScratchTmux::new();
-            let fakes = common::Fakes::new();
-            // Passes the version check; the second call is the script, whose status is the command's.
-            fakes.add(
-                "python3",
-                r#"[ "$1" = -c ] && exit 0
-exit 7"#,
-            );
-            let out = scratch
-                .bin(EXE)
-                .args([command, "--once", "a b"])
-                .env("PATH", fakes.path())
-                .output()
-                .unwrap();
-            assert_eq!(out.status.code(), Some(7), "{command}");
-            assert_eq!(out.stderr, b"", "{command}");
-            assert_eq!(fakes.calls("python3"), 2, "{command}");
-            let check = fakes.args("python3", 1);
-            assert_eq!(check[0], "-c", "{command}");
-            assert!(check[1].contains("(3, 9)"), "{command}: {check:?}");
-            assert_eq!(
-                fakes.args("python3", 2),
-                [script().to_str().unwrap(), command, "--once", "a b"],
-                "{command}"
-            );
-        }
+        assert_eq!(out.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("Auto-update disabled"));
     }
 }
 
-/// `update [--check]` hands over to the installer that came with the binary,
-/// `bash <share>/install.sh --update`: the binary has no HTTP client, the installer has curl or wget.
+/// `update [--check | --auto [on|off|status]]` hands over to `<share>/install.sh --update`
+/// or configures opt-in daily background auto-update.
 mod update {
     use super::*;
     use std::path::Path;
@@ -479,7 +415,7 @@ mod update {
             .unwrap();
         assert_eq!(
             common::text(&out.stderr),
-            "Workspace error: Usage: tmux-workspace update [--check]\nReport it: work bug\n"
+            "Workspace error: Usage: tmux-workspace update [--check | --auto [on|off|status]]\nReport it: work bug\n"
         );
         assert_eq!(out.status.code(), Some(1));
         assert_eq!(ran(share.path()), "", "the installer does not run");
@@ -503,71 +439,6 @@ mod update {
             )
         );
         assert_eq!(out.status.code(), Some(1));
-    }
-}
-
-/// `integrations/agent-hook.py` is a shim now: v1 hook entries still run
-/// `python3 ~/.local/lib/tmux-workspace/agent-hook.py <kind>`, a link to it, until
-/// `install.sh --agents` replaces them.
-mod agent_hook_shim {
-    use super::*;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::process::{Command, Output, Stdio};
-
-    fn shim() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations/agent-hook.py")
-    }
-
-    /// Run the shim the way a v1 hook entry does, under this `HOME`, with this input.
-    fn run(home: &Path, args: &[&str], input: &[u8]) -> Output {
-        let mut child = Command::new("python3")
-            .arg(shim())
-            .args(args)
-            .env("HOME", home)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(input).unwrap();
-        child.wait_with_output().unwrap()
-    }
-
-    #[test]
-    fn it_hands_its_arguments_and_input_to_the_installed_binary() {
-        let home = TempDir::new();
-        let bin = home.path().join(".local/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("tmux-workspace");
-        tmux_workspace::testing::write_script(
-            &fake,
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}/argv'\n/bin/cat > '{0}/stdin'\necho out\necho err >&2\nexit 3\n",
-                home.path().display()
-            ),
-        );
-        // Not text: the bytes pass through untouched.
-        let input = b"{\"session_id\": \"s\"}\xff\x00 and no newline";
-        let out = run(home.path(), &["claude"], input);
-        assert_eq!(
-            std::fs::read_to_string(home.path().join("argv")).unwrap(),
-            "agent-hook\nclaude\n"
-        );
-        assert_eq!(std::fs::read(home.path().join("stdin")).unwrap(), input);
-        // Output and status are the binary's own: the shim replaced itself with it.
-        assert_eq!(out.stdout, b"out\n");
-        assert_eq!(out.stderr, b"err\n");
-        assert_eq!(out.status.code(), Some(3));
-    }
-
-    #[test]
-    fn without_the_binary_it_exits_0_and_says_nothing() {
-        let home = TempDir::new();
-        let out = run(home.path(), &["claude"], b"{}");
-        assert_eq!(out.stdout, b"");
-        assert_eq!(out.stderr, b"");
-        assert_eq!(out.status.code(), Some(0));
     }
 }
 

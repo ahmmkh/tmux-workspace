@@ -178,17 +178,14 @@ fn rendered_command_names_the_installed_binary() {
         command.contains("/h/.local/bin/tmux-workspace agent-hook codex"),
         "{command}"
     );
-    assert_eq!(
-        command,
-        r#"[ -n "$TMUX_PANE" ] && /h/.local/bin/tmux-workspace agent-hook codex; true"#
-    );
+    assert_eq!(command, "/h/.local/bin/tmux-workspace agent-hook codex");
     assert!(!data.to_string().contains("{{"));
     assert!(!data.to_string().contains("python"));
 }
 
 #[test]
 fn templates_name_no_author_paths() {
-    for name in ["codex-hooks.json", "claude-hooks.json"] {
+    for name in ["codex-hooks.json", "claude-hooks.json", "agy-settings.json"] {
         let text = fs::read_to_string(root().join("integrations").join(name)).unwrap();
         assert!(!text.contains("/Users/"), "{name}");
     }

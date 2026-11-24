@@ -1,5 +1,5 @@
 PYTHON ?= python3
-RUNTIME := legacy/bin/tmux-workspace $(wildcard legacy/lib/*.py) legacy/integrations/agent-hook.py integrations/agent-hook.py $(wildcard scripts/*.py)
+DEV_PY := $(wildcard scripts/*.py)
 SHELL_SCRIPTS := install.sh bin/tw-clip bin/tw-sound shell/work.sh scripts/package.sh scripts/bench.sh tests/install/smoke.sh tests/install/matrix.sh
 # The release target of this machine: Linux releases are static musl builds.
 TARGET ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p' | sed 's/-gnu$$/-musl/')
@@ -27,7 +27,7 @@ test: build
 lint:
 	shellcheck $(SHELL_SCRIPTS)
 	bash -n install.sh
-	for f in $(RUNTIME); do $(PYTHON) -m py_compile "$$f" || exit 1; done
+	for f in $(DEV_PY); do $(PYTHON) -m py_compile "$$f" || exit 1; done
 	cargo clippy --all-targets --features testing -- -D warnings
 	cargo fmt --check
 	@if command -v actionlint >/dev/null 2>&1; then echo actionlint; actionlint; \

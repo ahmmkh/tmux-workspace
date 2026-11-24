@@ -233,6 +233,16 @@ pub fn state_dir() -> PathBuf {
     Locations::current().state_dir()
 }
 
+/// Codex's config directory: `$CODEX_HOME` when set and non-empty, else `~/.codex`.
+pub fn codex_home(home: &Path) -> PathBuf {
+    non_empty(std::env::var_os("CODEX_HOME")).map_or_else(|| home.join(".codex"), PathBuf::from)
+}
+
+/// Antigravity CLI's config directory: `~/.gemini/antigravity-cli`.
+pub fn agy_dir(home: &Path) -> PathBuf {
+    home.join(".gemini/antigravity-cli")
+}
+
 /// Where the shipped files are. `TMUX_WORKSPACE_SHARE`, else the nearest folder above the running
 /// binary that holds `agent-status.conf` (a checkout's root from `target/debug`, a release's root
 /// from `bin`), else the binary's own folder.

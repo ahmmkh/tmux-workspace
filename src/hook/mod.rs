@@ -4,16 +4,16 @@
 //! agent-hook.py, and keeps its order of checks: each check that returns early also prevents
 //! process calls.
 
-pub mod claude;
-pub mod codex;
+pub use crate::agent::{claude, codex};
 pub mod process;
 pub mod tmuxcmd;
 
+use crate::agent::{self, agy};
 use crate::error::Result;
 use crate::errorlog;
 use crate::host::{Host, RealHost};
 use crate::pyjson::{Style, dumps};
-use crate::text::now_ms;
+use crate::text::{now_ms, truthy_opt as truthy};
 use crate::tmux::Tmux;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
@@ -32,8 +32,6 @@ pub const TURN_OVER: &str = "#{?#{@agent_turn_over},#{E:@agent_turn_over},idle}"
 /// One read gives the pane's process, its status options, the turn-over value and its identity.
 pub const PANE: &str = "#{pane_pid}\t#{pane_tty}\t#{@workspace_agent}\t#{@workspace_agent_wait}\t#{@workspace_agent_failed}\t#{E:@agent_turn_over}\t#{@workspace_app}";
 
-/// What the hook does for each name it is started with.
-const MODES: [&str; 4] = ["claude", "claude-status", "omp", "codex"];
 const CODEX_EVENTS: [&str; 8] = [
     "SessionStart",
     "SessionEnd",
@@ -108,6 +106,56 @@ impl HookEnv {
             codex_home: folder(codex_home, ".codex"),
         })
     }
+
+    /// Fallback for detached Codex app-servers (such as the ChatGPT desktop app's shared daemon)
+    /// that spawn hook subprocesses with neither `TMUX` nor `TMUX_PANE`. Uses one `stat()` on the
+    /// default tmux socket path (`${TMUX_TMPDIR:-/tmp}/tmux-<euid>/default`); if absent, returns
+    /// `None` immediately with zero child processes.
+    pub fn detached_codex_from_env() -> Option<HookEnv> {
+        let socket = default_tmux_socket(std::env::var_os("TMUX_TMPDIR"))?;
+        Self::detached_codex_for(
+            socket,
+            std::env::var_os("CLAUDE_CONFIG_DIR"),
+            std::env::var_os("CODEX_HOME"),
+            crate::paths::home,
+        )
+    }
+
+    /// Construct a detached-Codex [`HookEnv`] pointing at an existing `socket` path.
+    pub fn detached_codex_for(
+        socket: PathBuf,
+        claude_config_dir: Option<OsString>,
+        codex_home: Option<OsString>,
+        home: impl Fn() -> PathBuf,
+    ) -> Option<HookEnv> {
+        if !socket.is_absolute() || !socket.exists() {
+            return None;
+        }
+        let socket_str = socket.to_string_lossy().into_owned();
+        let folder = |value: Option<OsString>, default: &str| {
+            value
+                .filter(|value| !value.is_empty())
+                .map_or_else(|| home().join(default), PathBuf::from)
+        };
+        Some(HookEnv {
+            pane: String::new(),
+            socket: socket_str.clone(),
+            tmux: Tmux::new().socket(&socket_str).argv(&[]),
+            sessions: folder(claude_config_dir, ".claude").join("sessions"),
+            codex_home: folder(codex_home, ".codex"),
+        })
+    }
+}
+
+/// Default tmux server socket path `${TMUX_TMPDIR:-/tmp}/tmux-<euid>/default` if it exists on disk.
+fn default_tmux_socket(tmux_tmpdir: Option<OsString>) -> Option<PathBuf> {
+    let base = tmux_tmpdir
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let path = base.join(format!("tmux-{euid}/default"));
+    path.exists().then_some(path)
 }
 
 /// The hook: read the payload from stdin, publish, print what the mode prints, and exit 0 whatever
@@ -130,10 +178,25 @@ fn publish(started: i64, args: &[String]) -> Option<String> {
     let [mode] = args else {
         return None;
     };
-    if !MODES.contains(&mode.as_str()) {
+    if !agent::valid_hook_mode(mode) {
         return None;
     }
-    let env = HookEnv::from_env()?;
+    if mode == "agy" {
+        let payload = read_payload()?;
+        let Some(env) = HookEnv::from_env() else {
+            return agy::format_title(&payload);
+        };
+        return run_at(started, mode, &payload, &env, &RealHost)
+            .inspect_err(|error| errorlog::record("agent-hook", &[], error))
+            .ok()
+            .flatten()
+            .or_else(|| agy::format_title(&payload));
+    }
+    let env = HookEnv::from_env().or_else(|| {
+        (mode == "codex")
+            .then(HookEnv::detached_codex_from_env)
+            .flatten()
+    })?;
     let payload = read_payload()?;
     // The one thing a failure does: a line in errors.log, which only a failure pays for.
     run_at(started, mode, &payload, &env, &RealHost)
@@ -161,18 +224,6 @@ pub fn run(mode: &str, payload: &Value, env: &HookEnv, host: &dyn Host) -> Resul
     run_at(now_ms(), mode, payload, env, host)
 }
 
-/// Whether a JSON value is true in Python's eyes.
-fn truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::Number(number)) => number.as_f64() != Some(0.0),
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Object(fields)) => !fields.is_empty(),
-    }
-}
-
 /// `started` is the time, in milliseconds, at which the hook began: a hook that blocks a pane records it.
 fn run_at(
     started: i64,
@@ -181,8 +232,11 @@ fn run_at(
     env: &HookEnv,
     host: &dyn Host,
 ) -> Result<Option<String>> {
-    if !MODES.contains(&mode) {
+    if !agent::valid_hook_mode(mode) {
         return Ok(None);
+    }
+    if mode == "agy" {
+        return agy::agy_event(payload, env, host);
     }
     let Some(data) = payload.as_object() else {
         return Ok(None);
@@ -241,27 +295,69 @@ fn run_at(
         };
         explicit_pid = Some(pid);
     }
-    let mut state = tmuxcmd::pane_state(host, &env.tmux, pane)?;
-    // A pane that is gone, whose agent outlived it (a shared Codex app-server does), has no process to
-    // belong to and nothing to publish to. That is the usual end of such an agent, not a failure.
-    if state.pid.is_empty() {
-        return Ok(None);
-    }
-    let pane_pid = process::py_int(&state.pid)?;
-    // A shared Codex app-server's inherited TMUX_PANE does not identify its client: the title does.
     let mut routed = None;
-    let (pid, birth) =
-        match process::owner(host, kind, pane_pid, &state.tty, explicit_pid, None, None)? {
-            Some(identity) => identity,
-            None if kind == "codex" => match codex::detached_codex(host, &env.tmux, session_id)? {
-                Some((resolved, identity)) => {
-                    routed = Some(resolved);
-                    identity
-                }
-                None => return Ok(None),
-            },
+    let mut state = tmuxcmd::PaneState::default();
+    let (pid, birth) = if kind == "codex" && pane.is_empty() {
+        // Detached Codex app-server outside tmux (no TMUX_PANE): route directly across all panes.
+        match codex::detached_codex_in(
+            host,
+            &env.tmux,
+            Some(&env.codex_home),
+            session_id,
+            Some(cwd),
+        )? {
+            Some((resolved, identity)) => {
+                routed = Some(resolved);
+                identity
+            }
             None => return Ok(None),
-        };
+        }
+    } else {
+        state = tmuxcmd::pane_state(host, &env.tmux, pane)?;
+        // A pane that is gone, whose agent outlived it (a shared Codex app-server does), has no
+        // process to belong to. For Codex with a valid thread id, still try detached routing across
+        // surviving panes before giving up.
+        if state.pid.is_empty() {
+            if kind == "codex" {
+                match codex::detached_codex_in(
+                    host,
+                    &env.tmux,
+                    Some(&env.codex_home),
+                    session_id,
+                    Some(cwd),
+                )? {
+                    Some((resolved, identity)) => {
+                        routed = Some(resolved);
+                        identity
+                    }
+                    None => return Ok(None),
+                }
+            } else {
+                return Ok(None);
+            }
+        } else {
+            let pane_pid = process::py_int(&state.pid)?;
+            // A shared Codex app-server's inherited TMUX_PANE does not identify its client: the title does.
+            match process::owner(host, kind, pane_pid, &state.tty, explicit_pid, None, None)? {
+                Some(identity) => identity,
+                None if kind == "codex" => match codex::detached_codex_in(
+                    host,
+                    &env.tmux,
+                    Some(&env.codex_home),
+                    session_id,
+                    Some(cwd),
+                )? {
+                    Some((resolved, identity)) => {
+                        routed = Some(resolved);
+                        identity
+                    }
+                    None => return Ok(None),
+                },
+                None => return Ok(None),
+            }
+        }
+    };
+    let routed_detached = routed.is_some();
     let pane = routed.as_deref().unwrap_or(pane);
     let mut metadata = Map::new();
     metadata.insert("kind".into(), kind.into());
@@ -270,7 +366,14 @@ fn run_at(
     metadata.insert("cwd".into(), cwd.into());
     metadata.insert("birth".into(), birth.into());
     if kind == "codex" {
-        codex::codex_event(host, &env.tmux, pane, payload, &Value::Object(metadata))?;
+        codex::codex_event_with(
+            host,
+            &env.tmux,
+            pane,
+            payload,
+            &Value::Object(metadata),
+            routed_detached,
+        )?;
         return Ok(None);
     }
     if kind == "claude"

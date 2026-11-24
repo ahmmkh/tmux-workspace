@@ -8,6 +8,7 @@ use crate::anonymize::Clean;
 pub enum Kind {
     Bug,
     Idea,
+    Feedback,
 }
 
 /// The longest link, in bytes, that GitHub and the browsers take.
@@ -62,6 +63,7 @@ impl Kind {
         match self {
             Kind::Bug => "bug.yml",
             Kind::Idea => "idea.yml",
+            Kind::Feedback => "feedback.yml",
         }
     }
 
@@ -70,6 +72,16 @@ impl Kind {
         match self {
             Kind::Bug => "[Bug]: ",
             Kind::Idea => "[Idea]: ",
+            Kind::Feedback => "[Feedback]: ",
+        }
+    }
+
+    /// Subcommand name for usage messages.
+    pub fn command_name(self) -> &'static str {
+        match self {
+            Kind::Bug => "bug",
+            Kind::Idea => "idea",
+            Kind::Feedback => "feedback",
         }
     }
 }

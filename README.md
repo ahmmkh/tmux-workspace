@@ -13,9 +13,9 @@
 
 </div>
 
-You run coding agents in several projects at once: Claude Code in one, Codex in another, omp in a
-third. tmux-workspace gives each project its own workspace, shows at a glance which agent needs
-you, and brings everything back after a reboot.
+You run coding agents in several projects at once: Claude Code in one, Codex in another, omp or
+Antigravity CLI (`agy`) in a third. tmux-workspace gives each project its own workspace, shows at a
+glance which agent needs you, and brings everything back after a reboot.
 
 ## Features
 
@@ -28,8 +28,8 @@ you, and brings everything back after a reboot.
   preview. Jump, filter, park, rename or close from the keyboard.
 - **Parking.** `Ctrl+a !` hides a pane while it keeps running; `Ctrl+a u` brings it back.
 - **Reboot recovery.** A snapshot every 5 minutes. After a reboot, `work` rebuilds workspaces,
-  tabs, layouts and labels, and reopens Claude Code, Codex, omp and Neovim sessions by their exact
-  id, never a guess.
+  tabs, layouts and labels, and reopens Claude Code, Codex, omp, Antigravity CLI (`agy`) and Neovim
+  sessions by their exact id, never a guess.
 - **Clipboard everywhere.** Copy mode yanks to the system clipboard on macOS, Wayland and X11, and
   over SSH through OSC 52.
 
@@ -50,8 +50,8 @@ The installer downloads the release archive for your machine and checks it again
 terminal it then asks what to set up:
 
 ```text
-tmux-workspace 2.1.0 installer
-macOS 27 arm64 · zsh · brew · found: tmux 3.5a, git, python3 3.13
+tmux-workspace 2.2.0 installer
+macOS 27 arm64 · zsh · brew · found: tmux 3.5a, git
 
 What should I set up?   ↑↓ move · space toggle · enter install · q quit
 
@@ -73,7 +73,7 @@ The agent rows go on and off together.
 Projects folder [~/Projects]: ~/code
   ✓ fzf                   brew install fzf
   ✓ zoxide                brew install zoxide
-  ✓ unpack                tmux-workspace 2.1.0 to ~/.local/share/tmux-workspace
+  ✓ unpack                tmux-workspace 2.2.0 to ~/.local/share/tmux-workspace
   ✓ tmux-workspace        ~/.local/bin/tmux-workspace
   …
 ```
@@ -101,7 +101,7 @@ binaries are static, so any distribution works. Options go after `bash -s --`, a
 release other than the latest:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.sh | bash -s -- --version v2.1.0 --agents
+curl -fsSL https://raw.githubusercontent.com/ahmmkh/tmux-workspace/main/install.sh | bash -s -- --version v2.2.0 --agents
 ```
 
 `readlink ~/.local/share/tmux-workspace/current` names the installed version. On any other platform
@@ -112,7 +112,7 @@ below.
 |---|---|
 | `--deps` | Install missing tmux, fzf and zoxide with brew, apt, dnf, pacman, apk or zypper |
 | `--projects DIR` | Use `DIR` as the projects folder without asking |
-| `--agents` | Also register the Claude Code, Codex, omp and Neovim integrations |
+| `--agents` | Also register the Claude Code, Codex, omp, Antigravity CLI and Neovim integrations |
 | `--version vX.Y.Z` | Install that release instead of the latest (release installs) |
 | `--yes` | Replace an existing `~/.tmux.conf` (it is backed up first) |
 | `--no-shell`, `--no-tmux-conf` | Leave your shell startup files, or `~/.tmux.conf`, alone |
@@ -155,9 +155,9 @@ tests on every platform below.
 On Alpine, agent status and snapshots need procps: they read processes with its `ps`, and BusyBox's
 lacks the options they use. `install.sh --deps` installs it.
 
-**Python 3.9 or newer** is needed only for the dashboard (`Ctrl+a A`), the AI tools (`Ctrl+a a`) and
-the clean-up (`Ctrl+a C`), until they are ported to Rust. Without it the installer warns, everything
-else works, and those three commands say `needs python3 3.9+ until it is ported`.
+Every shipped command — including the dashboard (`Ctrl+a A`), AI tools (`Ctrl+a a`) and terminal
+clean-up (`Ctrl+a C`) — runs natively in the single static Rust binary with zero Python runtime
+dependency.
 
 Ubuntu 22.04 ships tmux 3.2, which is too old. Any login shell works in panes (zsh, bash, fish, nu,
 xonsh, …); tmux-workspace runs its own commands with `/bin/sh`. Set `TMUX_WORKSPACE_SHELL` to use a
@@ -206,6 +206,7 @@ Each agent reports its own status through its hooks. Nothing stores your prompts
 | Claude Code | Hooks and a status line in `~/.claude/settings.json` (an existing status line is kept) |
 | Codex | Hooks in `~/.codex/hooks.json`; review them with `/hooks` in Codex |
 | omp | The extension `~/.omp/agent/extensions/tmux-workspace.ts` |
+| Antigravity CLI (`agy`) | `title` hook in `~/.gemini/antigravity-cli/settings.json` (an existing custom title is kept) |
 | Neovim | `lua/custom/tmux_workspace.lua`; add `require('custom.tmux_workspace').setup()` to `init.lua` |
 
 The hooks run `tmux-workspace agent-hook`, which finds `tmux` and `lsof` on your `PATH`. Only
@@ -215,10 +216,10 @@ Restart running agents afterwards. `tmux-workspace integrations install|uninstal
 
 ## Performance
 
-The paths that run all the time are a Rust binary. Python spends about 37 ms starting before it does
-anything, and a new pane, a Claude Code tool call and the status line each wait for that. `make bench`
-times them against the Python of v1, which stays in `legacy/` for the purpose: hyperfine, 30 runs
-after 3 warm-ups, the mean, on a scratch tmux server with 5 panes in 2 sessions.
+Every command runs in a single native Rust binary. Compared with the original v1 Python
+implementation (~37 ms startup overhead before doing any work), hot paths stay well below target:
+`make bench` times them with hyperfine (30 runs after 3 warm-ups, mean, on a scratch tmux server
+with 5 panes in 2 sessions).
 
 | Path | Runs when | v1 (Python) | 2.0 (Rust) | Target |
 |---|---|---|---|---|
@@ -253,22 +254,28 @@ shared Linux runner on every run, for information only.
 | `projects_dir` | Where `work NAME` opens and creates folders. `tmux-workspace setup` changes it; `TMUX_WORKSPACE_PROJECTS` overrides it. |
 | `model` | The model for the optional AI tools on `Ctrl+a a`: a Jev model on OpenRouter (`typesafe/jev-…`). Empty turns them off. |
 | `doppler` | Optional `{"project", "config", "scope"}` to fetch `OPENROUTER_API_KEY` with Doppler; otherwise set the variable. |
+| `auto_update` | Optional boolean (`false` by default). Set with `work update --auto on\|off` to enable daily background updates. |
 
 Snapshots and backups live in `~/.local/state/tmux-workspace`, readable only by you.
 
 ## Update
 
 ```sh
-work update            # or: tmux-workspace update
-work update --check    # only say whether there is a newer release
+work update                # or: tmux-workspace update
+work update --check        # only say whether there is a newer release
+work update --auto on      # opt in to quiet daily background updates
+work update --auto off     # turn off background updates (default)
+work update --auto status  # show whether auto-update is enabled
 ```
 
 An install from a release downloads the newer one, checks it against the release's `SHA256SUMS`,
 and keeps the choices you made: the shell lines and `~/.tmux.conf` stay as they are, the agent
 integrations are registered again if you had them, and the version before stays next to it. A clone
 updates with a fast-forward `git pull` and builds or downloads the new binary first; it leaves a
-clone with local changes, or on another branch than the default, alone. Nothing checks for updates in
-the background. A workspace named `update` opens with `work ./update`.
+clone with local changes, or on another branch than the default, alone. Background updates are off
+by default; enable them with `work update --auto on` to check once every 24 hours during autosave
+and show a quiet tmux status notice only when a newer release is installed. A workspace named
+`update` opens with `work ./update`.
 
 ## Uninstall
 
@@ -304,8 +311,6 @@ Your snapshots and `~/.config/tmux-workspace` stay, and so does the folder `~/.l
 - **No sound on Linux:** install PipeWire (`pw-play`) or PulseAudio (`paplay`) and the freedesktop
   sound theme. `Ctrl+a M` mutes sounds.
 - **Your old `~/.tmux.conf` is still active:** the installer kept it. Rerun with `--yes`.
-- **`Ctrl+a A`, `a` or `C` say `needs python3 3.9+`:** the dashboard, the AI tools and the clean-up
-  still run on Python. Install Python 3.9 or newer; nothing else needs it.
 - **`doctor` says `tmux-workspace on PATH` is not the installed binary:** another copy comes first
   on your `PATH`. Remove it, or put `~/.local/bin` first.
 - **New panes do not start your shell after a `git pull` of a clone:** `bin/tmux-workspace` is built,
@@ -314,24 +319,25 @@ Your snapshots and `~/.config/tmux-workspace` stay, and so does the folder `~/.l
 ## Contributing
 
 ```sh
-make lint test        # shellcheck, clippy, rustfmt, actionlint (when installed), a Python 3.9 compile check; the cargo tests, then the Python tests
-make bench            # time the hot paths against the Python of v1 (needs hyperfine)
+make lint test        # shellcheck, clippy, rustfmt, actionlint (when installed); cargo tests + installer/helper tests
+make bench            # time the hot paths against targets (needs hyperfine)
 make test-install     # install in Ubuntu, Debian, Fedora, Arch and Alpine containers (Docker)
 make dist             # build the release archive of this machine into dist/
 make screenshots      # rebuild docs/images, including the first-run animation, from a demo server
 ```
 
 Tests never touch your tmux server: each one runs on its own socket with a temporary state
-directory. The core is Rust (`src/`, one binary, no dependencies besides `serde_json`, `libc` and
-`rusqlite`). `legacy/` holds the Python that the dashboard, the AI tools and the clean-up still run;
-it is standard library only. The installer runs on bash 3.2. Cutting a release and reading the
-install and traffic numbers are in [docs/RELEASING.md](docs/RELEASING.md).
+directory. Everything that runs at runtime is a single Rust binary (`src/`); the installer runs on
+bash 3.2. Cutting a release and reading the install and traffic numbers are in
+[docs/RELEASING.md](docs/RELEASING.md).
 
-## Reporting a bug or an idea
+## Reporting a bug, idea, or feedback
 
 ```sh
-work bug       # also Ctrl+a F in tmux
+work report      # also Ctrl+a F in tmux (asks whether bug, idea, or feedback)
+work bug
 work idea
+work feedback
 work bug --print
 ```
 

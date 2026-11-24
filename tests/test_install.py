@@ -28,8 +28,9 @@ import unittest
 import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'legacy' / 'lib'))
-import paths  # noqa: E402
+_TMUX_MIN = re.search(r'pub const TMUX_MIN:\s*\(u32,\s*u32\)\s*=\s*\((\d+),\s*(\d+)\);',
+                      (ROOT / 'src' / 'paths.rs').read_text()).groups()
+TMUX_MIN = (int(_TMUX_MIN[0]), int(_TMUX_MIN[1]))
 
 CORE = ['uname', 'id', 'dirname', 'basename', 'readlink', 'mkdir', 'ln', 'mv', 'cp', 'chmod', 'grep', 'awk',
         'sed', 'tr', 'date', 'find', 'sort', 'mktemp', 'cat', 'rm', 'env', 'bash', 'sh', 'ls', 'head', 'base64',
@@ -102,20 +103,21 @@ class Package(unittest.TestCase):
         names = set(members)
         self.assertTrue(all(name == top or name.startswith(top + '/') for name in names), sorted(names))
         for path in ['bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'tmux.conf', 'agent-status.conf',
-                     'sesh.toml', 'shell/work.sh', 'shell/work.fish', 'shell.zsh', 'integrations/agent-hook.py',
-                     'integrations/claude-hooks.json', 'integrations/codex-hooks.json',
-                     'integrations/tmux-workspace.ts', 'legacy/bin/tmux-workspace', 'legacy/lib/paths.py',
-                     'legacy/integrations/agent-hook.py', 'config.example.json', 'install.sh', 'README.md',
+                     'sesh.toml', 'shell/work.sh', 'shell/work.fish', 'shell.zsh',
+                     'integrations/agy-settings.json', 'integrations/claude-hooks.json',
+                     'integrations/codex-hooks.json', 'integrations/tmux-workspace.ts',
+                     'config.example.json', 'install.sh', 'README.md',
                      'LICENSE', 'CHANGELOG.md', 'WORKSPACE_GUIDE.md', 'VERSION']:
             self.assertIn(f'{top}/{path}', names)
-        self.assertFalse([name for name in names if '__pycache__' in name or name.endswith('.pyc')])
+        self.assertFalse([name for name in names if name.endswith('.py') or '__pycache__' in name or name.endswith('.pyc')],
+                         'release archive must ship zero Python files')
         self.assertEqual(version, (VERSION + '\n').encode())
         self.assertEqual(binary, BINARY.read_bytes())
         for path in ['bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'install.sh']:
             self.assertTrue(members[f'{top}/{path}'].mode & 0o111, path)
 
     def test_modes_do_not_depend_on_the_umask_of_the_build(self):
-        executables = {'bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'install.sh', 'legacy/bin/tmux-workspace'}
+        executables = {'bin/tmux-workspace', 'bin/tw-clip', 'bin/tw-sound', 'install.sh'}
         with tarfile.open(release_dist() / ARCHIVE) as tar:
             for member in tar.getmembers():
                 path = member.name.split('/', 1)[1] if '/' in member.name.rstrip('/') else ''
@@ -487,8 +489,8 @@ class Installer(unittest.TestCase):
         floor = re.search(r'^rust-version = "([^"]+)"', (ROOT / 'Cargo.toml').read_text(), re.M).group(1)
         self.assertIn(f'RUST_MIN={floor}\n', (ROOT / 'install.sh').read_text())
 
-    def test_floor_matches_python(self):
-        self.assertIn('TMUX_MIN=%d.%d\n' % paths.TMUX_MIN, (ROOT / 'install.sh').read_text())
+    def test_floor_matches_rust(self):
+        self.assertIn('TMUX_MIN=%d.%d\n' % TMUX_MIN, (ROOT / 'install.sh').read_text())
 
     def test_unknown_flag_exits_2(self):
         self.assertEqual(self.install('--frobnicate', check=False).returncode, 2)
@@ -810,25 +812,14 @@ class Installer(unittest.TestCase):
         self.assertIn('tmux-workspace removed', out)
         self.assertFalse(os.path.lexists(self.home / '.local/bin/tmux-workspace'))
 
-    def test_python_is_optional(self):
-        (self.bin / 'python3').unlink()
-        out = self.install('--yes').stdout
-        self.assertIn('python3 3.9+ not found: dash, ai and cleanup need it until they are ported', out)
-        self.assertIn('tmux-workspace installed', out)
-
-    def test_an_old_python_only_warns(self):
-        (self.bin / 'python3').unlink()
-        self.stub('python3', 'echo 3.8')
-        out = self.install('--yes').stdout
-        self.assertIn('python3 3.9+ not found', out)
-        self.assertIn('tmux-workspace installed', out)
-
-    def test_deps_no_longer_installs_python(self):
+    def test_installs_cleanly_without_python(self):
         (self.bin / 'python3').unlink()
         brew = self.work / 'brew.log'
         self.stub('brew', f'echo "$*" >> {brew}')
-        self.install('--deps', '--yes')
-        self.assertNotIn('python', brew.read_text())
+        out = self.install('--deps', '--yes').stdout
+        self.assertNotIn('python', out.lower())
+        self.assertNotIn('python', brew.read_text() if brew.exists() else '')
+        self.assertIn('tmux-workspace installed', out)
 
     # -- A clone: the binary is given, built with cargo, or downloaded for the version in Cargo.toml. -------
 
@@ -1198,7 +1189,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(topic.returncode, 0, topic.stderr)
         self.assertEqual(list(self.tmp.iterdir()), [])
 
-    def test_v1_hook_entries_keep_working_after_the_upgrade(self):
+    def test_v1_hook_entries_migrate_to_rust_binary_on_upgrade(self):
         (self.home / '.claude').mkdir()
         upstream, _ = self.v1_install('--agents')
         settings = self.home / '.claude/settings.json'
@@ -1206,14 +1197,14 @@ class Installer(unittest.TestCase):
         self.assertIn('agent-hook.py claude-status', status_line)
         self.commit(upstream, self.v2(VERSION), 'the Rust port')
         self.piped('--yes', TMUX_WORKSPACE_DIST=str(release_dist()), **self.clone_env())
-        # The v1 entry, unchanged without --agents, now runs the shim, which runs the binary (the shim
-        # itself is tested in tests/cli.rs). Outside a Claude pane the hook says nothing and succeeds.
-        self.assertEqual(json.loads(settings.read_text())['statusLine']['command'], status_line)
-        helper = self.home / '.local/lib/tmux-workspace/agent-hook.py'
-        self.assertEqual(helper.resolve(), self.share / 'integrations/agent-hook.py')
-        self.assertEqual(helper.read_text(), (ROOT / 'integrations/agent-hook.py').read_text())
+        # Piped v1 -> v2 upgrade automatically migrates ALREADY-installed hooks to the Rust binary
+        # and removes the retired ~/.local/lib/tmux-workspace/agent-hook.py symlink.
+        migrated = json.loads(settings.read_text())['statusLine']['command']
+        self.assertNotIn('agent-hook.py', migrated)
+        self.assertIn('agent-hook claude-status', migrated)
+        self.assertFalse(os.path.lexists(self.home / '.local/lib/tmux-workspace/agent-hook.py'))
         self.assertEqual((self.home / '.local/bin/tmux-workspace').resolve().read_bytes(), BINARY.read_bytes())
-        hook = subprocess.run(['/bin/sh', '-c', status_line], input='{"session_id": "0123456789abcdef"}',
+        hook = subprocess.run(['/bin/sh', '-c', migrated], input='{"session_id": "0123456789abcdef"}',
                               env=self.env(), capture_output=True, text=True, timeout=30)
         self.assertEqual((hook.returncode, hook.stdout, hook.stderr), (0, '', ''))
 
@@ -1377,7 +1368,7 @@ class Installer(unittest.TestCase):
         term.expect(f'tmux-workspace {VERSION} installer', timeout=30)
         term.expect('What should I set up?')
         term.expect('sesh')
-        self.assertRegex(term.line('found:'), r' · zsh · brew · found: tmux 3\.5a, git, python3 3\.\d+$')
+        self.assertRegex(term.line('found:'), r' · zsh · brew · found: tmux 3\.5a, git$')
         rows = [term.line(name) for name in ('] tmux-workspace', '] tmux config', '] work command', '] fzf',
                                              '] zoxide', '] Claude Code status', '] lazygit', '] sesh')]
         self.assertRegex(rows[0], r'^  \[■\] tmux-workspace +~/\.local/bin/tmux-workspace$')
@@ -1782,26 +1773,12 @@ class Installer(unittest.TestCase):
         term.expect('] iTerm2 profile' if platform.system() == 'Darwin' else '] work command')
         self.assertIn('· zsh · no package manager · found: tmux 3.5a, git', term.text)
         # The tools and where to get them, wrapped to the width of the terminal (120 columns here).
-        self.assertIn('not found: fzf (github.com/junegunn/fzf), zoxide (github.com/ajeetdsouza/zoxide), '
-                      'python3 (python.org),\n'
+        self.assertIn('not found: fzf (github.com/junegunn/fzf), zoxide (github.com/ajeetdsouza/zoxide),\n'
                       '           lazygit (github.com/jesseduffield/lazygit), sesh (github.com/joshmedeski/sesh)\n',
                       term.text)
         self.assertNotIn('] fzf', term.text)
         term.press('q')
         self.assertEqual(term.finish(), 0, term.text)
-
-    def test_a_missing_python_is_a_recommended_row(self):
-        brew = self.brew()
-        (self.bin / 'python3').unlink()
-        self.projects_set()
-        term = self.guided()
-        term.expect('What should I set up?', timeout=30)
-        term.expect('sesh')
-        self.assertRegex(term.line('] python3'), r'^  \[x\] python3 3\.9\+ +dash, ai and cleanup need it · brew install python3$')
-        term.press('\r')
-        self.assertEqual(term.finish(), 0, term.text)
-        self.assertIn('python3', self.installed(brew))
-        self.assertIn('Note       dash, ai and cleanup need python3 3.9+', term.text, 'the stub installed nothing')
 
     def test_a_narrow_terminal_gets_lines_that_fit(self):
         self.machine()

@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result, fail};
 use crate::process::{Output, Spawn, spawn, which};
+use crate::text::py_splitlines;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -247,37 +248,6 @@ fn row(line: &str, names: &[&str]) -> Result<Fields> {
         fields.set(name, value);
     }
     Ok(fields)
-}
-
-/// Python's `str.splitlines()`, which breaks on more than `\n`.
-fn py_splitlines(text: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if matches!(
-            c,
-            '\n' | '\r'
-                | '\x0b'
-                | '\x0c'
-                | '\x1c'
-                | '\x1d'
-                | '\x1e'
-                | '\u{85}'
-                | '\u{2028}'
-                | '\u{2029}'
-        ) {
-            lines.push(&text[start..i]);
-            start = i + c.len_utf8();
-            if c == '\r' && chars.next_if(|&(_, next)| next == '\n').is_some() {
-                start += 1;
-            }
-        }
-    }
-    if start < text.len() {
-        lines.push(&text[start..]);
-    }
-    lines
 }
 
 #[cfg(test)]

@@ -388,17 +388,13 @@ fn choose_park_needs_a_parked_pane_before_it_asks() {
 // ---------------------------------------------------------------------------------------------
 // help-topic and help without a terminal
 
-/// What scripts/gen_help.py prints: the Python's answer.
-fn python(args: &[&str]) -> String {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/gen_help.py");
-    let out = Command::new("python3")
-        .arg("-I")
-        .arg(script)
-        .args(args)
-        .output()
-        .expect("run python3");
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    text(&out.stdout)
+/// List of `id\tdisplay` lines from `help::TOPICS`.
+fn expected_topic_list() -> String {
+    tmux_workspace::help::TOPICS
+        .iter()
+        .map(|t| format!("{}\t{}", t.id, t.display))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Make `command` a run outside tmux whose `tmux`, were it to run one, finds no server: the one in `bin`
@@ -421,25 +417,22 @@ fn plain(home: &Path) -> Command {
     command
 }
 
-fn topic_ids() -> Vec<String> {
-    python(&["--list"])
-        .lines()
-        .map(|line| line.split('\t').next().unwrap().to_string())
-        .collect()
-}
-
 #[test]
-fn every_help_topic_matches_python() {
+fn every_help_topic_prints_its_title_and_text() {
     let home = TempDir::new();
-    let ids = topic_ids();
-    assert_eq!(ids.len(), 34);
-    for id in &ids {
+    assert_eq!(tmux_workspace::help::TOPICS.len(), 34);
+    for topic in tmux_workspace::help::TOPICS {
         let out = plain(home.path())
-            .args(["help-topic", id])
+            .args(["help-topic", topic.id])
             .output()
             .unwrap();
-        assert_eq!(text(&out.stderr), "", "{id}");
-        assert_eq!(text(&out.stdout), python(&["--print", id]), "{id}");
+        assert_eq!(text(&out.stderr), "", "{}", topic.id);
+        assert_eq!(
+            text(&out.stdout),
+            tmux_workspace::help::help_topic(topic.id),
+            "{}",
+            topic.id
+        );
     }
 }
 
@@ -463,13 +456,14 @@ fn unknown_help_topic_says_so() {
 #[test]
 fn help_without_a_terminal_or_guide_prints_every_topic() {
     let home = TempDir::new();
-    let ids = topic_ids();
-    let mut args = vec!["--print"];
-    args.extend(ids.iter().map(String::as_str));
+    let expected: String = tmux_workspace::help::TOPICS
+        .iter()
+        .map(|t| tmux_workspace::help::help_topic(t.id))
+        .collect();
     let out = plain(home.path()).arg("help").output().unwrap();
     assert_eq!(text(&out.stderr), "");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(text(&out.stdout), python(&args));
+    assert_eq!(text(&out.stdout), expected);
 }
 
 #[test]
@@ -522,7 +516,7 @@ fn help_on_a_terminal_lists_the_topics_in_fzf_and_pages_the_chosen_one() {
     fakes.fzf();
     fakes.less();
     let home = TempDir::new();
-    let neovim = python(&["--list"])
+    let neovim = expected_topic_list()
         .lines()
         .find(|line| line.starts_with("topic-neovim\t"))
         .unwrap()
@@ -530,7 +524,7 @@ fn help_on_a_terminal_lists_the_topics_in_fzf_and_pages_the_chosen_one() {
     let (status, stderr, shown) = on_a_terminal(fakes.help(home.path(), &neovim), "");
     assert_eq!((status, stderr.as_str(), shown.as_str()), (0, "", ""));
 
-    // fzf got every topic, an id and its display text on a line, and the options of the Python.
+    // fzf got every topic, an id and its display text on a line.
     assert_eq!(fakes.calls("fzf"), 2, "it asks again after the pager");
     assert_eq!(
         fakes.args("fzf", 1),
@@ -547,10 +541,7 @@ fn help_on_a_terminal_lists_the_topics_in_fzf_and_pages_the_chosen_one() {
             "--border=rounded".into(),
         ]
     );
-    assert_eq!(
-        fakes.input("fzf", 1).unwrap(),
-        python(&["--list"]).trim_end_matches('\n')
-    );
+    assert_eq!(fakes.input("fzf", 1).unwrap(), expected_topic_list());
     // The pager got the topic and a hint, and no file name.
     assert_eq!(fakes.calls("less"), 1);
     assert_eq!(
@@ -559,7 +550,8 @@ fn help_on_a_terminal_lists_the_topics_in_fzf_and_pages_the_chosen_one() {
     );
     assert_eq!(
         fakes.input("less", 1).unwrap(),
-        python(&["--print", "topic-neovim"]) + "[Press 'q' or 'Enter' to return to search...]"
+        tmux_workspace::help::help_topic("topic-neovim")
+            + "[Press 'q' or 'Enter' to return to search...]"
     );
 }
 
@@ -636,8 +628,8 @@ fn without_a_pager_the_topic_is_printed_until_enter() {
     // Enter is typed ahead.
     let (status, _, shown) = on_a_terminal(fakes.help(home.path(), "topic-neovim\tx"), "\n");
     assert_eq!(status, 0);
-    let expected =
-        python(&["--print", "topic-neovim"]) + "[Press 'q' or 'Enter' to return to search...]\n";
+    let expected = tmux_workspace::help::help_topic("topic-neovim")
+        + "[Press 'q' or 'Enter' to return to search...]\n";
     assert_eq!(shown, expected);
     assert_eq!(fakes.calls("fzf"), 2);
 }
@@ -668,10 +660,11 @@ fn without_fzf_or_guide_on_a_terminal_every_topic_is_printed() {
     let home = TempDir::new();
     let (status, _, shown) = on_a_terminal(fakes.help(home.path(), ""), "");
     assert_eq!(status, 0);
-    let ids = topic_ids();
-    let mut args = vec!["--print"];
-    args.extend(ids.iter().map(String::as_str));
-    assert_eq!(shown, python(&args));
+    let expected: String = tmux_workspace::help::TOPICS
+        .iter()
+        .map(|t| tmux_workspace::help::help_topic(t.id))
+        .collect();
+    assert_eq!(shown, expected);
     assert_eq!(fakes.calls("less"), 0);
 }
 

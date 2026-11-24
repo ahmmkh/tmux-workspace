@@ -38,8 +38,6 @@ jobs:
       - run: cargo --version
       - run: make lint test
       # Report only: a runner is a shared machine, so its numbers vary and a slow run is no failure.
-      # The Python column of the claude-status row says n/a on Linux: agent-hook.py of v1 only looks for
-      # tmux in /opt/homebrew/bin, so it publishes nothing there.
       - name: Bench (report only)
         if: runner.os == 'Linux'
         continue-on-error: true
@@ -56,20 +54,6 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
           cat "$RUNNER_TEMP/bench.md"
           if [ "$status" != 0 ]; then cat "$RUNNER_TEMP/bench.log"; fi
-
-  python39:
-    # macOS still ships Python 3.9 as /usr/bin/python3. setup-python has no 3.9 for new
-    # runners (it is end of life), so the job runs in the official image instead.
-    name: Python 3.9 runtime
-    runs-on: ubuntu-latest
-    container: python:3.9-slim
-    steps:
-      - uses: actions/checkout@v5
-      - name: Runtime code compiles on Python 3.9
-        run: for f in legacy/bin/tmux-workspace $(find legacy integrations scripts -name '*.py'); do python -m py_compile "$f"; done
-      # The units that need neither the binary nor tmux. The other suites use unittest features of
-      # Python 3.11 (enterContext) or a tmux server, and run in the Tests job.
-      - run: python -m unittest tests.test_workspace_model tests.test_dashboard tests.test_ansi2svg tests.test_ai_boundaries tests.test_history_ai tests.test_stats
 
   tmux-floor:
     # The oldest and the newest tmux the project supports, from the distributions' own packages.

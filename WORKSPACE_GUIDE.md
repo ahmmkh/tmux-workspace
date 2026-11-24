@@ -262,7 +262,7 @@ When you run `work` after a reboot:
    - **Other Programs** (e.g. servers, logs, scripts): Restored as clean shells in their original directory with their label and scrollback; programs are not blindly re-executed.
 
 ### Ordinary Shell Commands
-You do not need a special launcher. You can type `claude`, `codex`, `omp`, or `nvim` directly in any shell pane. Built-in lifecycle hooks and native process tracking detect tool startup, thread changes, and exits automatically.
+You do not need a special launcher. You can type `claude`, `codex`, `omp`, `agy`, or `nvim` directly in any shell pane. Built-in lifecycle hooks and native process tracking detect tool startup, thread changes, and exits automatically.
 
 ---
 
@@ -277,13 +277,12 @@ or from your clone, so there are no copies. Edit them in a clone: a release inst
 |---|---|
 | `tmux.conf` | `~/.tmux.conf` symlink; options, keybindings and status |
 | `agent-status.conf` | `~/.config/tmux-workspace/agent-status.conf` symlink, loaded by `tmux.conf`. It holds the formats and hooks of the agent status marks. |
-| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; the Rust binary: pane start, agent hooks, recovery, the pickers, `help`, `doctor`, `update`. `dash`, `ai` and `cleanup` hand over to `legacy/`. A release carries it; in a clone `install.sh` builds it (`make build` makes a debug build), and git ignores it. |
+| `bin/tmux-workspace` | `~/.local/bin/tmux-workspace` symlink; the single Rust binary for every command: pane start, agent hooks, recovery, pickers, `dash`, `ai`, `cleanup`, `help`, `doctor`, `update`, `bug`/`idea`/`feedback`/`report`. A release carries it; in a clone `install.sh` builds it (`make build` makes a debug build), and git ignores it. |
 | `bin/tw-clip`, `bin/tw-sound` | `~/.local/bin` symlinks; clipboard and agent sounds for macOS and Linux |
-| `legacy/` | The Python that `dash`, `ai` and `cleanup` still run on (Python 3.9+), until they are ported: `legacy/bin/tmux-workspace` and the modules in `legacy/lib/`. Nothing links to it; the binary starts it. |
-| `config.example.json` | Template for `~/.config/tmux-workspace/config.json`: projects folder, model, Doppler; no API key |
+| `config.example.json` | Template for `~/.config/tmux-workspace/config.json`: projects folder, model, Doppler, optional `auto_update`; no API key |
 | `shell/work.sh`, `shell/work.fish` | The `work` command; `install.sh` sources it from `~/.zshrc`/`~/.bashrc` or links it for fish. `shell.zsh` stays for older `.zshrc` lines. |
 | `sesh.toml` | `~/.config/sesh/sesh.toml` symlink when sesh is installed |
-| `integrations/agent-hook.py` | A shim for the hook entries that 1.x registered, which ran it through `~/.local/lib/tmux-workspace/agent-hook.py`: it hands the call to `tmux-workspace agent-hook`. `install.sh --agents` replaces those entries and removes the link. The hook, which publishes pane identities and reports Claude Code and Codex status, is part of the binary. |
+| `integrations/agy-settings.json` | Merged into `~/.gemini/antigravity-cli/settings.json` (`title` hook) for Antigravity CLI status and conversation recovery |
 | `integrations/tmux-workspace.ts` | `~/.omp/agent/extensions/tmux-workspace.ts` symlink. The omp extension publishes the pane identity and reports the agent status of omp. |
 | `integrations/tmux_workspace.lua` | `~/.config/nvim/lua/custom/tmux_workspace.lua` symlink |
 
@@ -613,30 +612,20 @@ A test that needs tmux starts a scratch server on its own socket that never load
 workspaces. `make test` leaves `bin/tmux-workspace` as it is: it tests the debug build in
 `target/`.
 
-How the agent hook maps the state of Claude Code, Codex and omp to a status is tested in
-Rust (`tests/hook_tmux.rs` and the unit tests in `src/hook/`), and so are the roll-up and the
-rows of the pickers (`src/model.rs`, `src/pick.rs`, `tests/pickers.rs`). The marks themselves,
-from `agent-status.conf`, are checked by `tests/test_agent_status_tmux.py`. Run it alone with
+How the agent hook maps the state of Claude Code, Codex, omp and Antigravity CLI (`agy`) to a
+status is tested in Rust (`tests/hook_tmux.rs` and unit tests in `src/agent/` and `src/hook/`),
+and so are the roll-up, dashboard, cleanup, AI tools, and pickers (`src/model.rs`, `src/dash/`,
+`src/cleanup.rs`, `src/ai/`, `src/pick/`, `tests/{dash,cleanup,ai,pickers}.rs`). The marks
+themselves, from `agent-status.conf`, are checked by `tests/agent_status.rs`. Run it alone with
 this command:
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_agent_status_tmux.py'
+cargo test --features testing --test agent_status
 ```
 
-The opt-in live suite uses the configured OpenRouter key and consumes API credit.
-It sends synthetic fixtures only, not current pane output or real snapshot history:
-
-```sh
-RUN_LIVE_JEV=1 python3 tests/live_jev.py -v
-```
-
-The live suite covers 32 scenarios: independent attention conditions and negative
-cases, English/Arabic input, prompt injection, semantic ranking, source-backed
-shortcut/skill selection, and context-based names or abstention. These are
-regression examples, not a guarantee of model accuracy on arbitrary terminal logs.
-The deterministic suite covers malformed/provider failures, request bounds,
-permission changes, history filesystem boundaries, and stale confirmed actions.
-Interactive behavior still requires real tmux/fzf checks.
+The deterministic Rust suite (`cargo test --features testing --test ai`) covers malformed/provider
+failures, request bounds, permission changes, history filesystem boundaries, and stale confirmed
+actions. Interactive behavior still requires real tmux/fzf checks.
 
 ### Change record
 
@@ -725,9 +714,8 @@ Each picker measurement used 15 samples; p95 uses the nearest-rank method.
 | Tab picker | 170.6 / 193.9 ms | 25.1 / 40.9 ms |
 | Shell initialization, inherited Node version | 1,038 ms median | 437 ms median |
 
-Run `python3 tests/benchmark_workspace.py` from this project to repeat the picker
-measurement without displaying a picker or switching workspaces. Measurements vary
-with other workloads. The structural regression tests do not depend on wall-clock time.
+Run `make bench` from this project to repeat the hot-path benchmark on a scratch server.
+Measurements vary with other workloads. The structural regression tests do not depend on wall-clock time.
 
 For W tabs, tab-picker subprocess cost changed from W + 3 tmux reads to 2. The data
 still takes O(P) work for P panes; it is fetched together rather than through W child

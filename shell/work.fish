@@ -8,7 +8,7 @@ function work --description 'Open, create or close a tmux workspace, update tmux
             $HOME/.local/bin/tmux-workspace kill-workspace $argv[2..-1]
         case update
             $HOME/.local/bin/tmux-workspace update $argv[2..-1]
-        case bug idea
+        case bug idea feedback report
             $HOME/.local/bin/tmux-workspace $argv
         case ./update
             # A workspace named update. After --, open takes the name as it is: a bare `open update` is
@@ -19,6 +19,10 @@ function work --description 'Open, create or close a tmux workspace, update tmux
             $HOME/.local/bin/tmux-workspace open -- bug $argv[2..-1]
         case ./idea
             $HOME/.local/bin/tmux-workspace open -- idea $argv[2..-1]
+        case ./feedback
+            $HOME/.local/bin/tmux-workspace open -- feedback $argv[2..-1]
+        case ./report
+            $HOME/.local/bin/tmux-workspace open -- report $argv[2..-1]
         case '*'
             $HOME/.local/bin/tmux-workspace open $argv
     end

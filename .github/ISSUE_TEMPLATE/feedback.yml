@@ -1,0 +1,29 @@
+name: General feedback
+description: Share feedback, rough edges, or thoughts on tmux-workspace
+title: "[Feedback]: "
+labels: [feedback]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The quickest way here is `work feedback` (or `Ctrl+a F` inside tmux). It builds the **Environment**
+        below for you, with workspace, folder, user, host, address, and key details anonymized, and asks
+        before opening this form. Nothing is sent until you press Submit.
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Feedback
+      description: What worked well, felt rough, or could be improved?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Optional workflow, agent, or setup context.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by `work feedback`. Run `work feedback --print` to see it without opening anything.
+      render: markdown
