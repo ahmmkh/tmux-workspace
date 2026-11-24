@@ -335,7 +335,7 @@ mod tests {
         );
         let calls = scripted.calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0][..2], ["list-panes", "-a"]);
+        assert_eq!(calls[0][..3], ["-u", "list-panes", "-a"]);
     }
 
     // RollUp::test_window_preview_shows_home_as_a_tilde

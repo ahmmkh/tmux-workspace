@@ -834,6 +834,26 @@ fn scratch_tmux_once_lists_every_pane() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("0:one"), "{stdout}");
     assert!(stdout.contains("1:two"), "{stdout}");
+
+    // Also works in a bare POSIX/C locale where tmux would otherwise replace \x1f with `_`.
+    let out_c = Command::new(EXE)
+        .args(["dash", "--once", "--width", "100", "--height", "30"])
+        .env("TMUX", format!("{},1,0", scratch.socket()))
+        .env("TMUX_WORKSPACE_CONFIG_DIR", scratch.home().join("config"))
+        .env("TMUX_WORKSPACE_STATE_DIR", scratch.home().join("state"))
+        .env("LC_ALL", "C")
+        .env_remove("LANG")
+        .env_remove("LC_CTYPE")
+        .output()
+        .unwrap();
+    assert!(
+        out_c.status.success(),
+        "LC_ALL=C failed: {}",
+        String::from_utf8_lossy(&out_c.stderr)
+    );
+    let stdout_c = String::from_utf8_lossy(&out_c.stdout);
+    assert!(stdout_c.contains("0:one"), "{stdout_c}");
+    assert!(stdout_c.contains("1:two"), "{stdout_c}");
 }
 
 #[test]

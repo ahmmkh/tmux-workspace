@@ -162,8 +162,14 @@ impl Tmux {
     }
 
     fn call(&self, args: &[&str]) -> Result<Output> {
+        let mut argv = self.argv(args);
+        if args.iter().any(|a| a.contains(SEP)) {
+            // In a non-UTF-8 locale (e.g. C / POSIX), tmux replaces control bytes like \x1f
+            // with `_` in format output unless `-u` forces UTF-8 mode.
+            argv.insert(1, "-u".to_string());
+        }
         spawn(&Spawn {
-            argv: self.argv(args),
+            argv,
             timeout: self.timeout,
             ..Spawn::default()
         })
