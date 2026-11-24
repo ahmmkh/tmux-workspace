@@ -1,5 +1,4 @@
-//! The help topics, generated from the Python controller's HELP_TOPICS by scripts/gen_help.py.
-//! Do not edit by hand: change the topics there and run the script again.
+//! Built-in help topics shown by `tmux-workspace help` and `tmux-workspace help-topic`.
 
 use crate::help::Topic;
 
@@ -450,11 +449,12 @@ DESCRIPTION:
     },
     Topic {
         id: r##"report-bug"##,
-        display: r##"Ctrl+a F              Report a Bug or an Idea (work bug / work idea)"##,
+        display: r##"Ctrl+a F              Report a Bug, Idea, or Feedback (work report)"##,
         title: r##"Report a Bug or an Idea"##,
-        text: r##"SHORTCUT: Ctrl+a then F (capital F), or `work bug` / `work idea` from your shell
+        text: r##"SHORTCUT: Ctrl+a then F (capital F), or `work report` / `work bug` / `work idea` / `work feedback`
 
 DESCRIPTION:
+  Asks whether you are reporting a bug, sharing an idea, or leaving feedback.
   Builds a report of your setup and, for a bug, of what the doctor and the log of
   failed commands say. It is shown in full, then you are asked before anything opens.
   A yes opens GitHub's issue form with the report filled in; you read it there and
@@ -467,10 +467,12 @@ WHAT IT LEAVES OUT:
   pane contents, environment variables, shell history or git remotes.
 
 SHELL USAGE:
+  work report           Ask whether to report a bug, idea, or feedback
   work bug              Report a bug
   work idea             Suggest an idea
+  work feedback         Share general feedback
   work bug --print      Print the report and the link; open nothing
-  work ./bug            Open a workspace named bug (likewise ./idea)
+  work ./bug            Open a workspace named bug (likewise ./idea, ./feedback, ./report)
 
 OVER SSH:
   The link is shown and the report is copied with tw-clip (OSC 52): paste it into
@@ -545,8 +547,8 @@ OMP:
 CODEX:
   Native hooks report prompts as working, approvals/questions as blocked,
   hidden completions as done, and visible completions or interrupts as idle.
-  Review the installed agent-hook.py codex entries in /hooks, then restart
-  existing Codex CLIs. Ctrl+a D opens diagnostics and shows the last event.
+  Review the installed tmux-workspace agent-hook codex entries in /hooks, then
+  restart existing Codex CLIs. Ctrl+a D opens diagnostics and shows the last event.
   Codex's separate computer-use notify command is unchanged.
 
 CLAUDE CODE:
@@ -559,28 +561,37 @@ CLAUDE CODE:
   Claude Code does not document the state file. If an update changes it,
   Claude Code panes keep their last mark or show none until the helper is
   updated.
-  A turn shorter than a second can pass without a working mark."##,
+  A turn shorter than a second can pass without a working mark.
+
+ANTIGRAVITY CLI (AGY):
+  Antigravity CLI reports its status and conversation ID via its `title`
+  command setting in ~/.gemini/antigravity-cli/settings.json. Working/tool
+  states show working, approvals/reviewing/errors show blocked, and idle
+  after a turn becomes done or idle depending on focus."##,
     },
     Topic {
         id: r##"topic-ai"##,
-        display: r##"Topic: AI Recovery    How Claude, Codex, & OMP Session Recovery Works"##,
+        display: r##"Topic: AI Recovery    How Claude, Codex, OMP, & AGY Session Recovery Works"##,
         title: r##"AI Conversation Recovery Architecture"##,
         text: r##"AI SESSION PERSISTENCE RULES:
 
 Ordinary Shell Commands:
-  You do not need a special wrapper. You can launch `claude`, `codex`, or `omp`
-  directly in any shell pane, and switch agents within the same shell.
+  You do not need a special wrapper. You can launch `claude`, `codex`, `omp`, or
+  `agy` directly in any shell pane, and switch agents within the same shell.
 
 Supported Tools:
   1. Claude Code:
      - Tracked via native hooks and statusLine.
      - Resumed via: claude --resume <exact-session-id>
   2. OpenAI Codex:
-     - Tracked via native title thread-id and open rollout/sqlite databases.
+     - Tracked via native title thread-id, hooks, and read-only sqlite lookup.
      - Resumed via: codex resume <exact-thread-id>
   3. Oh My Pi (omp):
      - Tracked via global extension on session_start/switch/branch/tree.
      - Resumed via: omp --resume <exact-session-file>
+  4. Antigravity CLI (agy):
+     - Tracked via native `title` callback in ~/.gemini/antigravity-cli/settings.json.
+     - Resumed via: agy --conversation <exact-conversation-id>
 
 Key Guarantees:
   - No prompt replay: Reopens conversation and waits for your input.

@@ -4,9 +4,11 @@
 //! little as it can: a pane that has its identity and its label costs one tmux call, or two when
 //! the shell has to be asked of the server.
 
+use crate::agent;
 use crate::error::{Error, Result, fail};
 use crate::paths::{self, cannot_read};
 use crate::process::{Spawn, exec_with_env, executable, spawn};
+pub use crate::text::truthy;
 use crate::text::{clean_label, is_printable, py_strip, strftime, uuid4_hex};
 use crate::tmux::{SEP, Tmux};
 use serde_json::Value;
@@ -16,10 +18,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// The program that reopens each kind of application's saved session; the session follows.
-pub const APP_COMMANDS: [(&str, &[&str]); 4] = [
+pub const APP_COMMANDS: [(&str, &[&str]); 5] = [
     ("claude", &["claude", "--resume"]),
     ("codex", &["codex", "resume"]),
     ("omp", &["omp", "--resume"]),
+    ("agy", &["agy", "--conversation"]),
     ("nvim", &["nvim", "-S"]),
 ];
 
@@ -387,18 +390,6 @@ enum Recovery {
     },
 }
 
-/// Python's truthiness of a JSON value.
-pub fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number.as_f64() != Some(0.0),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(fields) => !fields.is_empty(),
-    }
-}
-
 /// Reopen exactly the saved conversation, or explain why that is not possible; never guess.
 fn plan_recovery(record: &Value) -> Recovery {
     let Some(app) = record
@@ -415,14 +406,11 @@ fn plan_recovery(record: &Value) -> Recovery {
         );
     }
     let (kind, token) = (text_of(app, "kind"), text_of(app, "id"));
-    let command = APP_COMMANDS
-        .iter()
-        .find(|(name, _)| *name == kind)
-        .filter(|_| !token.is_empty() && !token.starts_with('-'));
-    let Some((_, command)) = command else {
+    let spec = agent::by_id(kind).filter(|_| !token.is_empty() && !token.starts_with('-'));
+    let Some(spec) = spec else {
         return Recovery::Attention("Missing or invalid exact recovery identity".to_string());
     };
-    if matches!(kind, "nvim" | "omp") && token.starts_with('/') && !Path::new(token).is_file() {
+    if spec.checks_session_file && token.starts_with('/') && !Path::new(token).is_file() {
         return Recovery::Attention(format!("Saved session file no longer exists: {token}"));
     }
     let cwd = [text_of(app, "cwd"), text_of(record, "cwd")]
@@ -431,7 +419,8 @@ fn plan_recovery(record: &Value) -> Recovery {
         .map(PathBuf::from);
     Recovery::Reopen {
         kind: kind.to_string(),
-        argv: command
+        argv: spec
+            .resume_argv
             .iter()
             .copied()
             .chain([token])
@@ -458,6 +447,7 @@ fn reopen_app(record: &Value) {
                 argv,
                 cwd,
                 inherit_stdio: true,
+                foreground_tty: true,
                 ..Spawn::default()
             });
             drop(interrupts);

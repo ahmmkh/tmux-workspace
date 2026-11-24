@@ -1,6 +1,7 @@
 //! What the hook knows about processes: the table, what an executable is, and which one owns a pane.
 //! Each lookup is one `ps` call, and only for the processes that matter.
 
+use crate::agent;
 use crate::error::{Error, Result, py_repr_str};
 use crate::host::Host;
 use crate::process::which;
@@ -109,11 +110,8 @@ pub fn process_table(host: &dyn Host, pid: Option<i32>, tty: Option<&str>) -> Re
 /// What the executable is. Use the executable, not occurrences of agent names in shell/tool arguments.
 pub fn process_kind(host: &dyn Host, pid: i32, command: &str) -> Result<Option<&'static str>> {
     let name = command.rsplit('/').next().unwrap_or(command);
-    if let Some(agent) = ["claude", "codex", "omp", "nvim"]
-        .into_iter()
-        .find(|agent| *agent == name)
-    {
-        return Ok(Some(agent));
+    if let Some(spec) = agent::by_id(name) {
+        return Ok(Some(spec.id));
     }
     if realpath(command).contains(CLAUDE_VERSIONS) {
         return Ok(Some("claude"));
@@ -207,21 +205,37 @@ pub fn owner(
     if group != foreground || py_int(group)? <= 0 {
         return Ok(None);
     }
-    let flags = args.iter().skip(1).map(String::as_str);
-    let one_shot: &[&str] = match kind {
-        "claude" => &["-p", "--print"],
-        "omp" => &["-p", "--print", "--mode", "--no-session"],
-        _ => &[],
-    };
-    if flags.clone().any(|arg| one_shot.contains(&arg)) {
-        return Ok(None);
-    }
-    if kind == "codex"
-        && args.get(1).is_some_and(|arg| {
-            ["exec", "e", "review", "app-server", "mcp-server", "debug"].contains(&arg.as_str())
-        })
-    {
-        return Ok(None);
+    if let Some(spec) = agent::by_id(kind) {
+        let rest = args.get(1..).unwrap_or_default();
+        if rest.iter().any(|arg| {
+            spec.one_shot_flags.iter().any(|flag| {
+                arg == flag
+                    || (flag.starts_with("--")
+                        && arg.starts_with(flag)
+                        && arg.as_bytes().get(flag.len()) == Some(&b'='))
+            })
+        }) {
+            return Ok(None);
+        }
+        if !spec.non_interactive_subcommands.is_empty() {
+            let mut skip_next = false;
+            for arg in rest {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    if spec.value_flags.contains(&arg.as_str()) {
+                        skip_next = true;
+                    }
+                    continue;
+                }
+                if spec.non_interactive_subcommands.contains(&arg.as_str()) {
+                    return Ok(None);
+                }
+                break;
+            }
+        }
     }
     let birth = host.run(&ps(&["-p", &pid.to_string(), "-o", "lstart="]))?;
     Ok((!birth.is_empty()).then_some((pid, birth)))
@@ -467,6 +481,28 @@ mod tests {
             assert_eq!(ok(&format!("codex {sub}"), "codex"), None, "{sub}");
         }
         assert!(ok("codex", "codex").is_some());
+        assert!(ok("agy", "agy").is_some());
+        assert!(ok("agy --conversation conv-123", "agy").is_some());
+        for flag in ["-p", "--print", "--prompt", "--bg-updater", "--prompt=hi"] {
+            assert_eq!(ok(&format!("agy {flag}"), "agy"), None, "{flag}");
+        }
+        for sub in [
+            "acp",
+            "agent",
+            "agents",
+            "changelog",
+            "help",
+            "install",
+            "mcp",
+            "mic-serve",
+            "models",
+            "plugin",
+            "plugins",
+            "remote-control",
+            "update",
+        ] {
+            assert_eq!(ok(&format!("agy {sub}"), "agy"), None, "{sub}");
+        }
         // The kind has to be the asked one.
         let agent = Proc {
             args: "omp".into(),

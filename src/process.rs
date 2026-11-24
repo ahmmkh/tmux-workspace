@@ -28,6 +28,11 @@ pub struct Spawn {
     /// Give the child our stdout and stderr (and our stdin, when `stdin` is not set), for
     /// programs that talk to the terminal. Nothing is captured then.
     pub inherit_stdio: bool,
+    /// Extra environment variables to set on the child process.
+    pub env: Vec<(String, String)>,
+    /// When stdin is a terminal, put the child in its own foreground process group (`tcsetpgrp`)
+    /// for the duration of the wait so tmux sees the child as `pane_current_command`.
+    pub foreground_tty: bool,
 }
 
 /// What a finished child left behind. `status` is the exit code, or minus the signal number.
@@ -43,6 +48,51 @@ enum Stream {
     Err,
 }
 
+/// Temporarily hands the controlling terminal's foreground process group to a child and
+/// unconditionally reclaims it (and restores `SIGTTOU`/`SIGTTIN`) on drop.
+struct FgGuard {
+    own_pgrp: libc::pid_t,
+    old_ttou: libc::sighandler_t,
+    old_ttin: libc::sighandler_t,
+}
+
+impl FgGuard {
+    fn hand_to(child_pid: u32, own_pgrp: libc::pid_t) -> Self {
+        let child_pgrp = child_pid as libc::pid_t;
+        // SAFETY: ignoring SIGTTOU/SIGTTIN around tcsetpgrp prevents this parent process from
+        // being stopped while transferring or reclaiming the foreground process group.
+        let old_ttou = unsafe { libc::signal(libc::SIGTTOU, libc::SIG_IGN) };
+        let old_ttin = unsafe { libc::signal(libc::SIGTTIN, libc::SIG_IGN) };
+        unsafe {
+            let _ = libc::setpgid(child_pgrp, child_pgrp);
+            let _ = libc::tcsetpgrp(0, child_pgrp);
+            // If the child attempted terminal I/O before tcsetpgrp completed, resume it.
+            let _ = libc::kill(-child_pgrp, libc::SIGCONT);
+        }
+        Self {
+            own_pgrp,
+            old_ttou,
+            old_ttin,
+        }
+    }
+}
+
+impl Drop for FgGuard {
+    fn drop(&mut self) {
+        // SAFETY: reclaim the controlling terminal while SIGTTOU is still ignored, then restore
+        // the previous signal dispositions.
+        unsafe {
+            let _ = libc::tcsetpgrp(0, self.own_pgrp);
+            if self.old_ttou != libc::SIG_ERR {
+                let _ = libc::signal(libc::SIGTTOU, self.old_ttou);
+            }
+            if self.old_ttin != libc::SIG_ERR {
+                let _ = libc::signal(libc::SIGTTIN, self.old_ttin);
+            }
+        }
+    }
+}
+
 /// Run a child to completion. The start is traced (see `TMUX_WORKSPACE_TRACE`).
 pub fn spawn(spec: &Spawn) -> Result<Output> {
     let Some((program, args)) = spec.argv.split_first() else {
@@ -53,6 +103,9 @@ pub fn spawn(spec: &Spawn) -> Result<Output> {
     command.args(args);
     if let Some(dir) = &spec.cwd {
         command.current_dir(dir);
+    }
+    if !spec.env.is_empty() {
+        command.envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     }
     command.stdin(match (&spec.stdin, spec.inherit_stdio) {
         (Some(_), _) => Stdio::piped(),
@@ -65,7 +118,14 @@ pub fn spawn(spec: &Spawn) -> Result<Output> {
         Stdio::piped
     };
     command.stdout(capture()).stderr(capture());
+    // SAFETY: `isatty` and `getpgrp` only inspect fd 0 and our process group id.
+    let own_pgrp = unsafe { libc::getpgrp() };
+    let use_fg = spec.foreground_tty && unsafe { libc::isatty(0) } == 1 && own_pgrp > 0;
+    if use_fg {
+        command.process_group(0);
+    }
     let mut child = command.spawn()?;
+    let _fg_guard = use_fg.then(|| FgGuard::hand_to(child.id(), own_pgrp));
     let deadline = spec.timeout.map(|limit| Instant::now() + limit);
     let timed_out = || Error::Msg(format!("timed out: {program}"));
 

@@ -323,6 +323,23 @@ pub fn ljust(s: &str, width: usize) -> String {
     format!("{s}{}", " ".repeat(width.saturating_sub(len)))
 }
 
+/// Python truthiness of a JSON value.
+pub fn truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(flag) => *flag,
+        serde_json::Value::Number(number) => number.as_f64() != Some(0.0),
+        serde_json::Value::String(text) => !text.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(fields) => !fields.is_empty(),
+    }
+}
+
+/// Python truthiness of an optional JSON value.
+pub fn truthy_opt(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(truthy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

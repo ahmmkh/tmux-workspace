@@ -1,6 +1,6 @@
 [package]
 name = "tmux-workspace"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Personal tmux controls and private, allowlisted workspace recovery"
@@ -20,10 +20,15 @@ testing = []
 
 [dependencies]
 libc = "0.2"
+regex = "1"
 # Codex identity reads Codex's state_*.sqlite.
 rusqlite = { version = "0.41", features = ["bundled"] }
 # float_roundtrip: parse floats exactly like Python, so re-written JSON keeps its numbers.
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+unicode-normalization = "0.1"
+unicode-width = "0.2"
+# Pure-Rust HTTPS (rustls + ring + bundled webpki-roots): static musl-friendly, zero OpenSSL.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 
 [[test]]
 name = "cli"
@@ -58,11 +63,23 @@ name = "doctor"
 required-features = ["testing"]
 
 [[test]]
-name = "compare"
+name = "report"
 required-features = ["testing"]
 
 [[test]]
-name = "report"
+name = "dash"
+required-features = ["testing"]
+
+[[test]]
+name = "cleanup"
+required-features = ["testing"]
+
+[[test]]
+name = "ai"
+required-features = ["testing"]
+
+[[test]]
+name = "agent_status"
 required-features = ["testing"]
 
 [profile.release]

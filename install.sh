@@ -12,7 +12,6 @@
 set -euo pipefail
 
 TMUX_MIN=3.3
-PYTHON_MIN=3.9
 # rust-version in Cargo.toml: what building from source takes.
 RUST_MIN=1.89
 VERSION_RE='[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?'
@@ -27,7 +26,7 @@ Usage: install.sh [options]
 
   --deps            install missing tools (tmux, fzf, zoxide) with the package manager
   --projects DIR    the folder that holds your projects (otherwise you are asked once)
-  --agents          also register Claude Code, Codex, omp and Neovim integrations
+  --agents          also register Claude Code, Codex, omp, Antigravity CLI and Neovim integrations
   --no-shell        do not add the `work` command to ~/.zshrc, ~/.bashrc or fish
   --no-tmux-conf    do not link ~/.tmux.conf
   --yes, -y         answer yes: replace an existing ~/.tmux.conf (a backup is kept)
@@ -194,10 +193,6 @@ version_ge() {  # version_ge 3.4 3.3
 
 tmux_version() {
     tmux -V 2>/dev/null | sed -n 's/[^0-9]*\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1.\2/p'
-}
-
-python_version() {
-    python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true
 }
 
 release_version() { head -n 1 "$1/VERSION" | tr -d '[:space:]'; }  # of an unpacked release
@@ -671,7 +666,7 @@ pm_has() {  # pm_has TOOL: the package manager here has a package of TOOL
 }
 
 package_of() {  # package_of TOOL: the name of its package here
-    if [ "$1" = python3 ] && [ "$PM" = pacman ]; then echo python; else echo "$1"; fi
+    echo "$1"
 }
 
 # Whether DIR holds tmux-workspace: a clone (with Cargo.toml) or an unpacked release (with VERSION).
@@ -1267,13 +1262,6 @@ check_requirements() {
     else
         missing="$missing tmux"
     fi
-    # Only the commands not ported from Python yet need it (stages 2 and 3 of the Rust port).
-    version=$(python_version)
-    if [ -n "$version" ] && version_ge "$version" "$PYTHON_MIN"; then
-        ok "python3 $version"
-    else
-        say warn "python3 $PYTHON_MIN+ not found: dash, ai and cleanup need it until they are ported"
-    fi
     local optional='' recommended='' upgrade=''
     for tool in fzf zoxide git sesh lazygit; do
         if has "$tool"; then ok "$tool"; else optional="$optional $tool"; fi
@@ -1368,6 +1356,7 @@ agent_names() {  # the agents that `integrations install` registers here
     if [ -d "$HOME/.claude" ]; then names='Claude Code'; fi
     if [ -d "$(codex_home)" ]; then names="${names:+$names, }Codex"; fi
     if [ -d "$HOME/.omp" ]; then names="${names:+$names, }omp"; fi
+    if [ -d "$HOME/.gemini/antigravity-cli" ]; then names="${names:+$names, }Antigravity CLI"; fi
     if [ -d "$HOME/.config/nvim" ]; then names="${names:+$names, }Neovim"; fi
     if [ "$(uname -s)" = Darwin ]; then names="${names:+$names, }iTerm2 profile"; fi
     printf '%s\n' "${names:-none found}"
@@ -1392,7 +1381,6 @@ where_to_get() {  # where_to_get TOOL: for a tool no package here installs
         lazygit) echo github.com/jesseduffield/lazygit ;;
         sesh) echo github.com/joshmedeski/sesh ;;
         git) echo git-scm.com ;;
-        python3) echo python.org ;;
         *) install_command "$1" ;;
     esac
 }
@@ -1404,7 +1392,6 @@ offer() {
     case $tool in
         fzf) why='fuzzy pickers' ;;
         zoxide) why="\`work\` finds folders you visit often" ;;
-        python3) why="dash, ai and cleanup need it${3:+ (this one is $3)}" name="python3 $PYTHON_MIN+" ;;
         procps) why='agent status and snapshots need its ps' ;;
         lazygit) why='Ctrl+a g popup' ;;
         sesh) why='picker fallback' ;;
@@ -1441,7 +1428,7 @@ tmux_usable() {  # tmux is there, and new enough
 }
 
 survey() {  # the rows of this machine, and the tools it has
-    local tool version python='' hint
+    local tool version hint
     for tool in tmux fzf zoxide git lazygit sesh; do
         if [ "$tool" = tmux ]; then
             if tmux_usable; then found "tmux $(tmux -V 2>/dev/null | sed 's/^tmux //')"; fi
@@ -1449,12 +1436,6 @@ survey() {  # the rows of this machine, and the tools it has
             found "$tool"
         fi
     done
-    version=$(python_version)
-    if [ -n "$version" ] && version_ge "$version" "$PYTHON_MIN"; then
-        found "python3 $version"
-    else
-        python="old $version"  # missing, or too old: a row
-    fi
     HEADER="$(os_label) $(uname -m) $G_DOT $(basename "${SHELL:-sh}") $G_DOT ${PM:-no package manager}"
     HEADER="$HEADER${FOUND:+ $G_DOT found: $FOUND}"
 
@@ -1477,11 +1458,11 @@ survey() {  # the rows of this machine, and the tools it has
     fi
 
     for tool in fzf zoxide; do has "$tool" || offer rec "$tool"; done
-    if [ -n "$python" ]; then offer rec python3 "${python#old }"; fi
     if [ "$PM" = apk ] && ! ps -p $$ -o pid=,tpgid=,lstart= >/dev/null 2>&1; then offer rec procps; fi
     if [ -d "$HOME/.claude" ]; then add_row rec 'Claude Code status' "found $(ui_path "$HOME/.claude")" 1 '' 1; fi
     if [ -d "$(codex_home)" ]; then add_row rec 'Codex status' "found $(ui_path "$(codex_home)")" 1 '' 1; fi
     if [ -d "$HOME/.omp" ]; then add_row rec 'omp status' "found $(ui_path "$HOME/.omp")" 1 '' 1; fi
+    if [ -d "$HOME/.gemini/antigravity-cli" ]; then add_row rec 'Antigravity CLI status' "found $(ui_path "$HOME/.gemini/antigravity-cli")" 1 '' 1; fi
     if [ -d "$HOME/.config/nvim" ]; then add_row rec 'Neovim status' "found $(ui_path "$HOME/.config/nvim")" 1 '' 1; fi
     if [ "$(uname -s)" = Darwin ]; then add_row rec 'iTerm2 profile' "a \"tmux workspace\" profile" 1 '' 1; fi
     for tool in lazygit sesh git; do has "$tool" || offer opt "$tool"; done
@@ -1978,10 +1959,10 @@ do_install() {
     fi
     step config "$(ui_path "$CONFIG_DIR/config.json")"
     migrate_config
-    if [ "$AGENTS" = 1 ] || { [ "$UPDATE" = 1 ] && integrations_installed; }; then
+    if [ "$AGENTS" = 1 ] || { { [ "$UPDATE" = 1 ] || [ -n "$UPDATE_FROM" ]; } && integrations_installed; }; then
         if [ "$UI" != plain ]; then step 'agent status' "$(agent_names)"; fi
         codex_hooks=$(cat "$(codex_home)/hooks.json" 2>/dev/null || true)
-        act agents "Claude Code, Codex, omp and Neovim where installed" \
+        act agents "Claude Code, Codex, omp, Antigravity CLI and Neovim where installed" \
             env TMUX_WORKSPACE_SHARE="$REPO" "$REPO/bin/tmux-workspace" integrations install
         if [ "$codex_hooks" != "$(cat "$(codex_home)/hooks.json" 2>/dev/null || true)" ]; then CODEX_CHANGED=1; fi
     fi
@@ -2037,10 +2018,6 @@ summary_install() {
     printf '%s' "$KEPT" | while IFS= read -r path; do
         ui "  Kept       your $(ui_path "$path"); rerun with --yes to replace it (a backup is kept)"
     done
-    version=$(python_version)
-    if [ -z "$version" ] || ! version_ge "$version" "$PYTHON_MIN"; then
-        ui "  Note       dash, ai and cleanup need python3 $PYTHON_MIN+"
-    fi
     ui ''
     ui "${C_BOLD}Next$C_OFF"
     ui "  1. Open a new terminal, or run: exec \$SHELL"

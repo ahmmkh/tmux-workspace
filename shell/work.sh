@@ -32,7 +32,7 @@ work() {
         shift
         "$HOME/.local/bin/tmux-workspace" update "$@"
         ;;
-    bug|idea)
+    bug|idea|feedback|report)
         "$HOME/.local/bin/tmux-workspace" "$@"
         ;;
     ./update)
@@ -49,6 +49,14 @@ work() {
     ./idea)
         shift
         "$HOME/.local/bin/tmux-workspace" open -- idea "$@"
+        ;;
+    ./feedback)
+        shift
+        "$HOME/.local/bin/tmux-workspace" open -- feedback "$@"
+        ;;
+    ./report)
+        shift
+        "$HOME/.local/bin/tmux-workspace" open -- report "$@"
         ;;
     *)
         "$HOME/.local/bin/tmux-workspace" open "$@"

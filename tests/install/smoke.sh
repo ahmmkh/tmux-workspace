@@ -61,15 +61,9 @@ checks() {
     [ "$(cat "$HOME/pane-start.status" 2>/dev/null)" = 0 ] || fail 'pane-start did not become TMUX_WORKSPACE_SHELL'
     [ -n "$(tmux display-message -p -t "$pane" '#{@workspace_id}')" ] || fail 'pane-start gave the pane no identity'
 
-    # Python is optional: dash needs it until it is ported, and says so without it.
-    if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
-        tmux-workspace dash --once --width 100 --height 20 | tee "$HOME/dash.log" | head -5
-        grep -q smoke "$HOME/dash.log" || fail 'the dashboard does not list the smoke workspace'
-    else
-        if tmux-workspace dash --once >"$HOME/dash.log" 2>&1; then fail 'dash ran without python3'; fi
-        grep -q 'needs python3 3.9+' "$HOME/dash.log" || { cat "$HOME/dash.log"; fail 'dash did not say it needs python3'; }
-        log 'no python3: dash says it needs it'
-    fi
+    # Native Rust dashboard runs unconditionally without Python.
+    tmux-workspace dash --once --width 100 --height 20 | tee "$HOME/dash.log" | head -5
+    grep -q smoke "$HOME/dash.log" || fail 'the dashboard does not list the smoke workspace'
 
     # Outside tmux, work creates the workspace and then tries to attach, which needs a terminal.
     bash -ic 'work demo-project' </dev/null >/dev/null 2>&1 || true

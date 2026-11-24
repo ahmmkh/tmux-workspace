@@ -20,7 +20,9 @@ use std::path::{Component, Path, PathBuf};
 pub const TMUX_MIN: (u32, u32) = (3, 3);
 
 /// How far above the binary's directory `share_root` looks for `agent-status.conf`.
-const SHARE_LEVELS: usize = 3;
+/// Covers `bin/` (1), `target/debug/` (2), `target/debug/deps/` (3), and Cargo's newer
+/// `target/[<triple>/]debug/build/<pkg>/<hash>/out/` layout (6-7).
+const SHARE_LEVELS: usize = 7;
 
 /// Everything the paths depend on, so a test can supply it instead of the real environment.
 #[derive(Clone, Debug)]
@@ -231,6 +233,16 @@ pub fn expand_user(text: &str) -> PathBuf {
 
 pub fn state_dir() -> PathBuf {
     Locations::current().state_dir()
+}
+
+/// Codex's config directory: `$CODEX_HOME` when set and non-empty, else `~/.codex`.
+pub fn codex_home(home: &Path) -> PathBuf {
+    non_empty(std::env::var_os("CODEX_HOME")).map_or_else(|| home.join(".codex"), PathBuf::from)
+}
+
+/// Antigravity CLI's config directory: `~/.gemini/antigravity-cli`.
+pub fn agy_dir(home: &Path) -> PathBuf {
+    home.join(".gemini/antigravity-cli")
 }
 
 /// Where the shipped files are. `TMUX_WORKSPACE_SHARE`, else the nearest folder above the running
@@ -843,12 +855,14 @@ mod tests {
                 "bin/tmux-workspace",
                 "target/debug/tmux-workspace",
                 "target/debug/deps/tmux_workspace-1a2b",
+                "target/debug/build/tmux-workspace/5333cecb16c49c09/out/tmux_workspace",
             ],
         );
         for exe in [
             "bin/tmux-workspace",
             "target/debug/tmux-workspace",
             "target/debug/deps/tmux_workspace-1a2b",
+            "target/debug/build/tmux-workspace/5333cecb16c49c09/out/tmux_workspace",
         ] {
             let found = share_root_from(None, Some(dir.path().join(exe)));
             assert_eq!(found, dir.path(), "from {exe}");
@@ -865,11 +879,14 @@ mod tests {
     }
 
     #[test]
-    fn share_root_gives_up_after_three_levels() {
+    fn share_root_gives_up_after_share_levels() {
         let dir = TempDir::new();
-        install(dir.path(), &["a/b/c/d/tmux-workspace"]);
-        let exe = dir.path().join("a/b/c/d/tmux-workspace");
-        assert_eq!(share_root_from(None, Some(exe)), dir.path().join("a/b/c/d"));
+        install(dir.path(), &["a/b/c/d/e/f/g/h/tmux-workspace"]);
+        let exe = dir.path().join("a/b/c/d/e/f/g/h/tmux-workspace");
+        assert_eq!(
+            share_root_from(None, Some(exe)),
+            dir.path().join("a/b/c/d/e/f/g/h")
+        );
     }
 
     #[test]

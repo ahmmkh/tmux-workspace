@@ -30,8 +30,11 @@ const OPEN_WAIT: Duration = Duration::from_secs(3);
 /// How long the clipboard's tool is waited for.
 const CLIP_WAIT: Duration = Duration::from_secs(5);
 
-/// How many lines of errors.log a bug report holds.
+/// How many lines of errors.log a bug report holds after collapsing consecutive duplicates.
 const LAST_ERRORS: usize = 10;
+
+/// How many raw trailing lines of errors.log are inspected when collapsing bursts.
+const RAW_ERROR_WINDOW: usize = 50;
 
 /// What is asked before the browser opens.
 const QUESTION: &str = "Open a GitHub issue with this? [Y/n]";
@@ -56,17 +59,71 @@ fn on_a_terminal() -> bool {
     unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }
 }
 
-/// `bug [--print]` and `idea [--print]`.
+/// `bug [--print]`, `idea [--print]`, and `feedback [--print]`.
 pub fn main(kind: Kind, args: &[String]) -> Result<i32> {
     let print_only = match args {
         [] => false,
         [flag] if flag == "--print" => true,
         _ => {
-            let name = if kind == Kind::Bug { "bug" } else { "idea" };
+            let name = kind.command_name();
             let _ = writeln!(std::io::stderr(), "Usage: tmux-workspace {name} [--print]");
             return Ok(2);
         }
     };
+    run_kind(kind, print_only)
+}
+
+/// Interactive classification gate: `report [--print]` asks whether the user is filing a bug,
+/// feature/idea, or general feedback before gathering diagnostics or opening a browser.
+pub fn report(args: &[String]) -> Result<i32> {
+    let print_only = match args {
+        [] => false,
+        [flag] if flag == "--print" => true,
+        _ => {
+            let _ = writeln!(std::io::stderr(), "Usage: tmux-workspace report [--print]");
+            return Ok(2);
+        }
+    };
+    if !on_a_terminal() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "Usage: tmux-workspace bug|idea|feedback [--print]"
+        );
+        return Ok(2);
+    }
+    let Some(kind) = ask_kind() else {
+        say("Nothing was opened or sent.\n");
+        return Ok(0);
+    };
+    run_kind(kind, print_only)
+}
+
+/// Ask which kind of report the user wants to send. `None` cancels.
+fn ask_kind() -> Option<Kind> {
+    say("What would you like to send?\n\
+  1. Bug report        (includes anonymized environment, doctor & last errors)\n\
+  2. Feature / idea    (includes anonymized environment only)\n\
+  3. General feedback  (includes anonymized environment only)\n\
+  q. Cancel\n\n\
+Choose [1/2/3/q]: ");
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    if !matches!(read, Ok(count) if count > 0) {
+        return None;
+    }
+    parse_kind_choice(&line)
+}
+
+fn parse_kind_choice(answer: &str) -> Option<Kind> {
+    match answer.trim().to_lowercase().as_str() {
+        "1" | "b" | "bug" => Some(Kind::Bug),
+        "2" | "i" | "idea" => Some(Kind::Idea),
+        "3" | "f" | "feedback" => Some(Kind::Feedback),
+        _ => None,
+    }
+}
+
+fn run_kind(kind: Kind, print_only: bool) -> Result<i32> {
     let tmux = Tmux::new();
     let report = build(kind, &tmux)?;
     let text = report.text();
@@ -266,7 +323,8 @@ fn diagnostics(tmux: &Tmux, anonymizer: &mut Anonymizer) -> Diagnostics {
         .chain(&found.warnings)
         .map(|line| anonymizer.apply(line))
         .collect();
-    let errors = errorlog::last(&state_dir(), LAST_ERRORS)
+    let raw_errors = errorlog::last(&state_dir(), RAW_ERROR_WINDOW);
+    let errors = collapse_errors(&raw_errors, LAST_ERRORS)
         .iter()
         .map(|line| anonymizer.apply(line))
         .collect();
@@ -275,6 +333,56 @@ fn diagnostics(tmux: &Tmux, anonymizer: &mut Anonymizer) -> Diagnostics {
         warnings: lines,
         errors,
     }
+}
+
+/// Split a leading `YYYY-MM-DD HH:MM ` timestamp from an `errors.log` line.
+fn split_error_timestamp(line: &str) -> (&str, &str) {
+    let bytes = line.as_bytes();
+    if bytes.len() > 17
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b' '
+        && bytes[13] == b':'
+        && bytes[16] == b' '
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes[11..13].iter().all(u8::is_ascii_digit)
+        && bytes[14..16].iter().all(u8::is_ascii_digit)
+    {
+        (&line[..17], &line[17..])
+    } else {
+        ("", line)
+    }
+}
+
+/// Collapse consecutive identical error messages (ignoring timestamps) into `<newest line> (×N)`,
+/// keeping the newest `limit` entries in chronological order.
+fn collapse_errors(lines: &[String], limit: usize) -> Vec<String> {
+    let mut collapsed: Vec<(String, &str, usize)> = Vec::new();
+    for line in lines {
+        let (_, body) = split_error_timestamp(line);
+        if let Some(last) = collapsed.last_mut()
+            && last.1 == body
+        {
+            last.0 = line.clone();
+            last.2 += 1;
+        } else {
+            collapsed.push((line.clone(), body, 1));
+        }
+    }
+    let start = collapsed.len().saturating_sub(limit);
+    collapsed
+        .into_iter()
+        .skip(start)
+        .map(|(newest, _, count)| {
+            if count > 1 {
+                format!("{newest} (×{count})")
+            } else {
+                newest
+            }
+        })
+        .collect()
 }
 
 /// `1 pane`, `12 panes`.
@@ -391,8 +499,6 @@ fn environment(tmux: &Tmux) -> Vec<String> {
     let tmux_version = Some(tmux.quiet(&["-V"]))
         .filter(|version| !version.is_empty())
         .unwrap_or_else(|| format!("tmux {}", mark(false)));
-    let python = first_version(&doctor::python3_version())
-        .map_or_else(|| mark(false).to_string(), |version| major_minor(&version));
     let tools: Vec<String> = ["fzf", "zoxide", "sesh", "lazygit"]
         .iter()
         .map(|tool| format!("{tool} {}", mark(which(tool).is_some())))
@@ -416,7 +522,7 @@ fn environment(tmux: &Tmux) -> Vec<String> {
             shell(tmux),
             terminal(tmux)
         ),
-        format!("python3 {python} · {}", tools.join(" · ")),
+        tools.join(" · "),
         format!("integrations: {}", integrations.join(" ")),
     ]
 }
@@ -515,11 +621,6 @@ fn first_version(text: &str) -> Option<String> {
         at = end;
     }
     None
-}
-
-/// `3.15` of `3.15.2`.
-fn major_minor(version: &str) -> String {
-    version.split('.').take(2).collect::<Vec<_>>().join(".")
 }
 
 /// The user's shell and its version: `zsh 5.9`.
@@ -627,8 +728,6 @@ mod tests {
         ] {
             assert_eq!(first_version(text).as_deref(), version, "{text:?}");
         }
-        assert_eq!(major_minor("3.15.2"), "3.15");
-        assert_eq!(major_minor("5.9"), "5.9");
     }
 
     #[test]
@@ -768,5 +867,47 @@ mod tests {
         assert_eq!(install_kind(dir.path()), "clone");
         std::fs::write(dir.path().join("VERSION"), "2.1.0\n").unwrap();
         assert_eq!(install_kind(dir.path()), "release");
+    }
+
+    #[test]
+    fn report_classification_gate_parses_all_choices_and_cancels() {
+        for (input, expected) in [
+            ("1\n", Some(Kind::Bug)),
+            ("b", Some(Kind::Bug)),
+            ("BUG", Some(Kind::Bug)),
+            ("2", Some(Kind::Idea)),
+            ("idea", Some(Kind::Idea)),
+            ("3", Some(Kind::Feedback)),
+            ("f", Some(Kind::Feedback)),
+            ("feedback", Some(Kind::Feedback)),
+            ("q", None),
+            ("", None),
+            ("4", None),
+        ] {
+            assert_eq!(parse_kind_choice(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn consecutive_identical_errors_collapse_and_preserve_older_distinct_errors() {
+        let mut lines = vec![
+            "2026-11-24 10:00 open: real earlier error".to_string(),
+            "2026-11-24 10:01 save: disk full".to_string(),
+        ];
+        for i in 0..37 {
+            lines.push(format!(
+                "2026-11-24 10:{:02} agent-hook: tmux display-message exited with status 1",
+                10 + (i % 40)
+            ));
+        }
+        let collapsed = collapse_errors(&lines, 10);
+        assert_eq!(collapsed.len(), 3);
+        assert_eq!(collapsed[0], "2026-11-24 10:00 open: real earlier error");
+        assert_eq!(collapsed[1], "2026-11-24 10:01 save: disk full");
+        assert!(
+            collapsed[2].ends_with("agent-hook: tmux display-message exited with status 1 (×37)"),
+            "{}",
+            collapsed[2]
+        );
     }
 }

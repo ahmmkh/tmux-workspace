@@ -2,12 +2,12 @@
 //! output, and it never starts a tmux server.
 
 use crate::error::Result;
-use crate::integrations::{codex_dir, hook_commands, old_mark, ours, render};
+use crate::integrations::{codex_dir, hook_commands, hooked_agy, old_mark, ours, render};
 use crate::model::option_json;
-use crate::paths::{TMUX_MIN, cannot_read, home, resolve, share_root, state_dir};
+use crate::paths::{self, TMUX_MIN, cannot_read, home, resolve, share_root, state_dir};
 use crate::process::{Spawn, spawn, which};
 use crate::pyjson::{Style, dumps, float_repr};
-use crate::text::{ljust, now, py_strip};
+use crate::text::{ljust, now, py_strip, truthy};
 use crate::tmux::{Fields, Tmux};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -177,10 +177,12 @@ fn run(report: &mut Report, tmux: &Tmux, machine: &Machine) -> Result<i32> {
         ""
     };
     report.say(&format!("      sounds: {sound}{silent}"));
-    report.say(&format!(
-        "      python3: {} (dash, ai and cleanup)",
-        python3_version()
-    ));
+    let auto_update = if crate::update::is_enabled() {
+        "on (daily)"
+    } else {
+        "off (work update --auto on)"
+    };
+    report.say(&format!("      auto-update: {auto_update}"));
     links(report, machine);
     binary_on_path(report);
     agent_integrations(report, machine);
@@ -346,40 +348,6 @@ fn helper(share: &Path, name: &str) -> String {
     .unwrap_or_default()
 }
 
-/// The version of the `python3` on `PATH`, which `dash`, `ai` and `cleanup` still run on.
-pub fn python3_version() -> String {
-    const NOT_FOUND: &str = "not found";
-    let Some(python) = which("python3") else {
-        return NOT_FOUND.into();
-    };
-    // macOS ships a stub at this path; running it without the developer tools offers to install them.
-    if cfg!(target_os = "macos") && python == Path::new("/usr/bin/python3") && !developer_tools() {
-        return NOT_FOUND.into();
-    }
-    let Ok(out) = spawn(&Spawn {
-        argv: vec![python.to_string_lossy().into_owned(), "--version".into()],
-        timeout: Some(TIMEOUT),
-        ..Spawn::default()
-    }) else {
-        return NOT_FOUND.into();
-    };
-    // Before Python 3.4 the version went to stderr.
-    let said = Some(py_strip(&out.stdout))
-        .filter(|text| !text.is_empty())
-        .unwrap_or(py_strip(&out.stderr));
-    or(said.strip_prefix("Python ").unwrap_or(said), "unknown").to_string()
-}
-
-/// Whether macOS has developer tools, so that its `python3` is more than a stub.
-fn developer_tools() -> bool {
-    spawn(&Spawn {
-        argv: vec!["xcode-select".into(), "-p".into()],
-        timeout: Some(TIMEOUT),
-        ..Spawn::default()
-    })
-    .is_ok_and(|out| out.status == 0)
-}
-
 /// The links the installer makes, each of which should lead into the share folder.
 fn links(report: &mut Report, machine: &Machine) {
     let home = &machine.home;
@@ -447,6 +415,9 @@ fn agent_integrations(report: &mut Report, machine: &Machine) {
         {
             registered.push(name);
         }
+    }
+    if hooked_agy(&paths::agy_dir(&machine.home).join("settings.json")) {
+        registered.push("Antigravity CLI");
     }
     if old {
         report.check(LABEL, false, "old Python hooks; run install.sh --agents");
@@ -574,18 +545,6 @@ fn codex_detail(raw: &str, now: f64) -> String {
     match (event.get("event"), at) {
         (Some(name), Some(at)) => format!("  {} {}s ago", py_str(name), (now - at) as i64),
         _ => UNREADABLE.into(),
-    }
-}
-
-/// Python truthiness of a JSON value.
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number.as_f64() != Some(0.0),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
     }
 }
 

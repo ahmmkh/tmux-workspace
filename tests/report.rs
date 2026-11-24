@@ -66,14 +66,14 @@ fn a_failing_foreground_command_logs_one_line_and_offers_a_report() {
     let out = scratch.bin(EXE).args(["update", "--now"]).output().unwrap();
     assert_eq!(
         text(&out.stderr),
-        "Workspace error: Usage: tmux-workspace update [--check]\nReport it: work bug\n"
+        "Workspace error: Usage: tmux-workspace update [--check | --auto [on|off|status]]\nReport it: work bug\n"
     );
     assert_eq!(out.status.code(), Some(1));
     let lines = log_lines(scratch.state_dir());
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(
         after_stamp(&lines[0]),
-        " update: Usage: tmux-workspace update [--check]"
+        " update: Usage: tmux-workspace update [--check | --auto [on|off|status]]"
     );
     assert!(
         !lines[0].contains("--now"),
@@ -432,7 +432,6 @@ fn print_shows_the_environment_the_doctor_and_the_last_errors_and_nothing_else()
     world.fakes.add("fzf", "exit 0");
     world.fakes.add("zoxide", "exit 0");
     world.fakes.add("lazygit", "exit 0");
-    world.fakes.add("python3", "echo 'Python 3.15.2'");
     world.fakes.add(
         "zsh",
         "case \"$1\" in --version) echo 'zsh 5.9 (arm-apple-darwin25.0)';; esac",
@@ -469,11 +468,11 @@ fn print_shows_the_environment_the_doctor_and_the_last_errors_and_nothing_else()
     );
     assert!(lines[2].contains(" · tmux 3."), "{}", lines[2]);
     assert!(lines[2].ends_with(" · zsh 5.9 · Ghostty"), "{}", lines[2]);
+    assert_eq!(lines[3], "fzf ✓ · zoxide ✓ · sesh ✗ · lazygit ✓");
     assert_eq!(
-        lines[3],
-        "python3 3.15 · fzf ✓ · zoxide ✓ · sesh ✗ · lazygit ✓"
+        lines[4],
+        "integrations: claude ✗ codex ✗ omp ✗ agy ✗ nvim ✗"
     );
-    assert_eq!(lines[4], "integrations: claude ✗ codex ✗ omp ✗ nvim ✗");
     assert_eq!(lines[5], "");
     assert_eq!(lines[6], "### Doctor");
     assert!(
@@ -536,7 +535,6 @@ fn an_empty_log_says_none() {
 #[test]
 fn names_that_are_numbers_or_programs_leave_the_report_as_it_is() {
     let world = World::new();
-    world.fakes.add("python3", "echo 'Python 3.15.2'");
     world.fakes.add(
         "zsh",
         "case \"$1\" in --version) echo 'zsh 5.9 (arm-apple-darwin25.0)';; esac",
@@ -573,11 +571,11 @@ fn names_that_are_numbers_or_programs_leave_the_report_as_it_is() {
         "{}",
         lines[2]
     );
+    assert_eq!(lines[3], "fzf ✗ · zoxide ✗ · sesh ✗ · lazygit ✗");
     assert_eq!(
-        lines[3],
-        "python3 3.15 · fzf ✗ · zoxide ✗ · sesh ✗ · lazygit ✗"
+        lines[4],
+        "integrations: claude ✗ codex ✗ omp ✗ agy ✗ nvim ✗"
     );
-    assert_eq!(lines[4], "integrations: claude ✗ codex ✗ omp ✗ nvim ✗");
     assert!(
         lines[7].starts_with("4 panes · ") && lines[7].ends_with(" warnings · 0 errors"),
         "{}",
@@ -704,10 +702,47 @@ fn an_idea_has_only_the_environment() {
         "{shown}"
     );
     assert!(
-        shown.contains("integrations: claude ✗ codex ✗ omp ✗ nvim ✗\n\nOpen this link"),
+        shown.contains("integrations: claude ✗ codex ✗ omp ✗ agy ✗ nvim ✗\n\nOpen this link"),
         "{shown}"
     );
     assert!(shown.contains("template=idea.yml&"), "{shown}");
+}
+
+#[test]
+fn feedback_prints_environment_only_and_uses_feedback_template() {
+    let world = World::new();
+    world.log(&["2026-11-06 01:12 open: x"]);
+    let out = quietly(world.command(&["feedback", "--print"]));
+    let shown = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        !shown.contains("### Doctor") && !shown.contains("errors"),
+        "{shown}"
+    );
+    assert!(shown.contains("template=feedback.yml&"), "{shown}");
+    assert!(shown.contains("title=%5BFeedback%5D%3A%20"), "{shown}");
+}
+
+#[test]
+fn report_without_a_terminal_exits_2_with_usage() {
+    let world = World::new();
+    let out = world.command(&["report"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains("Usage: tmux-workspace bug|idea|feedback [--print]"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn the_feedback_form_has_feedback_context_and_environment() {
+    let form = shipped(".github/ISSUE_TEMPLATE/feedback.yml");
+    assert!(form.contains("\nlabels: [feedback]\n"), "{form}");
+    assert!(form.contains("title: \"[Feedback]: \""), "{form}");
+    for field in ["id: feedback", "id: context", "id: environment"] {
+        assert!(form.contains(field), "{field} in {form}");
+    }
 }
 
 #[test]

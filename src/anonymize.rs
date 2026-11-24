@@ -171,12 +171,12 @@ const OWN: [&str; 14] = [
 /// Words that a report says of its own, and the names of programs that a tab is called after. None of
 /// them is a secret, and to map one would change the report: a tab called `zsh` would make the shell of
 /// the environment `tab-1`, a session called `errors` the count of them.
-const PUBLIC_WORDS: [&str; 52] = [
+const PUBLIC_WORDS: [&str; 53] = [
     "zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "pwsh", "python",
-    "python3", "node", "ruby", "claude", "codex", "omp", "nvim", "vim", "vi", "nano", "emacs",
-    "less", "htop", "top", "git", "ssh", "docker", "make", "cargo", "npm", "lazygit", "fzf",
-    "zoxide", "sesh", "yazi", "tmux", "macOS", "Linux", "release", "clone", "unknown", "none",
-    "pane", "panes", "warning", "warnings", "error", "errors", "doctor", "install",
+    "python3", "node", "ruby", "claude", "codex", "omp", "agy", "nvim", "vim", "vi", "nano",
+    "emacs", "less", "htop", "top", "git", "ssh", "docker", "make", "cargo", "npm", "lazygit",
+    "fzf", "zoxide", "sesh", "yazi", "tmux", "macOS", "Linux", "release", "clone", "unknown",
+    "none", "pane", "panes", "warning", "warnings", "error", "errors", "doctor", "install",
 ];
 
 /// What the numbered replacements are called.

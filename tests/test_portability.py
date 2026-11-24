@@ -1,45 +1,11 @@
-"""Platform helpers and other behaviour that differs between machines. The config lookup is tested in Rust."""
-import json
-import os
+"""Platform helpers and shell integration that differ between machines."""
 import shutil
 import subprocess
 from pathlib import Path
-import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'legacy' / 'lib'))
-import ai_core
-import paths
-
-
-class Config(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.dict(os.environ, {'HOME': str(self.tmp), 'XDG_CONFIG_HOME': str(self.tmp / 'xdg')}))
-        os.environ.pop('TMUX_WORKSPACE_PROJECTS', None)
-        self.repo = self.tmp / 'repo'
-        self.repo.mkdir()
-        (self.repo / 'config.example.json').write_text('{"projects_dir": "~/Projects"}')
-        self.enterContext(patch.object(paths, 'REPO', self.repo))
-
-    def write(self, path, value):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(value))
-        return path
-
-    def test_snapshot_loads_agent_hook_from_the_repo(self):
-        with patch.object(paths, 'REPO', ROOT):
-            self.assertEqual(paths.agent_hook_path(), ROOT / 'legacy' / 'integrations' / 'agent-hook.py')
-
-    def test_ai_tools_explain_an_unset_model(self):
-        self.write(self.tmp / 'xdg' / 'tmux-workspace' / 'config.json', {'model': ''})
-        ai_core.config.cache_clear()
-        self.addCleanup(ai_core.config.cache_clear)
-        with self.assertRaisesRegex(ai_core.AIError, 'Set "model" in .*config.json to use AI tools'):
-            ai_core.config()
 
 
 class Helpers(unittest.TestCase):
@@ -199,6 +165,9 @@ class ShellIntegration(unittest.TestCase):
                 self.assertEqual(self.work(shell, 'bug', '--print')[-1], 'bug --print')
                 self.assertEqual(self.work(shell, 'idea')[-1], 'idea')
                 self.assertEqual(self.work(shell, 'idea', '--print')[-1], 'idea --print')
+                self.assertEqual(self.work(shell, 'feedback')[-1], 'feedback')
+                self.assertEqual(self.work(shell, 'report')[-1], 'report')
+                self.assertEqual(self.work(shell, 'update', '--auto', 'on')[-1], 'update --auto on')
 
     def test_work_dot_slash_bug_and_idea_open_workspaces_of_those_names(self):
         for shell in ('bash', 'zsh', 'fish'):
@@ -210,6 +179,8 @@ class ShellIntegration(unittest.TestCase):
                 self.assertEqual(self.work(shell, './bug', 'x')[-1], 'open -- bug x')
                 self.assertEqual(self.work(shell, './idea')[-1], 'open -- idea')
                 self.assertEqual(self.work(shell, './idea', 'x')[-1], 'open -- idea x')
+                self.assertEqual(self.work(shell, './feedback')[-1], 'open -- feedback')
+                self.assertEqual(self.work(shell, './report')[-1], 'open -- report')
 
     def test_names_that_only_look_like_bug_and_idea_are_workspaces(self):
         for shell in ('bash', 'zsh', 'fish'):

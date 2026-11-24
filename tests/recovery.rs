@@ -479,10 +479,22 @@ fn an_app_that_fails_is_reported_and_no_other_conversation_is_substituted() {
 
 #[test]
 fn an_app_that_is_not_installed_needs_attention_and_the_shell_still_starts() {
-    let world = World::new(); // no fake `omp`
-    let (apps, out) = start_app(&world, json!({"kind": "omp", "id": "abc"}));
-    assert!(apps.is_empty());
+    let world = World::new(); // no fake `omp`; isolate PATH so a host-installed `omp` never leaks in
+    let snapshot = world.snapshot(world.record(json!({"kind": "omp", "id": "abc"})));
+    let isolated_path = format!(
+        "{}:/usr/bin:/bin",
+        world.fakes.dir.path().join("bin").display()
+    );
+    let out = world
+        .command(&["pane-start", &snapshot, UID])
+        .env("PATH", isolated_path)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = text(&out.stdout);
+    assert!(world.fakes.apps_log().is_empty());
     assert!(out.contains("Recovery needs attention: "), "{out}");
+    assert_eq!(world.fakes.shell_log().len(), 1);
 }
 
 #[test]
@@ -1571,4 +1583,81 @@ fn a_damaged_latest_snapshot_is_an_error_and_nothing_is_restored() {
             "{option}"
         );
     }
+}
+
+#[test]
+fn agy_reopens_with_exact_conversation_flag() {
+    let world = World::new();
+    world.fakes.app("agy", 0);
+    let (apps, out) = start_app(
+        &world,
+        json!({"kind": "agy", "id": "c5ccc94d-bdaf-4613-8cde-fcb649aede6e"}),
+    );
+    assert_eq!(apps.len(), 1);
+    assert!(
+        apps[0].ends_with("|--conversation c5ccc94d-bdaf-4613-8cde-fcb649aede6e"),
+        "{apps:?}"
+    );
+    assert!(
+        out.contains("Reopening agy for pane agent (no prompt replay).\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn save_succeeds_when_pane_title_contains_control_characters() {
+    let saved = Saved::new();
+    let pane = saved.scratch.expand("alpha:one", "#{pane_id}");
+    saved.scratch.tmux(&[
+        "select-pane",
+        "-t",
+        &pane,
+        "-T",
+        "weird\x1ftitle\r\nwith\u{2028}controls",
+    ]);
+    let out = saved.command(&["save"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(saved.state().join("latest.json").is_file());
+}
+
+#[test]
+fn restored_pane_reports_resumed_app_as_foreground_command() {
+    let world = World::new();
+    let fake_agy = world.fakes.dir.path().join("bin").join("agy");
+    Fakes::write(&fake_agy, "exec sleep 30");
+    let snapshot = world.snapshot(world.record(json!({"kind": "agy", "id": "conv-fg"})));
+    let cmd = format!(
+        "PATH='{}' TMUX_WORKSPACE_SHELL='{}' '{}' pane-start '{}' '{}'",
+        world.fakes.bin(),
+        world.fakes.shell("sh"),
+        EXE,
+        snapshot,
+        UID,
+    );
+    let pane = world.scratch.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "alpha:",
+        "-n",
+        "fgtest",
+        &cmd,
+    ]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut current = String::new();
+    while Instant::now() < deadline {
+        current = world.scratch.expand(&pane, "#{pane_current_command}");
+        if current == "sleep" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        current, "sleep",
+        "resumed child should own the controlling tty foreground pgrp, not tmux-workspace"
+    );
+    let _ = world.scratch.tmux(&["kill-pane", "-t", &pane]);
 }

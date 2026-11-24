@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.2.0 — 2026-11-24
+
+Pure Rust from end to end (zero Python runtime dependency), Antigravity CLI (`agy`) support, opt-in daily background auto-update, and five reliability fixes.
+
+### Added
+
+- **Antigravity CLI (`agy`) support:** live status marks (`working`, `blocked`, `done`, `idle`), exact conversation recovery (`agy --conversation <id>`), post-exit staleness guard, `install.sh --agents` / `tmux-workspace integrations` registration via `~/.gemini/antigravity-cli/settings.json` (`title` hook), and `doctor` diagnostics.
+- **Opt-in background auto-update:** `work update --auto on|off|status` stores `"auto_update": true|false` in `config.json`. When enabled, autosave runs a rate-limited daily check (at most once per 24 hours, protected by a non-blocking lock), installs newer releases quietly with a single tmux status-line notice, and logs failures quietly to `errors.log`. `tmux-workspace doctor` reports the current auto-update status.
+- **Native Rust `dash`, `cleanup`, and `ai`:**
+  - `Ctrl+a A` (`tmux-workspace dash`) now renders directly with raw termios + ANSI truecolor/256-color/16-color output and zero curses/Python dependency.
+  - `Ctrl+a C` (`tmux-workspace cleanup`) runs natively in Rust with the same process-tree RSS estimation and atomic tmux status guard.
+  - `Ctrl+a a` (`tmux-workspace ai`) runs natively in Rust over pure-Rust HTTPS (`ureq` + `rustls` + `webpki-roots`), keeping every closed-set Jev validation, secret redaction, `O_NOFOLLOW` history check, and per-pane opt-in consent boundary.
+- **Interactive feedback/report chooser (`work report`, `work feedback`, `Ctrl+a F`):** `Ctrl+a F` now asks whether you are reporting a bug, suggesting an idea, or sharing general feedback (with a new `.github/ISSUE_TEMPLATE/feedback.yml` form) instead of assuming every press is a bug.
+
+### Fixed
+
+- **Codex `0.171.0` compatibility:** removed the `TMUX_PANE` shell guard in `integrations/codex-hooks.json`, added default-socket discovery for detached Codex app-server daemons, added spinner stripping and modern `<name> | <folder>` title resolution via read-only SQLite `threads.name` (never reading prompt titles), rejected stale resume arguments contradicted by the live title, and allowed mid-turn adoption for detached Codex panes.
+- **Snapshot `pane_title` control-char safety & error-log deduplication:** `pane_title` is queried on-demand only for Codex candidates so control characters in unrelated pane titles can never break workspace saves; repeated identical errors in `errors.log` collapse into `(×N)` in bug reports.
+- **Restored pane foreground process group:** reopened applications on workspace restore now receive their own controlling-terminal foreground process group (`tcsetpgrp`), so tmux reports the resumed app (not `tmux-workspace`) as `pane_current_command`.
+- **Status bar readability:** replaced the cryptic `Ctrl+a F: bug` hint with `C-a D health · F feedback` and expanded `status-right-length` to 120.
+
+### Changed
+
+- **Complete Python runtime retirement:** removed `legacy/`, `integrations/agent-hook.py`, `scripts/gen_help.py`, and all runtime Python checks from `install.sh`, `doctor`, bug reports, CI, and release archives. Every shipped command runs inside the single static `tmux-workspace` binary.
+- **Automatic v1 hook migration on upgrade:** piped upgrades from v1 automatically migrate existing v1 `agent-hook.py` hooks to `tmux-workspace agent-hook` and remove the old symlink.
+- **Modular Rust architecture:** introduced a centralized agent registry (`src/agent/`) and split large modules (`src/snapshot/`, `src/integrations/`, `src/pick/`).
+
 ## 2.1.0 — 2026-11-06
 
 A friendlier installer, and a way to report a bug or an idea from the tool itself.

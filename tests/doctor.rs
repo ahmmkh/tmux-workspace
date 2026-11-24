@@ -493,19 +493,18 @@ fn doctor_warns_when_the_binary_is_not_on_path_at_all() {
 }
 
 #[test]
-fn doctor_says_which_python3_the_helpers_would_use() {
+fn doctor_reports_auto_update_status() {
     let machine = Machine::new();
     let (_, out) = machine.doctor();
     assert!(
-        out.contains("      python3: not found (dash, ai and cleanup)\n"),
+        out.contains("      auto-update: off (work update --auto on)\n"),
         "{out}"
     );
-    machine.fakes.add("python3", "echo 'Python 3.11.2'");
+    let cfg_dir = machine.home.path().join(".config/tmux-workspace");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(cfg_dir.join("config.json"), r#"{"auto_update": true}"#).unwrap();
     let (_, out) = machine.doctor();
-    assert!(
-        out.contains("      python3: 3.11.2 (dash, ai and cleanup)\n"),
-        "{out}"
-    );
+    assert!(out.contains("      auto-update: on (daily)\n"), "{out}");
 }
 
 #[test]
